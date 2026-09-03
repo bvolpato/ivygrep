@@ -145,7 +145,8 @@ struct IndexedFile {
     chunks: Vec<PreparedIndexedChunk>,
     included_paths: Vec<PathBuf>,
     file_edges: Vec<crate::context_graph::FileEdge>,
-    unresolved_dependencies: Vec<crate::context_graph::UnresolvedDependency>,
+    unresolved_dependencies: Vec<crate::context_graph::DependencySpec>,
+    resolved_dependencies: Vec<(crate::context_graph::DependencySpec, PathBuf)>,
     manifest_resolution_signature: Option<String>,
 }
 
@@ -225,6 +226,7 @@ fn spawn_index_batch_producer(
                                 included_paths: Vec::new(),
                                 file_edges: Vec::new(),
                                 unresolved_dependencies: Vec::new(),
+                                resolved_dependencies: Vec::new(),
                                 manifest_resolution_signature: None,
                             })
                         };
@@ -300,6 +302,7 @@ fn spawn_index_batch_producer(
                             && included_paths.is_empty()
                             && file_graph.edges.is_empty()
                             && file_graph.unresolved_dependencies.is_empty()
+                            && file_graph.resolved_dependencies.is_empty()
                         {
                             return Ok(empty_incremental_file(rel_path));
                         }
@@ -309,6 +312,7 @@ fn spawn_index_batch_producer(
                             included_paths,
                             file_edges: file_graph.edges,
                             unresolved_dependencies: file_graph.unresolved_dependencies,
+                            resolved_dependencies: file_graph.resolved_dependencies,
                             manifest_resolution_signature:
                                 crate::context_graph::manifest_resolution_signature(
                                     rel_path, &content,
@@ -1436,6 +1440,11 @@ fn index_workspace_inner(
             for edge in indexed_file.file_edges {
                 persist_or_stop!(persist_statements.insert_file_edge(&edge));
             }
+            for (dependency, target) in indexed_file.resolved_dependencies {
+                persist_or_stop!(
+                    persist_statements.insert_resolved_dependency(&dependency, &target)
+                );
+            }
             for dependency in indexed_file.unresolved_dependencies {
                 persist_or_stop!(persist_statements.insert_unresolved_dependency(&dependency));
             }
@@ -1882,17 +1891,22 @@ fn add_file_edge_dependents(
     let restored_from_base = clear_overlay_paths
         .iter()
         .map(|path| index_path_string(path))
+        .filter(|path| current_snapshot.files.contains_key(path))
         .collect::<HashSet<_>>();
     let changed = diff
         .added_or_modified
         .iter()
         .map(|(path, _)| index_path_string(path))
         .chain(diff.deleted.iter().map(|path| index_path_string(path)))
-        .chain(restored_from_base.iter().cloned())
         .collect::<HashSet<_>>();
     let deleted = diff
         .deleted
         .iter()
+        .chain(clear_overlay_paths.iter().filter(|path| {
+            !current_snapshot
+                .files
+                .contains_key(&index_path_string(path))
+        }))
         .map(|path| index_path_string(path))
         .collect::<HashSet<_>>();
     let added_or_modified = diff
@@ -1930,7 +1944,6 @@ fn add_file_edge_dependents(
     let mut persisted_paths = HashSet::new();
     let mut old_manifest_signatures = HashMap::new();
     let mut owners = HashSet::new();
-    let mut unresolved = BTreeSet::new();
     for sqlite_path in &sqlite_paths {
         if !sqlite_path.is_file() {
             continue;
@@ -1984,7 +1997,7 @@ fn add_file_edge_dependents(
         if sqlite_table_exists(&conn, "file_edges") {
             let Ok(mut statement) = conn.prepare_cached(
                 "SELECT source_path FROM file_edges
-                 WHERE target_path = ?1 AND kind IN (?2, ?3)",
+                 WHERE target_path = ?1 AND kind IN (?2, ?3, ?4)",
             ) else {
                 continue;
             };
@@ -1994,35 +2007,13 @@ fn add_file_edge_dependents(
                         path,
                         crate::context_graph::FileEdgeKind::Dependency as i64,
                         crate::context_graph::FileEdgeKind::Config as i64,
+                        crate::context_graph::FileEdgeKind::Documentation as i64,
                     ],
                     |row| row.get::<_, String>(0),
                 ) else {
                     continue;
                 };
                 owners.extend(rows.filter_map(Result::ok));
-            }
-        }
-
-        if sqlite_table_exists(&conn, "unresolved_file_dependencies") {
-            let Ok(mut statement) = conn.prepare_cached(
-                "SELECT source_path, language, spec
-                 FROM unresolved_file_dependencies
-                 WHERE lookup_key = ?1
-                 ORDER BY source_path, language, spec",
-            ) else {
-                continue;
-            };
-            for lookup_key in &candidate_lookup_keys {
-                let Ok(rows) = statement.query_map([lookup_key], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                }) else {
-                    continue;
-                };
-                unresolved.extend(rows.filter_map(Result::ok));
             }
         }
     }
@@ -2073,21 +2064,88 @@ fn add_file_edge_dependents(
         .chain(restored_from_base.iter())
         .cloned()
         .collect::<HashSet<_>>();
-    if !new_targets.is_empty() {
-        for (source, language, spec) in unresolved {
+    if !new_targets.is_empty() || !restored_from_base.is_empty() {
+        let mut candidates = BTreeSet::new();
+        for sqlite_path in &sqlite_paths {
+            if !sqlite_path.is_file() {
+                continue;
+            }
+            let conn = Connection::open_with_flags(
+                sqlite_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let base_index = base_sqlite_path.as_ref() == Some(sqlite_path);
+            for (table, target_column) in [
+                ("unresolved_file_dependencies", "NULL"),
+                ("resolved_file_dependencies", "target_path"),
+            ] {
+                if !sqlite_table_exists(&conn, table) {
+                    continue;
+                }
+                // Lookup keys bound discovery to imports that could name a new path.
+                // Retain successful resolutions too: a new file can take precedence
+                // over a still-existing module directory or fallback source root.
+                for (column, values) in [
+                    (
+                        "lookup_key",
+                        if new_targets.is_empty() {
+                            Vec::new()
+                        } else {
+                            candidate_lookup_keys.iter().collect::<Vec<_>>()
+                        },
+                    ),
+                    ("source_path", restored_from_base.iter().collect::<Vec<_>>()),
+                ] {
+                    let mut statement = conn.prepare(&format!(
+                        "SELECT source_path, language, spec, {target_column}
+                         FROM {table} WHERE {column} = ?1"
+                    ))?;
+                    for value in values {
+                        let rows = statement.query_map([value], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                            ))
+                        })?;
+                        for row in rows {
+                            let candidate = row?;
+                            let source = &candidate.0;
+                            // A returning source delegates to the base; its old overlay
+                            // imports no longer describe the current contents.
+                            if base_index
+                                && overlay_shadowed.contains(source)
+                                && !restored_from_base.contains(source)
+                                || !base_index && restored_from_base.contains(source)
+                            {
+                                continue;
+                            }
+                            candidates.insert(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        for (source, language, spec, old_target) in candidates {
             if changed.contains(&source) || deleted.contains(&source) {
                 continue;
             }
-            let Some(target) = crate::context_graph::resolve_dependency_spec(
+            let target = crate::context_graph::resolve_dependency_spec(
                 &workspace.root,
                 Some(current_snapshot),
                 Path::new(&source),
                 &language,
                 &spec,
-            ) else {
-                continue;
-            };
-            if new_targets.contains(&index_path_string(&target)) {
+            )
+            .map(|path| index_path_string(&path));
+            if target != old_target
+                && (restored_from_base.contains(&source)
+                    || target
+                        .as_ref()
+                        .is_some_and(|path| new_targets.contains(path)))
+            {
                 owners.insert(source);
             }
         }
@@ -2807,6 +2865,10 @@ fn remove_file_chunks(
         params![rel_str, crate::context_graph::FileEdgeKind::Test as i64],
     )?;
     sqlite.execute(
+        "DELETE FROM resolved_file_dependencies WHERE source_path = ?1",
+        params![rel_str],
+    )?;
+    sqlite.execute(
         "DELETE FROM unresolved_file_dependencies WHERE source_path = ?1",
         params![rel_str],
     )?;
@@ -3190,6 +3252,7 @@ struct PersistStatements<'conn> {
     chunk_insert: Statement<'conn>,
     dependency_insert: Statement<'conn>,
     file_edge_insert: Statement<'conn>,
+    resolved_dependency_insert: Statement<'conn>,
     unresolved_dependency_insert: Statement<'conn>,
     manifest_resolution_signature_insert: Statement<'conn>,
     symbol_rows: Vec<crate::symbols::SymbolRow>,
@@ -3223,6 +3286,11 @@ impl<'conn> PersistStatements<'conn> {
                     source_path, target_path, kind
                 ) VALUES (?1, ?2, ?3)",
             )?,
+            resolved_dependency_insert: conn.prepare(
+                "INSERT OR IGNORE INTO resolved_file_dependencies (
+                    source_path, language, spec, lookup_key, target_path
+                ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?,
             unresolved_dependency_insert: conn.prepare(
                 "INSERT OR IGNORE INTO unresolved_file_dependencies (
                     source_path, language, spec, lookup_key
@@ -3250,9 +3318,24 @@ impl<'conn> PersistStatements<'conn> {
         crate::context_graph::persist_file_edge(&mut self.file_edge_insert, edge)
     }
 
+    fn insert_resolved_dependency(
+        &mut self,
+        dependency: &crate::context_graph::DependencySpec,
+        target: &Path,
+    ) -> Result<()> {
+        self.resolved_dependency_insert.execute(params![
+            index_path_string(&dependency.source_path),
+            &dependency.language,
+            &dependency.spec,
+            &dependency.lookup_key,
+            index_path_string(target),
+        ])?;
+        Ok(())
+    }
+
     fn insert_unresolved_dependency(
         &mut self,
-        dependency: &crate::context_graph::UnresolvedDependency,
+        dependency: &crate::context_graph::DependencySpec,
     ) -> Result<()> {
         self.unresolved_dependency_insert.execute(params![
             index_path_string(&dependency.source_path),
@@ -4939,6 +5022,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unresolved, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn resolved_dependencies_follow_target_precedence_changes() {
+        for (source, content, fallback, preferred) in [
+            (
+                "entry.ts",
+                "import { work } from './widget';\nexport function run() { work(); }\n",
+                "widget/index.ts",
+                "widget.ts",
+            ),
+            (
+                "entry.py",
+                "import widget\ndef run(): return widget.work()\n",
+                "widget/__init__.py",
+                "widget.py",
+            ),
+            (
+                "entry.ts",
+                "import { work } from './';\nexport function run() { work(); }\n",
+                "index.js",
+                "index.ts",
+            ),
+        ] {
+            let root = tempdir().unwrap();
+            let home = tempdir().unwrap();
+            fs::create_dir_all(root.path().join("widget")).unwrap();
+            fs::write(root.path().join(source), content).unwrap();
+            fs::write(root.path().join(fallback), "// fallback target\n").unwrap();
+            unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+            let workspace = Workspace::resolve(root.path()).unwrap();
+            let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+            index_workspace(&workspace, &model).unwrap();
+            let assert_target = |expected: &str| {
+                let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+                let targets = conn
+                    .prepare(
+                        "SELECT target_path FROM file_edges WHERE source_path = ?1 AND kind = 1",
+                    )
+                    .unwrap()
+                    .query_map([source], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert_eq!(targets, [expected], "dependency target for {source}");
+                let importers = conn
+                    .prepare(
+                        "SELECT source_path FROM file_edges WHERE target_path = ?1 AND kind = 1",
+                    )
+                    .unwrap()
+                    .query_map([expected], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert_eq!(importers, [source]);
+            };
+            assert_target(fallback);
+            fs::write(root.path().join(preferred), "// preferred target\n").unwrap();
+            let summary = index_workspace_paths_for_watcher(
+                &workspace,
+                &model,
+                &[root.path().join(preferred)],
+            )
+            .unwrap();
+            assert_target(preferred);
+            assert_eq!(summary.indexed_files, 2);
+            fs::write(
+                root.path().join("widget/unrelated.ts"),
+                "// unrelated target\n",
+            )
+            .unwrap();
+            assert_eq!(
+                index_workspace(&workspace, &model).unwrap().indexed_files,
+                1
+            );
+            fs::write(root.path().join(preferred), "// edited target\n").unwrap();
+            assert_eq!(
+                index_workspace(&workspace, &model).unwrap().indexed_files,
+                1
+            );
+            fs::remove_file(root.path().join(preferred)).unwrap();
+            index_workspace(&workspace, &model).unwrap();
+            assert_target(fallback);
+            fs::write(root.path().join(preferred), "// preferred target again\n").unwrap();
+            index_workspace(&workspace, &model).unwrap();
+            assert_target(preferred);
+            assert_eq!(
+                index_workspace(&workspace, &model).unwrap().indexed_files,
+                0
+            );
+        }
     }
 
     #[test]
