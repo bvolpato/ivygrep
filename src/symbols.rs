@@ -608,14 +608,20 @@ pub(crate) fn search_symbol_relationships_in_current_index(
     search_call_sites_with_references(workspace, candidate_name, options, None)
 }
 
+#[derive(Default)]
+struct RelationshipDefinitions {
+    languages: HashSet<String>,
+    go_generic_function: bool,
+}
+
 /// Languages that define the requested symbol, gathered from the overlay and
 /// base symbol tables. Owner-qualified lookups use the best owner tier that
 /// exists. Empty when the symbol has no known definition.
-fn definition_languages(workspace: &Workspace, name: &str) -> Result<HashSet<String>> {
+fn relationship_definitions(workspace: &Workspace, name: &str) -> Result<RelationshipDefinitions> {
     let query = parse_symbol_query(name);
     let normalized = normalize_symbol(query.name);
     if normalized.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(RelationshipDefinitions::default());
     }
     let primary = if workspace.has_overlay() {
         workspace.overlay_sqlite_path()
@@ -633,14 +639,15 @@ fn definition_languages(workspace: &Workspace, name: &str) -> Result<HashSet<Str
         databases.push((base_dir.join("metadata.sqlite3"), Some(shadowed)));
     }
 
-    let mut tiers: [HashSet<String>; 3] = Default::default();
+    let mut tiers: [RelationshipDefinitions; 3] = Default::default();
     for (path, shadowed) in databases {
         if !path.exists() {
             continue;
         }
         let conn = open_sqlite_readonly(&path)?;
         let mut stmt = conn.prepare_cached(
-            "SELECT DISTINCT c.language, s.owner, c.file_path
+            "SELECT DISTINCT c.language, s.owner, c.file_path,
+                    CASE WHEN c.language = 'go' AND c.kind = 'Function' THEN c.text END
              FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
              WHERE s.normalized_name = ?1",
         )?;
@@ -649,10 +656,11 @@ fn definition_languages(workspace: &Workspace, name: &str) -> Result<HashSet<Str
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
             ))
         })?;
         for row in rows {
-            let (language, owner, file_path) = row?;
+            let (language, owner, file_path, generic_source) = row?;
             if shadowed
                 .as_ref()
                 .is_some_and(|shadowed| shadowed.contains(&file_path))
@@ -660,12 +668,35 @@ fn definition_languages(workspace: &Workspace, name: &str) -> Result<HashSet<Str
                 continue;
             }
             let tier = owner_tier(query.owner, owner.as_deref());
-            tiers[usize::from(tier)].insert(language.to_ascii_lowercase());
+            let definitions = &mut tiers[usize::from(tier)];
+            definitions.languages.insert(language.to_ascii_lowercase());
+            if !definitions.go_generic_function
+                && let Some(raw) = generic_source
+            {
+                let source = try_decompress_text(raw)?;
+                definitions.go_generic_function = crate::chunking::parse_source_tree(
+                    std::path::Path::new(&file_path),
+                    &source,
+                    "go",
+                )
+                .is_some_and(|tree| {
+                    tree.root_node()
+                        .named_children(&mut tree.walk())
+                        .any(|node| {
+                            node.kind() == "function_declaration"
+                                && node.child_by_field_name("type_parameters").is_some()
+                                && node.child_by_field_name("name").is_some_and(|name| {
+                                    name.utf8_text(source.as_bytes())
+                                        .is_ok_and(|name| name.eq_ignore_ascii_case(query.name))
+                                })
+                        })
+                });
+            }
         }
     }
     Ok(tiers
         .into_iter()
-        .find(|languages| !languages.is_empty())
+        .find(|definitions| !definitions.languages.is_empty())
         .unwrap_or_default())
 }
 
@@ -692,8 +723,17 @@ fn search_call_sites_with_references(
         .map(|limit| limit.saturating_mul(4).clamp(32, candidate_ceiling));
     // Syntax does not resolve types or imports, so retain the definition
     // language restriction. An explicit --type filter wins.
+    let definitions = if options
+        .type_filter
+        .as_deref()
+        .is_none_or(|language| language.eq_ignore_ascii_case("go"))
+    {
+        relationship_definitions(workspace, name)?
+    } else {
+        RelationshipDefinitions::default()
+    };
     let languages = if options.type_filter.is_none() {
-        definition_languages(workspace, name)?
+        definitions.languages
     } else {
         HashSet::new()
     };
@@ -732,7 +772,13 @@ fn search_call_sites_with_references(
             let matches = file_matches.entry(file_path.clone()).or_insert_with(|| {
                 crate::workspace_file::read_to_string(&workspace.root, &file_path)
                     .map(|text| {
-                        matching_symbol_lines(&file_path, &text, &chunks[0].language, &query)
+                        matching_symbol_lines_with_go_generics(
+                            &file_path,
+                            &text,
+                            &chunks[0].language,
+                            &query,
+                            definitions.go_generic_function,
+                        )
                     })
                     .unwrap_or_default()
             });
@@ -812,11 +858,22 @@ struct SymbolLine {
     is_call: bool,
 }
 
+#[cfg(test)]
 fn matching_symbol_lines(
     path: &std::path::Path,
     text: &str,
     language: &str,
     query: &SymbolQuery<'_>,
+) -> Vec<SymbolLine> {
+    matching_symbol_lines_with_go_generics(path, text, language, query, false)
+}
+
+fn matching_symbol_lines_with_go_generics(
+    path: &std::path::Path,
+    text: &str,
+    language: &str,
+    query: &SymbolQuery<'_>,
+    go_generic_function: bool,
 ) -> Vec<SymbolLine> {
     let tree = crate::chunking::parse_source_tree(path, text, language);
     let fallback;
@@ -871,7 +928,7 @@ fn matching_symbol_lines(
         let line = line_starts.partition_point(|offset| *offset <= start);
         let line_start = line_starts[line - 1];
         let is_call = if let Some(node) = node {
-            is_call_reference(node)
+            is_call_reference(node, language == "go" && go_generic_function)
         } else {
             let line_end = line_starts.get(line).copied().unwrap_or(source.len());
             if looks_like_definition(&lower[line_start..line_end], start - line_start) {
@@ -1008,7 +1065,13 @@ fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
             || kind.ends_with("_signature")
             || matches!(
                 kind,
-                "function" | "method" | "singleton_method" | "class" | "module"
+                "function"
+                    | "method"
+                    | "singleton_method"
+                    | "class"
+                    | "module"
+                    | "type_spec"
+                    | "type_alias"
             ))
             && parent
                 .child_by_field_name("name")
@@ -1072,7 +1135,7 @@ fn contains_node(container: tree_sitter::Node<'_>, node: tree_sitter::Node<'_>) 
     container.start_byte() <= node.start_byte() && node.end_byte() <= container.end_byte()
 }
 
-fn is_call_reference(node: tree_sitter::Node<'_>) -> bool {
+fn is_call_reference(node: tree_sitter::Node<'_>, go_generic_function: bool) -> bool {
     let mut current = node;
     while let Some(parent) = current.parent() {
         if parent.kind() == "call_expression_with_bareword"
@@ -1118,16 +1181,38 @@ fn is_call_reference(node: tree_sitter::Node<'_>) -> bool {
             | "scoped_call_expression" => parent
                 .child_by_field_name("name")
                 .or_else(|| parent.child_by_field_name("function_name")),
+            "type_conversion_expression" if go_generic_function => {
+                parent.child_by_field_name("type")
+            }
             "new_expression" => parent.child_by_field_name("constructor"),
             "object_creation_expression" => parent.child_by_field_name("type"),
             _ => None,
         };
         if let Some(callee) = callee {
-            return terminal_name(callee).is_some_and(|name| name.id() == node.id());
+            let name = if go_generic_function {
+                go_generic_callee_name(callee)
+            } else {
+                terminal_name(callee)
+            };
+            return name.is_some_and(|name| name.id() == node.id());
         }
         current = parent;
     }
     false
+}
+
+fn go_generic_callee_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    // Go's grammar parses f[T](x) as a conversion and f[T]() as an indexed
+    // call. Only unwrap these forms for an indexed generic-function definition:
+    // the same syntax can also convert a type or call a collection element.
+    loop {
+        node = match node.kind() {
+            "generic_type" => node.child_by_field_name("type")?,
+            "index_expression" => node.child_by_field_name("operand")?,
+            "parenthesized_type" | "parenthesized_expression" => node.named_child(0)?,
+            _ => return terminal_name(node),
+        };
+    }
 }
 
 fn terminal_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -1150,6 +1235,7 @@ fn terminal_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_
                 | "scoped_identifier"
                 | "scoped_type_identifier"
                 | "qualified_identifier"
+                | "qualified_type"
                 | "qualified_name"
                 | "qualified"
                 | "scope_resolution"
