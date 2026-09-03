@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Symbol definitions, references, and callers preserve Unicode identifiers, including combining marks and qualified names, instead of dropping or conflating them. Existing dollar-sigil aliases remain supported. Index format v27 rebuilds unchanged files to repair previously truncated symbol keys.
+
 ## [1.2.13] - 2026-09-03
 
 ### Added
