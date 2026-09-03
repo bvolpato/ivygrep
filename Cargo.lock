@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "ivygrep-usearch"
-version = "2.24.0-ivygrep.1"
+version = "2.24.0-ivygrep.2"
 dependencies = [
  "cxx",
  "cxx-build",
