@@ -19,6 +19,17 @@ SPEC.loader.exec_module(check_daemon_equivalence)
 
 
 class DaemonEquivalenceFixtureTest(unittest.TestCase):
+    def test_lifecycle_generator_is_replayable_and_covers_each_operation(self) -> None:
+        operations = check_daemon_equivalence.lifecycle_operations
+        first = operations(42, 27)
+        self.assertEqual(first, operations(42, 27))
+        self.assertNotEqual(first, operations(43, 27))
+        self.assertEqual(operations(42, 0), [])
+        self.assertEqual(first[:11], operations(42, 11))
+        for offset in (0, 9, 18):
+            self.assertEqual(len({operation for operation, _, _ in first[offset:offset + 9]}), 9)
+        self.assertEqual({target for _, target, _ in first}, {"branch", "sibling"})
+
     def test_windows_rpc_authenticates_before_sending_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
