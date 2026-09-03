@@ -11,6 +11,7 @@ All notable changes to ivygrep are documented in this file.
 - Incremental dependency graphs refresh unchanged importers when a newly added file takes precedence over an existing target. Deletion, reintroduction, and worktree restoration keep outgoing dependencies and reverse dependents consistent. Python package initializers take precedence over same-named modules, matching runtime imports. Index format v29 rebuilds existing indexes once to retain resolved import specifications and corrected Python targets.
 - Go caller searches recognize explicit generic invocations, including qualified, parenthesized, and zero-argument calls, when the generic function is defined in the index. Generic type conversions, collection indexing, and uncalled function values remain excluded. Go reference searches exclude type, alias, and interface method declaration names while preserving their uses.
 - Local indexing and first-query recovery rebuild saved stores when a tracked directory changes between a linked worktree and a standalone checkout, preserving workspace settings and removing the obsolete layout.
+- Clean Git checkouts reindex files included through `.ignore` whitelists and observe ancestor ignore-rule changes. Files hidden from Git status by index flags also refresh correctly, including when a worktree reuses its base.
 
 ## [1.2.13] - 2026-09-03
 

@@ -146,7 +146,11 @@ vector keys inside bounded transactions.
 Watcher events use a targeted refresh only when path-level reconciliation is
 safe. New directories, ignore-file changes, uncertain Git state, and similar
 cases fall back to a full walk. A clean Git workspace whose recorded repository
-state still matches can return without scanning every file.
+state still matches can return without scanning every file. The fingerprint
+includes ancestor `.ignore`/`.gitignore` controls. Reuse is disabled when
+independent ignore rules whitelist files Git may ignore, or when assume-unchanged
+flags or present skip-worktree files prevent Git status from observing source
+edits. Those cases use the normal Merkle walk, including during base reuse.
 
 No-op shortcuts still verify primary storage: SQLite and Tantivy chunk counts
 must agree, and hash-vector headers and bounds must be readable. Worktree
