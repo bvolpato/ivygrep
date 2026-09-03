@@ -4454,6 +4454,8 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                                     &changed_paths,
                                 )?
                             };
+                            #[cfg(test)]
+                            eprintln!("{} index summary: {summary:?}", daemon_timestamp());
                             Result::<bool, anyhow::Error>::Ok(
                                 summary.indexed_files > 0 || summary.deleted_files > 0,
                             )
@@ -5647,6 +5649,38 @@ mod tests {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        eprintln!(
+            "visibility timeout expected={expected}; fresh snapshot={:?}",
+            crate::merkle::MerkleSnapshot::build(&workspace.root, false)
+        );
+        eprintln!(
+            "stored snapshot={:?}",
+            std::fs::read_to_string(workspace.merkle_snapshot_path())
+        );
+        if let Some(common) = crate::workspace::git_common_dir(&workspace.root) {
+            eprintln!(
+                "current exclude={:?}",
+                std::fs::read_to_string(common.join("info/exclude"))
+            );
+        }
+        match SearchContext::load(workspace, None, false) {
+            Ok(context) => {
+                eprintln!(
+                    "tombstones={:?} overlay_files={:?}",
+                    context.tombstones, context.overlay_files
+                );
+                eprintln!(
+                    "literal result={:?}",
+                    literal_search_with_context(
+                        &context,
+                        workspace,
+                        needle,
+                        &SearchOptions::default()
+                    )
+                );
+            }
+            Err(error) => eprintln!("SearchContext failed: {error:#}"),
         }
         false
     }

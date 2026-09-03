@@ -972,6 +972,8 @@ fn index_workspace_inner(
             let _ = fs::write(workspace.indexing_progress_path(), "scanning");
             let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
             let mut d = old.diff(&new);
+            #[cfg(test)]
+            eprintln!("overlay reconciliation old={old:?} new={new:?} diff={d:?}");
             let mut clear_overlay_paths = Vec::new();
 
             // Keep the overlay relative to the base after branch switches or local
