@@ -72,6 +72,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- Benchmark reports preserve missing process-resource observations as unknown and avoid resource ratios with zero baselines; incomplete observations cannot substantiate the indexing-ceiling explanation.
 - Public matrices can require fit-disjoint queries against the executed reranker model SHA-256, not only its name. Runtime status and doctor expose the embedded model digest; older binaries remain unverified.
 - Layered worktree E2E compares CLI and direct daemon RPC results with independent full indexes through edits, deletions, empty files, renames, branch switches, base rebuilds, sibling worktrees, restarts, and live watcher updates. Real hash and neural retrieval checks cover inheritance and shadowing; filename-only stale-base assertions now verify source content and thin overlay storage.
 - The million-chunk harness now forces neural queries after `--enhance-neural` and requires execution evidence from both CLI and daemon responses. Enrichment readiness alone no longer qualifies as a neural query measurement.

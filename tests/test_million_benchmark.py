@@ -56,6 +56,99 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def report_inputs(self):
+        names = {
+            "index_baseline": "index-baseline",
+            "index_current": "index-current",
+            "system_baseline": "system-baseline",
+            "system_current": "system-current",
+            "paired_baseline": "query-baseline",
+            "paired_current": "query-current",
+            "quality_baseline": "quality-current",
+            "quality_current": "quality-current",
+        }
+        return {
+            name: json.loads((ROOT / "docs/benchmarks" / f"public-million-{suffix}.json").read_text())
+            for name, suffix in names.items()
+        }
+
+    def test_report_does_not_turn_unobserved_resources_into_improvements(self):
+        inputs = self.report_inputs()
+        for name in ("index_current", "system_current"):
+            inputs[name]["index"]["metrics"].update(
+                resource_samples=0, peak_rss_bytes=0, cpu_ms=0,
+                filesystem_read_bytes=0, filesystem_write_bytes=0,
+            )
+        with mock.patch.object(comparator, "bootstrap_p95_ratio", return_value={
+            "observed": 0.4, "ci95_lower": 0.35, "ci95_upper": 0.45,
+        }):
+            report = renderer.build_report(**inputs)
+        for name in ("peak_rss_bytes", "filesystem_read_bytes", "filesystem_write_bytes"):
+            self.assertIsNone(report["indexing"][name]["current"])
+            self.assertIsNone(report["indexing"][name]["ratio"])
+        self.assertIsNone(report["saturated_full_run"]["current_index_cpu_ms"])
+        self.assertEqual(report["indexing"]["wall_ms"]["current"],
+                         inputs["index_current"]["index"]["metrics"]["wall_ms"])
+        # Final disk accounting is measured separately from process sampling.
+        self.assertEqual(report["indexing"]["peak_disk_bytes"]["current"],
+                         inputs["index_current"]["index"]["metrics"]["peak_disk_bytes"])
+        self.assertFalse(report["gate"]["indexing_ceiling_documented"])
+        markdown = renderer.render_markdown(report)
+        self.assertIn("unobserved", markdown)
+        self.assertIn("(n/a)", markdown)
+        self.assertNotIn("reduced\nwrites", markdown)
+        self.assertIn("FAIL", renderer.render_html(report))
+
+    def test_report_handles_observed_zero_resource_baselines(self):
+        inputs = self.report_inputs()
+        inputs["index_baseline"]["index"]["metrics"].update(
+            resource_samples=3, peak_rss_bytes=0, peak_disk_bytes=0,
+            filesystem_read_bytes=0, filesystem_write_bytes=0,
+        )
+        with mock.patch.object(comparator, "bootstrap_p95_ratio", return_value={
+            "observed": 0.4, "ci95_lower": 0.35, "ci95_upper": 0.45,
+        }):
+            report = renderer.build_report(**inputs)
+        for name in (
+            "peak_rss_bytes", "peak_disk_bytes", "filesystem_read_bytes", "filesystem_write_bytes",
+        ):
+            self.assertEqual(report["indexing"][name]["baseline"], 0)
+            self.assertIsNone(report["indexing"][name]["ratio"])
+        markdown = renderer.render_markdown(report)
+        self.assertIn("(n/a)", markdown)
+        self.assertNotIn("unobserved", markdown)
+        self.assertNotIn("reduced\nwrites", markdown)
+        renderer.render_html(report)
+
+    def test_comparison_requires_observed_nonzero_resource_baselines(self):
+        for missing_side in (
+            "baseline", "current", "zero_baseline", "mixed_current", "legacy", "observed_zero",
+        ):
+            with self.subTest(missing_side=missing_side):
+                baseline, current = artifact([100.0] * 40), artifact([100.0] * 40)
+                if missing_side == "mixed_current":
+                    current = [current, artifact([100.0] * 40)]
+                    missing = current[-1]
+                else:
+                    missing = current if missing_side in ("current", "observed_zero") else baseline
+                if missing_side != "legacy":
+                    missing["index"]["metrics"].update(
+                        resource_samples=3 if missing_side in ("zero_baseline", "observed_zero") else 0,
+                        peak_rss_bytes=0,
+                    )
+                result = comparator.compare_runs(
+                    [baseline], current if isinstance(current, list) else [current],
+                    significant_regression_ratio=1.15,
+                    required_warm_ratio=None, required_index_ratio=None,
+                    maximum_quality_loss=0.0,
+                )
+                if missing_side in ("legacy", "observed_zero"):
+                    self.assertEqual(result["peak_rss_ratio"], 1.0 if missing_side == "legacy" else 0.0)
+                else:
+                    self.assertIsNone(result["peak_rss_ratio"])
+                self.assertEqual(result["peak_disk_ratio"], 1.0)
+                self.assertTrue(result["passed"])
+
     @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
     def test_process_timing_excludes_polling_interval_and_sampler_cleanup(self):
         clock = [10.0]
