@@ -175,7 +175,7 @@ stores and metadata agree.
 | Artifact | Purpose |
 | --- | --- |
 | `workspace.json` | Root, watch intent, timestamps, and index generation |
-| `index_incarnation` | Base-index identity that changes after removal/recreation, even if a generation number is reused |
+| `index_incarnation` | Store identity that changes after main-index or overlay replacement, even if a generation number is reused |
 | `metadata.sqlite3` | Chunk text and metadata, symbols, graph edges, unresolved dependencies, statistics |
 | `tantivy/` | BM25, path, signature, language, kind, and trigram postings |
 | `vectors.usearch` | Lightweight hash-vector index |
@@ -204,6 +204,15 @@ their derived neural artifacts after acquiring index/job locks and checking that
 enhancement is inactive. It keeps an invalid identity until cleanup finishes so
 an interrupted repair remains retryable. Neural metadata files publish through
 atomic replacement; this is not a power-loss durability guarantee.
+
+Background enhancement serializes vector writers with `enhancement.lock`, which
+survives index removal alongside the index and job locks. It takes `index.lock`
+only to open its initial stores and to publish checkpoints, metadata, and journal
+cleanup. Model inference and resource pauses leave lexical indexing unblocked.
+Every publication checks the captured `index_incarnation`; staged main-index and
+overlay replacements rotate this identity with their stores, and rollback restores
+it. Incremental updates keep the incarnation, leave new deletion journals for the
+next pass, and prevent the older worker from marking the new generation complete.
 
 Neural enhancement saves a checkpoint after at least 16,384 new chunks since
 the previous checkpoint. A non-divisor batch size crosses that boundary rather

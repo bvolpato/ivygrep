@@ -17,6 +17,7 @@ All notable changes to ivygrep are documented in this file.
 - Web context requests acquire workspace leases before CPU capacity, preventing a deadlock with concurrent indexing when search capacity is exhausted. Both resources remain held through context generation.
 - Failed main-index publication now forces complete recovery before reusing Git state or creating worktree overlays. Doctor detects unfinished publication instead of reporting stale stores as healthy.
 - Daemon hybrid searches refresh workspace and base-index identity when a checkout is replaced or its Git pointer changes, preventing missing results and stale matches without requiring a daemon restart.
+- Background hash and neural enhancement discard obsolete work when an index is removed or rebuilt, including worktree overlays and reused generation numbers. Model computation still runs alongside lexical indexing; checkpoints and completion publish under the index lock.
 
 ## [1.2.13] - 2026-09-03
 
