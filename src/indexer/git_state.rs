@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -142,8 +143,42 @@ fn git_path(root: &Path, args: &[&str]) -> Option<PathBuf> {
     })
 }
 
+/// Git status cannot observe edits hidden by index flags. Collect tracked
+/// .ignore files here too: their whitelist rules can include Git-ignored code.
+fn tracked_ignore_controls(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "-z", "-v", "--cached"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut controls = Vec::new();
+    for record in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let tag = *record.first()?;
+        let relative = Path::new(std::str::from_utf8(record.get(2..)?).ok()?);
+        if tag.is_ascii_lowercase() || (tag == b'S' && root.join(relative).try_exists().ok()?) {
+            return None;
+        }
+        if relative.file_name().is_some_and(|name| name == ".ignore") {
+            controls.push(root.join(relative));
+        }
+    }
+    Some(controls)
+}
+
 fn git_ignore_state(root: &Path) -> Option<String> {
-    let mut state = Vec::new();
+    // The bool marks controls whose whitelist rules need a source walk because
+    // Git does not necessarily track the files they include.
+    let mut controls = BTreeMap::<PathBuf, bool>::new();
+    for path in tracked_ignore_controls(root)? {
+        controls.insert(path, true);
+    }
     let configured_global_ignore =
         git_path(root, &["config", "--path", "--get", "core.excludesFile"]);
     let default_global_ignore = configured_global_ignore.is_none().then(|| {
@@ -160,10 +195,11 @@ fn git_ignore_state(root: &Path) -> Option<String> {
     .into_iter()
     .flatten()
     {
-        state.extend_from_slice(path.to_string_lossy().as_bytes());
-        state.push(0);
-        state.extend_from_slice(&fs::read(path).unwrap_or_default());
-        state.push(0);
+        controls.entry(path).or_insert(false);
+    }
+    for directory in root.ancestors() {
+        controls.insert(directory.join(".ignore"), true);
+        controls.insert(directory.join(".gitignore"), directory != root);
     }
 
     let ignored_controls = std::process::Command::new("git")
@@ -183,18 +219,42 @@ fn git_ignore_state(root: &Path) -> Option<String> {
     if !ignored_controls.status.success() {
         return None;
     }
-    for raw_path in ignored_controls.stdout.split(|byte| *byte == 0) {
-        if raw_path.is_empty() {
-            continue;
-        }
-        state.extend_from_slice(raw_path);
-        state.push(0);
-        state.extend_from_slice(
-            &fs::read(root.join(String::from_utf8_lossy(raw_path).as_ref())).ok()?,
-        );
-        state.push(0);
+    for raw_path in ignored_controls
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = root.join(std::str::from_utf8(raw_path).ok()?);
+        let independent = path.file_name().is_some_and(|name| name == ".ignore");
+        controls.entry(path).or_insert(independent);
     }
 
+    let mut state = b"walker-inputs-v2\0".to_vec();
+    for (path, independent) in controls {
+        state.extend_from_slice(path.to_string_lossy().as_bytes());
+        state.push(0);
+        let contents = match fs::read(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                state.push(0);
+                continue;
+            }
+            Err(_) => return None,
+        };
+        if independent {
+            let mut builder = ignore::gitignore::GitignoreBuilder::new(path.parent()?);
+            let text = std::str::from_utf8(&contents).ok()?;
+            for line in text.trim_start_matches('\u{feff}').lines() {
+                builder.add_line(None, line).ok()?;
+            }
+            if builder.build().ok()?.num_whitelists() != 0 {
+                return None;
+            }
+        }
+        state.push(1);
+        state.extend_from_slice(&contents);
+        state.push(0);
+    }
     Some(hex::encode(
         xxhash_rust::xxh3::xxh3_128(&state).to_le_bytes(),
     ))
