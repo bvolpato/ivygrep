@@ -4,7 +4,7 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [1.2.13] - 2026-09-02
+## [1.2.13] - 2026-09-03
 
 ### Added
 
