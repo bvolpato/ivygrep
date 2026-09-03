@@ -54,6 +54,7 @@ jobs:
               Cargo.toml \
               scripts/bench_million_chunks.py \
               scripts/soak_daemon.py \
+              tests/test_soak_daemon.py \
               scripts/check_public_benchmark_privacy.py \
               scripts/compare_million_benchmarks.py \
               src/ \
@@ -241,14 +242,25 @@ jobs:
         run: |
           python3 scripts/check_public_benchmark_privacy.py benchmark-results
 
-      - name: Run scheduled daemon soak
-        if: steps.parameters.outputs.required == 'true' && github.event_name != 'pull_request'
+      - name: Run daemon mutation and restart soak
+        if: steps.parameters.outputs.required == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          duration=1800
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            duration=120
+          fi
           uv run scripts/soak_daemon.py \
             --binary "$RUNNER_TEMP/head-target/release/ig" \
             --repo . \
-            --duration 300 \
+            --duration "$duration" \
+            --restarts 2 \
             --output benchmark-results/daemon-soak.json
+
+      - name: Validate soak evidence privacy
+        if: always() && steps.parameters.outputs.required == 'true'
+        run: python3 scripts/check_public_benchmark_privacy.py benchmark-results
 
       - name: Upload benchmark evidence
         if: always() && steps.parameters.outputs.required == 'true'

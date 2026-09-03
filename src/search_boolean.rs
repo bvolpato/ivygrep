@@ -155,6 +155,14 @@ fn anchor_negative_clauses(ast: &mut UserInputAst) {
     }
 }
 
+fn boolean_query_error(text: &str) -> String {
+    format!(
+        "invalid or unsupported Boolean query: {text}\n\
+         Hint: to search code or prose containing AND, OR, or NOT, wrap that text \
+         in matching backticks or a fenced code block."
+    )
+}
+
 /// A structured request has one bounded pool satisfying the original parsed
 /// query. Other signals may rank that pool, but may not admit new keys through
 /// alias expansion, literal/path recall, symbols, or vector similarity.
@@ -171,11 +179,11 @@ pub(super) fn boolean_candidates(
     }
     let parser = lexical_query_parser(ctx, should_use_conjunctive_numeric_query(text));
     let mut ast = tantivy::query_grammar::parse_query(text)
-        .map_err(|_| anyhow::anyhow!("invalid or unsupported Boolean query: {text}"))?;
+        .map_err(|_| anyhow::anyhow!(boolean_query_error(text)))?;
     anchor_negative_clauses(&mut ast);
     let query = parser
         .build_query_from_user_input_ast(ast)
-        .with_context(|| format!("invalid or unsupported Boolean query: {text}"))?;
+        .with_context(|| boolean_query_error(text))?;
     let query = constrain_query_to_scope(query, &ctx.fields, options.scope_filter.as_ref())?;
     let query = constrain_query_to_glob_paths(query, &ctx.fields, glob_filter);
     let mut documents = Vec::new();
