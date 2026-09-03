@@ -111,7 +111,14 @@ pub(crate) struct FileGraphExtraction {
 
 struct RustCrateContext {
     name: String,
-    source_root: PathBuf,
+    library_root: PathBuf,
+    crate_root: PathBuf,
+}
+
+struct RustManifestResolution {
+    name: String,
+    library_path: PathBuf,
+    target_paths: Vec<PathBuf>,
 }
 
 struct DartPackageContext {
@@ -175,7 +182,7 @@ pub(crate) fn extract_file_graph(
     let mut edges = BTreeSet::new();
     let mut unresolved_dependencies = BTreeSet::new();
     let language = language_for_path(rel_path).unwrap_or("text");
-    let local_rust_crate = (language == "rust" && rust_file_may_import_library(rel_path))
+    let local_rust_crate = (language == "rust")
         .then(|| rust_crate_context(root, snapshot, rel_path))
         .flatten();
     let local_go_module = (language == "go")
@@ -292,7 +299,7 @@ pub(crate) fn resolve_dependency_spec(
             .flatten()
             .find_map(|path| existing_workspace_file(root, snapshot, &path));
     }
-    let local_rust_crate = (language == "rust" && rust_file_may_import_library(source_path))
+    let local_rust_crate = (language == "rust")
         .then(|| rust_crate_context(root, snapshot, source_path))
         .flatten();
     let local_go_module = (language == "go")
@@ -378,7 +385,18 @@ pub(crate) fn manifest_resolution_signature(path: &Path, content: &str) -> Optio
     match path.file_name().and_then(|value| value.to_str())? {
         "Cargo.toml" => {
             let identity = rust_manifest_resolution(content)
-                .map(|(name, source_root)| format!("{name}\0{}", index_path_string(&source_root)))
+                .map(|resolution| {
+                    let mut identity = format!(
+                        "{}\0{}",
+                        resolution.name,
+                        index_path_string(&resolution.library_path)
+                    );
+                    for target in resolution.target_paths {
+                        identity.push('\0');
+                        identity.push_str(&index_path_string(&target));
+                    }
+                    identity
+                })
                 .unwrap_or_default();
             Some(format!("rust\0{identity}"))
         }
@@ -1219,6 +1237,8 @@ fn resolve_local_dependency(
     let mut package_relative = false;
     if language == "rust"
         && let Some(crate_context) = local_rust_crate
+        && (crate_context.crate_root != crate_context.library_root
+            || rust_file_may_import_library(source_path))
         && let Some(local_spec) = normalized.strip_prefix(&crate_context.name)
         && let Some(local_spec) = local_spec.strip_prefix('/')
     {
@@ -1345,16 +1365,38 @@ fn resolve_local_dependency(
     } else if dart_relative || javascript_relative || markdown_relative || rust_path_module {
         bases.push(source_dir.to_path_buf());
     } else if rust_module_declaration {
-        bases.push(rust_module_declaration_base(source_path));
+        bases.push(
+            if local_rust_crate.is_some_and(|context| context.crate_root == source_path) {
+                source_dir.to_path_buf()
+            } else {
+                rust_module_declaration_base(source_path)
+            },
+        );
+    } else if language == "rust" && crate_relative {
+        // `crate::` is anchored to this Cargo target, never to the workspace.
+        // A package-name import refers to its library even from a binary target.
+        let crate_root = local_rust_crate
+            .map(|context| {
+                if package_relative {
+                    &context.library_root
+                } else {
+                    &context.crate_root
+                }
+            })
+            .cloned()
+            .unwrap_or_else(|| rust_default_crate_root(root, snapshot, source_path));
+        bases.push(
+            crate_root
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf(),
+        );
     } else {
         if source_relative
             || matches!(language, "c" | "cpp" | "objc" | "ruby" | "shell")
             || language == "rust" && !crate_relative
         {
             bases.push(source_dir.to_path_buf());
-        }
-        if package_relative && let Some(crate_context) = local_rust_crate {
-            bases.push(crate_context.source_root.clone());
         }
         bases.extend([
             PathBuf::new(),
@@ -1686,14 +1728,67 @@ fn rust_crate_context(
     let manifest = nearest_manifest(root, snapshot, rel_path, "rust")?;
     let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
     let content = crate::workspace_file::read_to_string(root, &manifest).ok()?;
-    let (name, source_root) = rust_manifest_resolution(&content)?;
+    let resolution = rust_manifest_resolution(&content)?;
+    let library_root = normalize_relative_path(&package_root.join(&resolution.library_path))?;
+    let mut targets = resolution
+        .target_paths
+        .into_iter()
+        .filter_map(|path| normalize_relative_path(&package_root.join(path)))
+        .collect::<Vec<_>>();
+    targets.push(package_root.join("src/main.rs"));
+    targets.push(package_root.join("build.rs"));
+    for directory in ["src/bin", "tests", "examples", "benches"] {
+        let directory = package_root.join(directory);
+        let Ok(relative) = rel_path.strip_prefix(&directory) else {
+            continue;
+        };
+        let Some(Component::Normal(first)) = relative.components().next() else {
+            continue;
+        };
+        if relative.components().count() == 1 {
+            targets.push(rel_path.to_path_buf());
+        } else {
+            targets.push(directory.join(first).join("main.rs"));
+            targets.push(directory.join(first).with_extension("rs"));
+        }
+    }
+    // Exact target roots take precedence; other files use the most specific
+    // containing target directory. Shared src/ modules retain the library root
+    // when both the default library and binary are present.
+    targets.retain(|target| {
+        target == rel_path || existing_workspace_file(root, snapshot, target).is_some()
+    });
+    let library_exists = existing_workspace_file(root, snapshot, &library_root).is_some();
+    targets.push(library_root.clone());
+    let crate_root = targets
+        .into_iter()
+        .filter(|target| {
+            target
+                .parent()
+                .is_some_and(|parent| rel_path.starts_with(parent))
+        })
+        .max_by_key(|target| {
+            (
+                target == rel_path,
+                target
+                    .parent()
+                    .map_or(0, |parent| parent.components().count()),
+                if target == &library_root {
+                    if library_exists { 2 } else { 0 }
+                } else {
+                    1
+                },
+            )
+        })
+        .unwrap_or_else(|| library_root.clone());
     Some(RustCrateContext {
-        name,
-        source_root: package_root.join(source_root),
+        name: resolution.name,
+        library_root,
+        crate_root,
     })
 }
 
-fn rust_manifest_resolution(content: &str) -> Option<(String, PathBuf)> {
+fn rust_manifest_resolution(content: &str) -> Option<RustManifestResolution> {
     let document = content.parse::<toml_edit::DocumentMut>().ok()?;
     let library = document.get("lib").and_then(toml_edit::Item::as_table_like);
     let name = library
@@ -1707,12 +1802,67 @@ fn rust_manifest_resolution(content: &str) -> Option<(String, PathBuf)> {
                 .and_then(toml_edit::Item::as_str)
         })?
         .replace('-', "_");
-    let source_root = library
+    let library_path = library
         .and_then(|table| table.get("path"))
         .and_then(toml_edit::Item::as_str)
-        .and_then(|path| Path::new(path).parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("src"));
-    Some((name, source_root))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("src/lib.rs"));
+    let mut target_paths = BTreeSet::new();
+    for (kind, directory) in [
+        ("bin", "src/bin"),
+        ("test", "tests"),
+        ("example", "examples"),
+        ("bench", "benches"),
+    ] {
+        let Some(targets) = document
+            .get(kind)
+            .and_then(toml_edit::Item::as_array_of_tables)
+        else {
+            continue;
+        };
+        for target in targets {
+            if let Some(path) = target.get("path").and_then(toml_edit::Item::as_str) {
+                target_paths.insert(PathBuf::from(path));
+            } else if let Some(name) = target.get("name").and_then(toml_edit::Item::as_str) {
+                target_paths.insert(Path::new(directory).join(name).with_extension("rs"));
+                target_paths.insert(Path::new(directory).join(name).join("main.rs"));
+            }
+        }
+    }
+    if let Some(build) = document
+        .get("package")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|table| table.get("build"))
+        .and_then(toml_edit::Item::as_str)
+    {
+        target_paths.insert(PathBuf::from(build));
+    }
+    Some(RustManifestResolution {
+        name,
+        library_path,
+        target_paths: target_paths.into_iter().collect(),
+    })
+}
+
+fn rust_default_crate_root(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    source_path: &Path,
+) -> PathBuf {
+    for directory in source_path.ancestors().skip(1) {
+        for name in ["lib.rs", "main.rs"] {
+            let candidate = directory.join(name);
+            if candidate == source_path
+                || existing_workspace_file(root, snapshot, &candidate).is_some()
+            {
+                return candidate;
+            }
+        }
+        if directory.file_name().is_some_and(|name| name == "src") {
+            return directory.join("lib.rs");
+        }
+    }
+    source_path.to_path_buf()
 }
 
 fn dart_package_context(
@@ -2789,6 +2939,16 @@ mod tests {
         assert_ne!(initial, renamed);
         assert_ne!(initial, custom_library);
         assert_ne!(
+            manifest_resolution_signature(
+                cargo_path,
+                "[package]\nname = 'demo-app'\n[[bin]]\nname = 'server'\npath = 'application/entry.rs'\n"
+            ),
+            manifest_resolution_signature(
+                cargo_path,
+                "[package]\nname = 'demo-app'\n[[bin]]\nname = 'server'\npath = 'application/nested/entry.rs'\n"
+            ),
+        );
+        assert_ne!(
             manifest_resolution_signature(Path::new("go.mod"), "module old.example/app\n"),
             manifest_resolution_signature(Path::new("go.mod"), "module new.example/app\n")
         );
@@ -2906,6 +3066,117 @@ mod tests {
     }
 
     #[test]
+    fn rust_crate_imports_stay_in_their_cargo_target() {
+        let root = canonical_tempdir();
+        let files = [
+            ("Cargo.toml", "[package]\nname = 'outer'\n"),
+            ("src/auth.rs", "pub struct WrongSession;\n"),
+            ("crates/core/Cargo.toml", "[package]\nname = 'core'\n"),
+            ("crates/core/src/auth.rs", "pub struct Session;\n"),
+            (
+                "crates/custom/Cargo.toml",
+                "[package]\nname = 'custom'\n[lib]\nname = 'custom_lib'\npath = 'library/root.rs'\n[[bin]]\nname = 'server'\npath = 'application/entry.rs'\n",
+            ),
+            ("crates/custom/library/root.rs", "pub mod auth;\n"),
+            ("crates/custom/library/auth.rs", "pub struct Session;\n"),
+            ("crates/custom/application/entry.rs", "mod auth;\n"),
+            ("crates/custom/application/auth.rs", "pub struct Session;\n"),
+            ("crates/custom/src/bin/tool/main.rs", "mod auth;\n"),
+            (
+                "crates/custom/src/bin/tool/auth.rs",
+                "pub struct Session;\n",
+            ),
+            ("crates/custom/tests/integration/main.rs", "mod auth;\n"),
+            (
+                "crates/custom/tests/integration/auth.rs",
+                "pub struct Session;\n",
+            ),
+        ];
+        for (path, content) in files {
+            fs::create_dir_all(root.path().join(path).parent().unwrap()).unwrap();
+            fs::write(root.path().join(path), content).unwrap();
+        }
+        for (source, import, expected) in [
+            (
+                "crates/core/src/service.rs",
+                "use crate::auth::Session;",
+                "crates/core/src/auth.rs",
+            ),
+            (
+                "crates/core/src/deep/nested/service.rs",
+                "use crate::auth::Session;",
+                "crates/core/src/auth.rs",
+            ),
+            (
+                "crates/custom/library/nested/service.rs",
+                "use crate::auth::Session;",
+                "crates/custom/library/auth.rs",
+            ),
+            (
+                "crates/custom/application/entry.rs",
+                "use crate::auth::Session;",
+                "crates/custom/application/auth.rs",
+            ),
+            (
+                "crates/custom/application/nested/service.rs",
+                "use crate::auth::Session;",
+                "crates/custom/application/auth.rs",
+            ),
+            (
+                "crates/custom/application/nested/service.rs",
+                "use custom_lib::auth::Session;",
+                "crates/custom/library/auth.rs",
+            ),
+            (
+                "crates/custom/src/bin/tool/main.rs",
+                "use crate::auth::Session;",
+                "crates/custom/src/bin/tool/auth.rs",
+            ),
+            (
+                "crates/custom/src/bin/tool/nested/service.rs",
+                "use crate::auth::Session;",
+                "crates/custom/src/bin/tool/auth.rs",
+            ),
+            (
+                "crates/custom/tests/integration/nested/service.rs",
+                "use crate::auth::Session;",
+                "crates/custom/tests/integration/auth.rs",
+            ),
+            (
+                "crates/custom/library/root.rs",
+                "mod auth;",
+                "crates/custom/library/auth.rs",
+            ),
+            (
+                "crates/custom/application/entry.rs",
+                "mod auth;",
+                "crates/custom/application/auth.rs",
+            ),
+        ] {
+            let graph = extract_file_graph(root.path(), None, Path::new(source), import);
+            let dependencies = graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path.as_path())
+                .collect::<Vec<_>>();
+            assert_eq!(dependencies, [Path::new(expected)], "{source}: {import}");
+        }
+        fs::remove_file(root.path().join("crates/core/src/auth.rs")).unwrap();
+        assert!(
+            resolve_dependency_spec(
+                root.path(),
+                None,
+                Path::new("crates/core/src/service.rs"),
+                "rust",
+                "crate::auth::Session"
+            )
+            .is_none(),
+            "a missing member module must not bind to another package"
+        );
+    }
+
+    #[test]
     fn rust_crate_name_lookup_is_limited_to_external_consumers() {
         for path in ["src/lib.rs", "src/auth.rs", "crates/core/src/auth.rs"] {
             assert!(!rust_file_may_import_library(Path::new(path)), "{path}");
@@ -2918,6 +3189,32 @@ mod tests {
         ] {
             assert!(rust_file_may_import_library(Path::new(path)), "{path}");
         }
+    }
+
+    #[test]
+    fn rust_crate_imports_find_standalone_library_roots() {
+        let root = canonical_tempdir();
+        fs::create_dir_all(root.path().join("library/nested")).unwrap();
+        fs::write(
+            root.path().join("library/lib.rs"),
+            "pub mod auth;\npub mod nested;\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("library/auth.rs"), "pub struct Session;\n").unwrap();
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("library/nested/service.rs"),
+            "use crate::auth::Session;\n",
+        );
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path.as_path())
+                .collect::<Vec<_>>(),
+            [Path::new("library/auth.rs")]
+        );
     }
 
     #[test]

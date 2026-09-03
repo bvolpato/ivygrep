@@ -7,6 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 
 - Symbol definitions, references, and callers preserve Unicode identifiers, including combining marks and qualified names, instead of dropping or conflating them. Existing dollar-sigil aliases remain supported. Index format v27 rebuilds unchanged files to repair previously truncated symbol keys.
+- Rust context dependencies resolve `crate::` imports within the owning Cargo target, including workspace members and custom library and binary paths. Library-name imports from other targets resolve against the package library, and custom crate-root module declarations resolve beside the target file. Index format v28 rebuilds existing indexes once to replace stale cross-package dependency edges.
 
 ## [1.2.13] - 2026-09-03
 
