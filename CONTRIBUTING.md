@@ -225,7 +225,9 @@ Do not commit one-off experiment transcripts, local paths, agent prompts, or raw
 
 Maintainers may request smaller scope, stronger tests, platform proof, or neutral
 benchmark evidence. Maintainers own version bumps, tags, release notes, and
-published artifacts.
+published artifacts. See [the release guide](docs/releasing.md) for version
+synchronization, evidence regeneration, and publication gates. A preparation PR
+does not publish a release.
 
 Security vulnerabilities follow [SECURITY.md](SECURITY.md). Report them through
 [private security advisory](https://github.com/bvolpato/ivygrep/security/advisories/new),

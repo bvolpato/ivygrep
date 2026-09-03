@@ -12,8 +12,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    name: Validate release identity and evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check versions, release notes, and source-matched neural evidence
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/check_release_readiness.py --tag "$RELEASE_TAG"
+
+  retrieval-gate:
+    name: Validate release retrieval
+    needs: preflight
+    uses: ./.github/workflows/retrieval-matrix.yml
+    with:
+      checkout_ref: ${{ github.sha }}
+
   build:
     name: Build ${{ matrix.archive_name }}
+    needs: preflight
     runs-on: ${{ matrix.runner }}
     permissions:
       artifact-metadata: write
@@ -571,7 +591,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: artifact-acceptance
+    needs: [artifact-acceptance, retrieval-gate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -610,6 +630,19 @@ jobs:
           find artifacts -name '*.spdx.json' -exec cp {} release-assets/ \;
           find artifacts -name '*.provenance.json' -exec cp {} release-assets/ \;
           ls -la release-assets/
+
+      - name: Include passing retrieval evidence in the release
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          root = Path("artifacts/public-code-retrieval-public-core")
+          for name in ("public-code-retrieval-results.json", "public-code-retrieval.html"):
+              matches = list(root.rglob(name))
+              if len(matches) != 1:
+                  raise SystemExit(f"Expected one passing retrieval artifact {name}, found {len(matches)}")
+              shutil.copyfile(matches[0], Path("release-assets") / name)
+          PY
 
       - name: Extract Release Notes
         id: extract_notes

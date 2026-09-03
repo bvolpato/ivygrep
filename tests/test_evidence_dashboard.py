@@ -196,8 +196,11 @@ class EvidenceDashboardTest(unittest.TestCase):
             )
         )
         workflow = (
-            "artifact-acceptance:\n"
-            "needs: artifact-acceptance\n"
+            "jobs:\n"
+            "  artifact-acceptance:\n"
+            "    needs: build\n"
+            "  release:\n"
+            "    needs: artifact-acceptance\n"
             "scripts/verify_release_artifact.py\n"
             "scripts/e2e_x86_baseline.sh\n"
             "scripts/e2e_cached_model.sh\n"
@@ -214,9 +217,22 @@ class EvidenceDashboardTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "release.yml"
-            path.write_text(workflow, encoding="utf-8")
-            _, summary = renderer.summarize("release-workflow", path)
-        self.assertTrue(summary["artifact_acceptance"])
+            for needs, expected in (
+                ("artifact-acceptance", True),
+                ("[artifact-acceptance, retrieval-gate]", True),
+                ("[retrieval-gate, 'artifact-acceptance'] # gates", True),
+                ("\n      - artifact-acceptance\n      - retrieval-gate", True),
+                ("build # artifact-acceptance", False),
+                ("[build, not-artifact-acceptance]", False),
+            ):
+                with self.subTest(needs=needs):
+                    candidate = workflow.replace("needs: artifact-acceptance", f"needs: {needs}")
+                    path.write_text(candidate, encoding="utf-8")
+                    _, summary = renderer.summarize("release-workflow", path)
+                    self.assertEqual(summary["artifact_acceptance"], expected)
+            path.write_text(workflow.replace("  release:", "  another-job:"), encoding="utf-8")
+            _, unrelated = renderer.summarize("release-workflow", path)
+            self.assertFalse(unrelated["artifact_acceptance"])
         self.assertEqual(summary["release_targets"], 6)
         self.assertEqual(summary["release_archives"], 7)
         self.assertTrue(summary["sbom"])

@@ -30,7 +30,10 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )[0]
 
         self.assertIn("artifact-acceptance:", workflow)
-        self.assertIn("needs: artifact-acceptance", workflow)
+        self.assertIn("needs: [artifact-acceptance, retrieval-gate]", workflow)
+        self.assertIn("uses: ./.github/workflows/retrieval-matrix.yml", workflow)
+        self.assertIn("checkout_ref: ${{ github.sha }}", workflow)
+        self.assertIn('scripts/check_release_readiness.py --tag "$RELEASE_TAG"', workflow)
         self.assertIn("scripts/verify_release_artifact.py", workflow)
         self.assertIn("scripts/e2e_x86_baseline.sh", workflow)
         self.assertNotIn("scripts/cache_neural_model.py", builds)

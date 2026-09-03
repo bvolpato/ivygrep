@@ -8,10 +8,10 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "cc6dfafc6433c4b006b23aff47071486a599667998c7cad6628bc95e11536ab2",
-      "source_commit": "d0d50ced814dc5ca4a303e3717bc6b8ee6709a99",
+      "sha256": "42060d38decd1bc9e716df9ea8b2eff8727730a9e4020e115fb6cfe30495cb2a",
+      "source_commit": "d69e0d9b6bf377a56ac74924fdbf2030dc646605",
       "summary": {
-        "binary_sha256": "bbb771109c7d2e973f6d883b300d293f133facacf5774e22b994c2df20506c5b",
+        "binary_sha256": "0b758c6e9bac47797eae33d42856590afba218699c2df0369773e898f17177d8",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "40e5b778fd620a4315b0e405def180527ffbfa7254c63f5bd4525b8ef6b1fb7e"
@@ -26,26 +26,27 @@
               "after_filtering": 0,
               "before_fusion": 0,
               "candidate_budget": 0,
-              "first_useful_low": 2,
+              "first_useful_low": 3,
               "no_primary_judgment": 0,
               "not_audited": 0,
-              "satisfied": 21
+              "satisfied": 20
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 1888.6237759143114,
+            "elapsed_ms": 3858.3107739686966,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
-              "daemon-watch"
+              "daemon-watch",
+              "identifier-tokenization"
             ],
             "mean_candidate_recall": 0.9782608695652174,
             "mean_hybrid_deep_recall": 0.9782608695652174,
-            "mean_mrr": 0.9565217391304348,
-            "mean_ndcg10": 0.9252843267329456,
-            "mean_p1": 0.9130434782608695,
-            "mean_p5": 0.21739130434782608,
-            "mean_recall5": 0.9565217391304348,
+            "mean_mrr": 0.9275362318840579,
+            "mean_ndcg10": 0.9008601763191058,
+            "mean_p1": 0.8695652173913043,
+            "mean_p5": 0.22608695652173913,
+            "mean_recall5": 0.9782608695652174,
             "mode": "foreground",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
@@ -53,33 +54,34 @@
             "no_hit_queries": 0,
             "queries": 23,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.9130434782608695
+            "satisfaction_rate": 0.8695652173913043
           },
           "hash-enriched": {
             "audit_stage_counts": {
               "after_filtering": 0,
               "before_fusion": 0,
               "candidate_budget": 0,
-              "first_useful_low": 2,
+              "first_useful_low": 3,
               "no_primary_judgment": 0,
               "not_audited": 0,
-              "satisfied": 21
+              "satisfied": 20
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 1910.5530129745603,
+            "elapsed_ms": 4030.954523012042,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
-              "daemon-watch"
+              "daemon-watch",
+              "identifier-tokenization"
             ],
             "mean_candidate_recall": 0.9782608695652174,
             "mean_hybrid_deep_recall": 0.9782608695652174,
-            "mean_mrr": 0.9565217391304348,
-            "mean_ndcg10": 0.9208033720289349,
-            "mean_p1": 0.9130434782608695,
-            "mean_p5": 0.21739130434782608,
-            "mean_recall5": 0.9565217391304348,
+            "mean_mrr": 0.9275362318840579,
+            "mean_ndcg10": 0.9008601763191058,
+            "mean_p1": 0.8695652173913043,
+            "mean_p5": 0.22608695652173913,
+            "mean_recall5": 0.9782608695652174,
             "mode": "hash-enriched",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
@@ -87,7 +89,7 @@
             "no_hit_queries": 0,
             "queries": 23,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.9130434782608695
+            "satisfaction_rate": 0.8695652173913043
           },
           "neural": {
             "audit_stage_counts": {
@@ -96,38 +98,38 @@
               "candidate_budget": 0,
               "first_useful_low": 0,
               "no_primary_judgment": 0,
-              "not_audited": 2,
-              "satisfied": 21
+              "not_audited": 3,
+              "satisfied": 20
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 2092.7333808504045,
+            "elapsed_ms": 3192.2295028343797,
             "filter_misses": [],
             "low_rank_misses": [],
             "mean_candidate_recall": 0.9782608695652174,
             "mean_hybrid_deep_recall": 0.0,
-            "mean_mrr": 0.9565217391304348,
-            "mean_ndcg10": 0.9208033720289349,
-            "mean_p1": 0.9130434782608695,
-            "mean_p5": 0.21739130434782608,
-            "mean_recall5": 0.9565217391304348,
+            "mean_mrr": 0.9275362318840579,
+            "mean_ndcg10": 0.9008601763191058,
+            "mean_p1": 0.8695652173913043,
+            "mean_p5": 0.22608695652173913,
+            "mean_recall5": 0.9782608695652174,
             "mode": "neural",
             "neural_queries_executed": 23,
             "neural_queries_unobservable": 0,
-            "neural_queries_with_results": 11,
+            "neural_queries_with_results": 13,
             "no_hit_queries": 0,
             "queries": 23,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.9130434782608695
+            "satisfaction_rate": 0.8695652173913043
           }
         },
         "runtime": {
-          "machine": "x86_64",
-          "release": "6.17.0-1025-oem",
+          "machine": "aarch64",
+          "release": "6.8.0-1057-aws",
           "system": "Linux"
         },
         "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing and verified neural execution. This is not a public-code, million-chunk, or agent-task benchmark.",
-        "version": "ivygrep 1.2.12"
+        "version": "ivygrep 1.2.13"
       }
     },
     {
@@ -1205,7 +1207,7 @@
       "path": ".github/workflows/release.yml",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "a633479dd76d1c45006e8ebe38dd96e7cc9b23ec564f46f97c6c3a5b06c5997a",
+      "sha256": "decc0e34a6b0f940cf2fbe6e891f37f155800c1e4094513298922f1e912bf031",
       "source_commit": null,
       "summary": {
         "artifact_acceptance": true,
@@ -1221,7 +1223,7 @@
       "current-head-relevance": {
         "status": "historical",
         "versions": [
-          "1.2.12"
+          "1.2.13"
         ]
       },
       "million-scale-current": {
@@ -1255,7 +1257,7 @@
         ]
       }
     },
-    "package_version": "1.2.12"
+    "package_version": "1.2.13"
   },
   "histories": {
     "archive_size": [
