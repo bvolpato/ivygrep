@@ -28,6 +28,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Invalid Boolean queries now explain how to search pasted code or prose using matching backticks or a fenced code block. Invalid constraints still fail rather than silently falling back to relaxed search.
 - Worktree references track the base index's incarnation as well as its generation, so daemon-driven forced rebuilds and remove/re-add cycles cannot silently reuse stale overlays. Legacy references reconcile once without materializing a full base copy. Explicit daemon reindex requests scan pending edits instead of returning early while a live watcher's debounce queue still contains changes.
 - Removing a base index releases its cached worktree readers before deleting stores, preserving unrelated caches and avoiding retained file handles during Windows rebuilds.
 - Direct daemon clients in worktree E2E and million-chunk benchmarks authenticate Windows TCP connections using the daemon endpoint token before sending requests.
