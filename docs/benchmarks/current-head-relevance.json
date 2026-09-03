@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "0467a0b09267fdb8a5120182538d45cc650a854acf18048f4f5f94769ac36b98",
+    "sha256": "bbb771109c7d2e973f6d883b300d293f133facacf5774e22b994c2df20506c5b",
     "version": "ivygrep 1.2.12"
   },
   "fixture": {
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "ee70cf56bc89024b2b35f51e901e8ae226d3da50",
+  "ivygrep_commit": "d0d50ced814dc5ca4a303e3717bc6b8ee6709a99",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -25,7 +25,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 1434.954317752272,
+      "elapsed_ms": 1888.6237759143114,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -59,7 +59,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 1725.2048556692898,
+      "elapsed_ms": 1910.5530129745603,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -68,7 +68,7 @@
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
       "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9252843267329456,
+      "mean_ndcg10": 0.9208033720289349,
       "mean_p1": 0.9130434782608695,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
@@ -88,29 +88,29 @@
         "candidate_budget": 0,
         "first_useful_low": 0,
         "no_primary_judgment": 0,
-        "not_audited": 3,
-        "satisfied": 20
+        "not_audited": 2,
+        "satisfied": 21
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 2009.6779088489711,
+      "elapsed_ms": 2092.7333808504045,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.9347826086956522,
-      "mean_ndcg10": 0.9133256077564952,
-      "mean_p1": 0.8695652173913043,
+      "mean_mrr": 0.9565217391304348,
+      "mean_ndcg10": 0.9208033720289349,
+      "mean_p1": 0.9130434782608695,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "neural",
       "neural_queries_executed": 23,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 18,
+      "neural_queries_with_results": 11,
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.8695652173913043
+      "satisfaction_rate": 0.9130434782608695
     }
   },
   "runtime": {
@@ -132,6 +132,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "6b51d713d79ea2c7ed7a803ff2a5297c2dc5608d4e00d7d2620b4a77c454314d"
+    "sha256": "cc0918c1f30f0705bcf03455d656184811748e28eace1ec91a5fb5d5b458ef9c"
   }
 }

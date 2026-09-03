@@ -28,6 +28,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Failed incremental worktree publications retain a recovery marker, so a reverted edit cannot make a retry skip partially committed deletion markers. Recovery rebuilds the thin overlay in staging and preserves base-index publication behavior. Fresh overlays verify persisted base coverage and reject edits made between metadata and content capture.
 - Neural debug builds on baseline ARM64 use a dependency-scoped GEMM optimization workaround without requiring FP16 arithmetic globally. The default local and native ARM CI tests now retain application debug assertions.
 - Linked-worktree watchers reattach when an external Git `info/` directory is replaced at the same pathname; Windows watches its stable common-directory parent. Repeated replacement tests verify both hide and restore operations.
 
