@@ -72,6 +72,234 @@ fn noise() {
 
 #[test]
 #[serial]
+fn go_generic_callers_require_function_declarations() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("lib")).unwrap();
+    fs::write(
+        root.path().join("go.mod"),
+        "module example.test/generic\n\ngo 1.23\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("lib/target.go"),
+        "package lib\nfunc AuditTarget[T any](values ...T) {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("target.go"),
+        "package fixture\nfunc AuditTarget[T any](values ...T) {}\n",
+    )
+    .unwrap();
+    let source = r#"package fixture
+import "example.test/generic/lib"; import "slices"
+func inferred() { AuditTarget(1) }
+func explicit() { AuditTarget[int](1) }
+func zero() { AuditTarget[int]() }
+func multiple() { AuditTarget[int](1, 2) }
+func composite() { AuditTarget[[]int]([]int{}) }
+func parenthesized() { (AuditTarget[int])(1) }
+func parenthesizedZero() { (AuditTarget[int])() }
+func qualified() { lib.AuditTarget[int](1) }
+func qualifiedZero() { lib.AuditTarget[int]() }
+func deferred() { defer AuditTarget[int](1) }
+func goroutine() { go AuditTarget[int](1) }
+func callback() { _ = AuditTarget[int] }
+func argument() { consume(AuditTarget[int]) }
+func consume(f func(...int)) {}
+func PairTarget[T, U any](first T, second U) {}
+func pair() { PairTarget[int, string](1, "two") }
+type Conversion[T any] []T
+func conversion() { _ = Conversion[int]([]int{1}) }
+var callbacks = []func(int){func(int) {}}
+func indexed() { index := 0; callbacks[index](1) }
+func indexedLiteral() { callbacks[0](1) }
+func external() { _ = slices.Clone[[]int]([]int{1}) }
+"#;
+    fs::write(root.path().join("calls.go"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (query, expected_callers, expected_references) in [
+        (
+            "AuditTarget",
+            vec![3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            vec![3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        ),
+        ("lib.AuditTarget", vec![10, 11], vec![10, 11]),
+        ("PairTarget", vec![18], vec![18]),
+        ("slices.Clone", vec![], vec![24]),
+    ] {
+        for (mode, expected) in [
+            (SymbolSearchMode::Callers, expected_callers),
+            (SymbolSearchMode::References, expected_references),
+        ] {
+            let hits = search_symbols(&workspace, query, mode, None, None).unwrap();
+            let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(lines, expected, "{query}, {mode:?}: {hits:?}");
+            assert!(
+                hits.iter()
+                    .all(|hit| hit.file_path == Path::new("calls.go"))
+            );
+        }
+    }
+    for query in ["Conversion", "callbacks"] {
+        let hits =
+            search_symbols(&workspace, query, SymbolSearchMode::Callers, None, None).unwrap();
+        assert!(hits.is_empty(), "{query}: {hits:?}");
+    }
+    let filtered = ivygrep::symbols::search_symbols_with_options(
+        &workspace,
+        "AuditTarget",
+        SymbolSearchMode::Callers,
+        &ivygrep::search::SearchOptions {
+            type_filter: Some("go".to_string()),
+            limit: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(filtered.len(), 11);
+}
+
+#[test]
+#[serial]
+fn go_parenthesized_generic_callers_distinguish_values_and_conversions() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("lib")).unwrap();
+    fs::write(
+        root.path().join("go.mod"),
+        "module example.test/parenthesized\n\ngo 1.23\n",
+    )
+    .unwrap();
+    let declarations = "func PairTarget[T, U any](values ...T) {}\nfunc SingleTarget[T any](values ...T) {}\ntype PairType[T, U any] []T\n";
+    for (path, package) in [("target.go", "fixture"), ("lib/target.go", "lib")] {
+        fs::write(
+            root.path().join(path),
+            format!("package {package}\n{declarations}"),
+        )
+        .unwrap();
+    }
+    let source = r#"package fixture
+import "example.test/parenthesized/lib"
+func direct() { PairTarget[int, string]() }
+func parenthesized() { (PairTarget[int, string])() }
+func qualified() { (lib.PairTarget[int, string])() }
+func nested() { ((PairTarget[int, string]))() }
+func arguments() { (PairTarget[int, string])(1, 2) }
+func callback() { _ = (PairTarget[int, string]) }
+func qualifiedCallback() { _ = (lib.PairTarget[int, string]) }
+func conversion() { _ = (PairType[int, string])([]int{1}) }
+func qualifiedConversion() { _ = (lib.PairType[int, string])([]int{1}) }
+func singleComposite() { (SingleTarget[[]int])() }
+func singlePointer() { (SingleTarget[*int])() }
+func singleCallback() { _ = (SingleTarget[[]int]) }
+func typeArgument() { (PairTarget[PairType[int, string], string])() }
+"#;
+    fs::write(root.path().join("calls.go"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (query, expected_callers, expected_references) in [
+        (
+            "PairTarget",
+            vec![3, 4, 5, 6, 7, 15],
+            vec![3, 4, 5, 6, 7, 8, 9, 15],
+        ),
+        ("lib.PairTarget", vec![5], vec![5, 9]),
+        ("SingleTarget", vec![12, 13], vec![12, 13, 14]),
+        ("PairType", vec![], vec![10, 11, 15]),
+        ("lib.PairType", vec![], vec![11]),
+    ] {
+        for (mode, expected) in [
+            (SymbolSearchMode::Callers, expected_callers),
+            (SymbolSearchMode::References, expected_references),
+        ] {
+            let hits = search_symbols(&workspace, query, mode, None, None).unwrap();
+            let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(lines, expected, "{query}, {mode:?}: {hits:?}");
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn go_type_references_exclude_declarations_and_preserve_type_uses() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = r#"package fixture
+type Plain int
+type Generic[T any] []T
+type Alias = Plain
+type (
+    Grouped string
+    GroupedAlias = Generic[int]
+)
+func use(value Plain, items Generic[int], alias Alias, grouped Grouped, other GroupedAlias) {
+    _ = Plain(1)
+    _ = Generic[int]([]int{1})
+    _ = Alias(2)
+}
+type Recursive struct { Next *Recursive }
+type Wrapped Generic[int]
+"#;
+    fs::write(root.path().join("types.go"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (query, expected) in [
+        ("Plain", vec![4, 9, 10]),
+        ("Generic", vec![7, 9, 11, 15]),
+        ("Alias", vec![9, 12]),
+        ("Grouped", vec![9]),
+        ("GroupedAlias", vec![9]),
+        ("Recursive", vec![14]),
+        ("Wrapped", vec![]),
+    ] {
+        let hits =
+            search_symbols(&workspace, query, SymbolSearchMode::References, None, None).unwrap();
+        let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, expected, "{query}: {hits:?}");
+    }
+}
+
+#[test]
+#[serial]
+fn go_interface_method_references_exclude_declarations_and_preserve_uses() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = r#"package fixture
+type Input struct{}
+type Output struct{}
+type Reader interface {
+    Read(input Input) (result Output)
+}
+func call(reader Reader, input Input) Output { return reader.Read(input) }
+func value(reader Reader) func(Input) Output { return reader.Read }
+type InlineReader interface { Read(Input) Output }
+"#;
+    fs::write(root.path().join("interfaces.go"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (query, expected) in [
+        ("Read", vec![7, 8]),
+        ("reader.Read", vec![7, 8]),
+        ("Input", vec![5, 7, 8, 9]),
+        ("Output", vec![5, 7, 8, 9]),
+        ("Reader", vec![7, 8]),
+        ("InlineReader", vec![]),
+    ] {
+        let hits =
+            search_symbols(&workspace, query, SymbolSearchMode::References, None, None).unwrap();
+        let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, expected, "{query}: {hits:?}");
+    }
+    let callers =
+        search_symbols(&workspace, "Read", SymbolSearchMode::Callers, None, None).unwrap();
+    assert_eq!(callers.len(), 1, "{callers:?}");
+    assert_eq!(callers[0].start_line, 7);
+}
+
+#[test]
+#[serial]
 fn bounded_relationships_refill_after_rejecting_definitions() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
