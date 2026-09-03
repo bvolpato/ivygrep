@@ -71,6 +71,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- Benchmark reports preserve missing process-resource observations as unknown and avoid resource ratios with zero baselines; incomplete observations cannot substantiate the indexing-ceiling explanation.
 - Layered worktree E2E compares CLI and direct daemon RPC results with independent full indexes through edits, deletions, empty files, renames, branch switches, base rebuilds, sibling worktrees, restarts, and live watcher updates. Real hash and neural retrieval checks cover inheritance and shadowing; filename-only stale-base assertions now verify source content and thin overlay storage.
 - The million-chunk harness now forces neural queries after `--enhance-neural` and requires execution evidence from both CLI and daemon responses. Enrichment readiness alone no longer qualifies as a neural query measurement.
 - Context deletion acceptance checks the existing platform contract: Unix can hydrate deleted content through a pinned Git working directory; Windows retains deletion metadata and live-file context while refusing unsafe historical-only reads.

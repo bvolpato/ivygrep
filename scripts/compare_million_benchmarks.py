@@ -19,6 +19,17 @@ QUERY_PATHS = (
     "concurrent",
 )
 
+SAMPLED_PROCESS_METRICS = frozenset(
+    {"peak_rss_bytes", "cpu_ms", "filesystem_read_bytes", "filesystem_write_bytes"}
+)
+
+
+def sampled_metric(metrics: dict, name: str) -> float | None:
+    # Older artifacts did not record sample counts; retain their reported values.
+    if name in SAMPLED_PROCESS_METRICS and metrics.get("resource_samples") == 0:
+        return None
+    return metrics.get(name)
+
 
 def percentile(values: list[float], quantile: float) -> float:
     ordered = sorted(values)
@@ -155,18 +166,21 @@ def compare_runs(
 
     def resource_ratio(name: str) -> float | None:
         baseline = [
-            run["index"]["metrics"][name]
+            sampled_metric(run["index"].get("metrics", {}), name)
             for run in baseline_runs
-            if run["index"].get("metrics", {}).get(name) is not None
         ]
         current = [
-            run["index"]["metrics"][name]
+            sampled_metric(run["index"].get("metrics", {}), name)
             for run in current_runs
-            if run["index"].get("metrics", {}).get(name) is not None
         ]
-        if not baseline or not current:
+        # An incomplete run set cannot support a comparative resource claim.
+        if (
+            not baseline or not current
+            or any(value is None for value in baseline + current)
+        ):
             return None
-        return statistics.median(current) / statistics.median(baseline)
+        denominator = statistics.median(baseline)
+        return statistics.median(current) / denominator if denominator else None
 
     failures = []
     for path, comparison in query_latency_ratios.items():

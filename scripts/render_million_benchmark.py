@@ -31,6 +31,16 @@ def ratio(current: float, baseline: float) -> float:
     return current / baseline
 
 
+def resource_comparison(baseline: dict, current: dict, name: str) -> dict:
+    before = comparator.sampled_metric(baseline, name)
+    after = comparator.sampled_metric(current, name)
+    return {
+        "baseline": before,
+        "current": after,
+        "ratio": ratio(after, before) if after is not None and before not in (None, 0) else None,
+    }
+
+
 def quality_metric(matrix: dict, name: str) -> float:
     return float(matrix["summary"]["neural"]["metrics"][name]["mean"])
 
@@ -97,44 +107,16 @@ def build_report(
                 baseline_index["chunks_per_second"],
             ),
         },
-        "filesystem_write_bytes": {
-            "baseline": baseline_metrics["filesystem_write_bytes"],
-            "current": current_metrics["filesystem_write_bytes"],
-            "ratio": ratio(
-                current_metrics["filesystem_write_bytes"],
-                baseline_metrics["filesystem_write_bytes"],
-            ),
+        **{
+            name: resource_comparison(baseline_metrics, current_metrics, name)
+            for name in ("filesystem_write_bytes", "filesystem_read_bytes", "peak_rss_bytes")
         },
-        "filesystem_read_bytes": {
-            "baseline": baseline_metrics["filesystem_read_bytes"],
-            "current": current_metrics["filesystem_read_bytes"],
-            "ratio": ratio(
-                current_metrics["filesystem_read_bytes"],
-                baseline_metrics["filesystem_read_bytes"],
-            ),
-        },
-        "peak_rss_bytes": {
-            "baseline": baseline_metrics["peak_rss_bytes"],
-            "current": current_metrics["peak_rss_bytes"],
-            "ratio": ratio(
-                current_metrics["peak_rss_bytes"],
-                baseline_metrics["peak_rss_bytes"],
-            ),
-        },
-        "peak_disk_bytes": {
-            "baseline": baseline_metrics.get(
-                "peak_disk_bytes",
-                system_baseline["index"]["metrics"]["peak_disk_bytes"],
-            ),
-            "current": current_metrics["peak_disk_bytes"],
-            "ratio": ratio(
-                current_metrics["peak_disk_bytes"],
-                baseline_metrics.get(
-                    "peak_disk_bytes",
-                    system_baseline["index"]["metrics"]["peak_disk_bytes"],
-                ),
-            ),
-        },
+        "peak_disk_bytes": resource_comparison(
+            {**baseline_metrics, "peak_disk_bytes": baseline_metrics.get(
+                "peak_disk_bytes", system_baseline["index"]["metrics"]["peak_disk_bytes"],
+            )},
+            current_metrics, "peak_disk_bytes",
+        ),
         "index_size_bytes": {
             "baseline": baseline_index["size_bytes"],
             "current": current_index["size_bytes"],
@@ -147,8 +129,15 @@ def build_report(
             "baseline": baseline_index.get("components", {}),
             "current": current_index.get("components", {}),
         },
-        "documented_io_bound_ceiling": True,
     }
+    baseline_cpu = comparator.sampled_metric(system_baseline["index"]["metrics"], "cpu_ms")
+    current_cpu = comparator.sampled_metric(system_current["index"]["metrics"], "cpu_ms")
+    indexing["documented_io_bound_ceiling"] = (
+        baseline_cpu not in (None, 0) and current_cpu is not None
+        and all(indexing[name]["ratio"] is not None for name in (
+            "filesystem_write_bytes", "filesystem_read_bytes", "peak_rss_bytes",
+        ))
+    )
 
     latency = comparator.bootstrap_p95_ratio(
         paired_baseline["queries"]["warm_distinct"]["latency_samples_ms"],
@@ -241,7 +230,7 @@ def build_report(
         >= -0.02,
         "no_hit_rate_not_regressed": quality["no_hit_rate"]["absolute_delta"] <= 0.01,
         "footprint_reduced_forty_percent": indexing["index_size_bytes"]["ratio"] <= 0.60,
-        "indexing_ceiling_documented": True,
+        "indexing_ceiling_documented": indexing["documented_io_bound_ceiling"],
     }
     gate["passed"] = all(gate.values())
     return {
@@ -292,19 +281,25 @@ def build_report(
             "current_load_average": system_current["runtime"]["load_average"],
             "baseline_index_wall_ms": system_baseline["index"]["metrics"]["wall_ms"],
             "current_index_wall_ms": system_current["index"]["metrics"]["wall_ms"],
-            "baseline_index_cpu_ms": system_baseline["index"]["metrics"]["cpu_ms"],
-            "current_index_cpu_ms": system_current["index"]["metrics"]["cpu_ms"],
+            "baseline_index_cpu_ms": baseline_cpu,
+            "current_index_cpu_ms": current_cpu,
         },
         "gate": gate,
     }
 
 
-def bytes_value(value: float) -> str:
+def bytes_value(value: float | None) -> str:
+    if value is None:
+        return "unobserved"
     return f"{value / (1024**3):.2f} GiB"
 
 
 def percent_delta(value: float) -> str:
     return f"{value * 100:+.1f}%"
+
+
+def resource_delta(value: float | None) -> str:
+    return "n/a" if value is None else percent_delta(value - 1.0)
 
 
 def render_markdown(report: dict) -> str:
@@ -335,6 +330,17 @@ def render_markdown(report: dict) -> str:
     )
     load = paired["load_average"]
     components = indexing["components"]["current"]
+    ceiling_analysis = (
+        "The indexing target did not reach 2x. The measured ceiling is storage and\n"
+        "scheduler bound: producer-side compression and checkpoint changes improved the\n"
+        f"controlled run by {indexing['chunks_per_second']['ratio']:.2f}x and reduced\n"
+        "writes, while the exact full run had nearly identical process CPU time but\n"
+        "materially different host load and wall time."
+        if indexing["documented_io_bound_ceiling"] else
+        "Missing process samples or zero baselines prevent the comparative resource\n"
+        "analysis. No resource-use improvement or indexing ceiling is inferred. Wall\n"
+        "time, throughput, and final index size remain independently measured."
+    )
     return f"""# Public million-chunk benchmark
 
 This report uses a deterministic CC0 Rust corpus with
@@ -368,13 +374,13 @@ read as workstation load, not dedicated-host latency.
   {indexing["wall_ms"]["current"] / 1000:.1f} s
 - Filesystem writes: {bytes_value(indexing["filesystem_write_bytes"]["baseline"])}
   -> {bytes_value(indexing["filesystem_write_bytes"]["current"])}
-  ({percent_delta(indexing["filesystem_write_bytes"]["ratio"] - 1.0)})
+  ({resource_delta(indexing["filesystem_write_bytes"]["ratio"])})
 - Peak RSS: {bytes_value(indexing["peak_rss_bytes"]["baseline"])} ->
   {bytes_value(indexing["peak_rss_bytes"]["current"])}
-  ({percent_delta(indexing["peak_rss_bytes"]["ratio"] - 1.0)})
+  ({resource_delta(indexing["peak_rss_bytes"]["ratio"])})
 - Peak disk: {bytes_value(indexing["peak_disk_bytes"]["baseline"])} ->
   {bytes_value(indexing["peak_disk_bytes"]["current"])}
-  ({percent_delta(indexing["peak_disk_bytes"]["ratio"] - 1.0)})
+  ({resource_delta(indexing["peak_disk_bytes"]["ratio"])})
 - Final index size: {bytes_value(indexing["index_size_bytes"]["baseline"])} ->
   {bytes_value(indexing["index_size_bytes"]["current"])}
   ({percent_delta(indexing["index_size_bytes"]["ratio"] - 1.0)})
@@ -385,11 +391,7 @@ read as workstation load, not dedicated-host latency.
   {bytes_value(components.get("hash_vectors_bytes", 0))}, neural vectors
   {bytes_value(components.get("neural_vectors_bytes", 0))}
 
-The indexing target did not reach 2x. The measured ceiling is storage and
-scheduler bound: producer-side compression and checkpoint changes improved the
-controlled run by {indexing["chunks_per_second"]["ratio"]:.2f}x and reduced
-writes, while the exact full run had nearly identical process CPU time but
-materially different host load and wall time.
+{ceiling_analysis}
 
 ## Full-system query paths
 
