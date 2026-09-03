@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "f34119d4bb46fc7429b034832a74e48e1a60d93faeff41692adb1934c1e3a9c8",
+    "sha256": "fe8902986e0a9d03a080a8f19a119914f9b327f3a8a4e182c1b762cb861ce5ea",
     "version": "ivygrep 1.2.12"
   },
   "fixture": {
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "7413229df04a0657671aa323da5a8ff0e3682569",
+  "ivygrep_commit": "5c4f7b76552b95a215a9b484b42add53908b315c",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -25,7 +25,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 6091.845816001296,
+      "elapsed_ms": 3642.7330216392875,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -60,7 +60,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 5588.785100728273,
+      "elapsed_ms": 3859.8936572670937,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -95,7 +95,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 4191.118282265961,
+      "elapsed_ms": 3016.9781958684325,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.9782608695652174,
@@ -134,6 +134,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "2ac66024ab0d35e67ee82579f206b4192b64187e3b234305b3a96af9ad1aed13"
+    "sha256": "78c08df1684b37dbf758b59960822e11d132d45fad9e2ec6b22a6e1e8459c7cf"
   }
 }
