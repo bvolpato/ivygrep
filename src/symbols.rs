@@ -1072,6 +1072,7 @@ fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
                     | "module"
                     | "type_spec"
                     | "type_alias"
+                    | "method_elem"
             ))
             && parent
                 .child_by_field_name("name")

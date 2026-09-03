@@ -203,6 +203,43 @@ type Wrapped Generic[int]
 
 #[test]
 #[serial]
+fn go_interface_method_references_exclude_declarations_and_preserve_uses() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = r#"package fixture
+type Input struct{}
+type Output struct{}
+type Reader interface {
+    Read(input Input) (result Output)
+}
+func call(reader Reader, input Input) Output { return reader.Read(input) }
+func value(reader Reader) func(Input) Output { return reader.Read }
+type InlineReader interface { Read(Input) Output }
+"#;
+    fs::write(root.path().join("interfaces.go"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (query, expected) in [
+        ("Read", vec![7, 8]),
+        ("reader.Read", vec![7, 8]),
+        ("Input", vec![5, 7, 8, 9]),
+        ("Output", vec![5, 7, 8, 9]),
+        ("Reader", vec![7, 8]),
+        ("InlineReader", vec![]),
+    ] {
+        let hits =
+            search_symbols(&workspace, query, SymbolSearchMode::References, None, None).unwrap();
+        let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, expected, "{query}: {hits:?}");
+    }
+    let callers =
+        search_symbols(&workspace, "Read", SymbolSearchMode::Callers, None, None).unwrap();
+    assert_eq!(callers.len(), 1, "{callers:?}");
+    assert_eq!(callers[0].start_line, 7);
+}
+
+#[test]
+#[serial]
 fn bounded_relationships_refill_after_rejecting_definitions() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

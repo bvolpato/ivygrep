@@ -325,12 +325,12 @@ Reference searches use indexed identifier candidates, then verify source syntax.
 `--refs` includes non-call uses such as callbacks and function values; `--callers`
 returns chunks containing calls. Whitespace, newlines, and generic arguments do
 not need to be adjacent to the name. Tree-sitter excludes declaration names,
-including Go type and alias names, comments, and literal text; files without a
-usable parse use quote/comment masking and a conservative declaration/call
-heuristic. Qualified references match the immediate textual receiver name
-(ignoring scoped generic arguments),
-not an inferred receiver type. This is best-effort syntax lookup, not compiler
-resolution of imports, aliases, overloads, or shadowed bindings. Go generic calls
+including Go type, alias, and interface method names, comments, and literal
+text; files without a usable parse use quote/comment masking and a conservative
+declaration/call heuristic. Qualified references match the immediate textual
+receiver name (ignoring scoped generic arguments), not an inferred receiver
+type. This is best-effort syntax lookup, not compiler resolution of imports,
+aliases, overloads, or shadowed bindings. Go generic calls
 that parse as conversions or indexed expressions require a matching indexed
 generic-function declaration; ambiguous calls to external generic functions
 without indexed definitions remain references only. Bounded requests widen
