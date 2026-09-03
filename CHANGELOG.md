@@ -28,6 +28,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Bound raw cosine corroboration of direct search candidates to one semantic rank vote, preserving semantic-only discovery. The unchanged CoSQA gates now pass; the public evidence records per-dataset ranking tradeoffs.
 - Invalid Boolean queries now explain how to search pasted code or prose using matching backticks or a fenced code block. Invalid constraints still fail rather than silently falling back to relaxed search.
 - Worktree references track the base index's incarnation as well as its generation, so daemon-driven forced rebuilds and remove/re-add cycles cannot silently reuse stale overlays. Legacy references reconcile once without materializing a full base copy. Explicit daemon reindex requests scan pending edits instead of returning early while a live watcher's debounce queue still contains changes.
 - Removing a base index releases its cached worktree readers before deleting stores, preserving unrelated caches and avoiding retained file handles during Windows rebuilds.
@@ -72,10 +73,12 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- Benchmark reports preserve missing process-resource observations as unknown and avoid resource ratios with zero baselines; incomplete observations cannot substantiate the indexing-ceiling explanation.
+- Public matrices can require fit-disjoint queries against the executed reranker model SHA-256, not only its name. Runtime status and doctor expose the embedded model digest; older binaries remain unverified.
 - Layered worktree E2E compares CLI and direct daemon RPC results with independent full indexes through edits, deletions, empty files, renames, branch switches, base rebuilds, sibling worktrees, restarts, and live watcher updates. Real hash and neural retrieval checks cover inheritance and shadowing; filename-only stale-base assertions now verify source content and thin overlay storage.
 - The million-chunk harness now forces neural queries after `--enhance-neural` and requires execution evidence from both CLI and daemon responses. Enrichment readiness alone no longer qualifies as a neural query measurement.
 - Context deletion acceptance checks the existing platform contract: Unix can hydrate deleted content through a pinned Git working directory; Windows retains deletion metadata and live-file context while refusing unsafe historical-only reads.
-- Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; applicability to the executed model remains unverified. Model weights and acceptance gates are unchanged.
+- Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; older runs without executed-model checksums remain unverified. Model weights and acceptance gates are unchanged.
 - Reranker training consumes captured native feature vectors instead of reconstructing grouped search output. Benchmark reuse verifies dataset, binary, harness, configuration, and runtime fingerprints while retaining original execution provenance; legacy or incompatible results require a fresh run.
 - The Web UI "late search results" browser test tells its scripted streams apart by URL and releases the superseded search's results only after navigation completed, instead of racing a 100 ms timer against the runner.
 - The `incremental_reindex_no_change` guard uses an absolute budget (`benchmark_guard.py --max-median-ms 25`, confirmed by a second head measurement) instead of a paired ratio: identical code measured 1.5-1.8x apart within one shared-runner job for this 3 ms benchmark, so the ratio carried no signal, while a fast path that starts doing real work still blows the budget. The larger benches keep their ratio guards, and the neural-tier ANN graph (`neural_vector_search_in_50k_hot`) is guarded alongside the hash-tier one.

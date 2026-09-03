@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::protocol::SearchHit;
 
@@ -124,6 +125,7 @@ struct LearnedModel {
 pub(crate) struct RuntimeStatus {
     pub mode: String,
     pub model_id: Option<String>,
+    pub model_sha256: Option<String>,
     pub error: Option<String>,
 }
 
@@ -213,6 +215,15 @@ pub(crate) fn capture_skipped(query: &str, reason: &'static str) {
 
 static MODEL: OnceLock<Result<LearnedModel, String>> = OnceLock::new();
 
+fn embedded_model_sha256() -> &'static str {
+    static CHECKSUM: OnceLock<String> = OnceLock::new();
+    CHECKSUM.get_or_init(|| {
+        hex::encode(Sha256::digest(include_bytes!(
+            "../benchmarks/public/reranker_model.json"
+        )))
+    })
+}
+
 fn load_model() -> &'static Result<LearnedModel, String> {
     MODEL.get_or_init(|| {
         let model: LearnedModel =
@@ -264,6 +275,7 @@ pub(crate) fn runtime_status() -> RuntimeStatus {
         return RuntimeStatus {
             mode: "deterministic".to_string(),
             model_id: None,
+            model_sha256: None,
             error,
         };
     }
@@ -271,6 +283,7 @@ pub(crate) fn runtime_status() -> RuntimeStatus {
         Ok(model) => RuntimeStatus {
             mode: "learned".to_string(),
             model_id: Some(model.model_id.clone()),
+            model_sha256: Some(embedded_model_sha256().to_owned()),
             error,
         },
         Err(model_error) => {
@@ -281,6 +294,7 @@ pub(crate) fn runtime_status() -> RuntimeStatus {
             RuntimeStatus {
                 mode: "deterministic".to_string(),
                 model_id: None,
+                model_sha256: None,
                 error,
             }
         }

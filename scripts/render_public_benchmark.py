@@ -8,6 +8,8 @@ from html import escape
 import json
 from pathlib import Path
 
+from public_retrieval_contracts import executed_fit_model_verified, verified_fit_disjoint
+
 
 def metric(matrix: dict, mode: str, name: str) -> float:
     return matrix["summary"][mode]["metrics"][name]["mean"]
@@ -70,6 +72,8 @@ def query_evidence_label(matrix: dict) -> str:
     if matrix["profile"] == "reranker-fit":
         return "checkout-reference model-fit queries"
     audit = matrix.get("fit_query_audit") or {}
+    if verified_fit_disjoint(audit):
+        return "verified fit-disjoint diagnostic queries"
     reference = audit.get("reference", {}) if audit.get("schema_version") == 2 else {}
     if reference.get("verified") is True and audit.get("overlap_queries") == 0:
         return "checkout-reference fit-disjoint queries (executed model unverified)"
@@ -79,11 +83,23 @@ def query_evidence_label(matrix: dict) -> str:
 
 
 def query_evidence_note(matrix: dict) -> str:
+    audit = matrix.get("fit_query_audit") or {}
+    if verified_fit_disjoint(audit):
+        return (
+            "Runtime-reported model bytes match the checksum-bound fit ledger, with zero repository-qualified fit-ID overlap. "
+            "This does not prove semantic independence, absence of development-time exposure, or reranker invocation on every query. "
+            "The diagnostic does not replace the public-core release gate."
+        )
     if matrix["profile"] == "public-core":
+        attestation = (
+            "Runtime-reported model bytes match the checksum-bound fit ledger. "
+            if executed_fit_model_verified(audit) else
+            "Fit-ID applicability to the executed model is unverified without model-checksum attestation. "
+        )
         return (
             "Public-core is regression evidence, not an unseen-query generalization set: "
             "it overlaps the checkout-reference reranker's fit data. "
-            "Fit-ID applicability to the executed model is unverified without model-checksum attestation. "
+            + attestation +
             "Its query set and acceptance gates are unchanged."
         )
     audit = matrix.get("fit_query_audit") or {}
@@ -92,6 +108,8 @@ def query_evidence_note(matrix: dict) -> str:
         "Executed-model fit disjointness is unverified: no model-checksum attestation binds the binary to the reference. "
         "Matching model IDs do not identify model bytes. This diagnostic does not replace the public-core release gate."
     )
+    if executed_fit_model_verified(audit):
+        applicability = "Runtime-reported model bytes match the fit ledger, but overlapping fit IDs are not disjoint evidence."
     if reference.get("verified") is True:
         return f"The checkout-reference fit ledger overlaps {audit['overlap_queries']} query IDs. {applicability}"
     return f"This artifact does not record verified checkout-reference fit-ID disjointness. {applicability}"

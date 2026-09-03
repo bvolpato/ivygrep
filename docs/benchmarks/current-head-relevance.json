@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "6c70fb4346837f71150e9d309cb43e9c4ca899e80aec5068961a5cffc5e28a6f",
+    "sha256": "fe8902986e0a9d03a080a8f19a119914f9b327f3a8a4e182c1b762cb861ce5ea",
     "version": "ivygrep 1.2.12"
   },
   "fixture": {
@@ -11,31 +11,32 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "c73dc6912be1dbd11a182b6822a49ead014e78cc",
+  "ivygrep_commit": "5c4f7b76552b95a215a9b484b42add53908b315c",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 3,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 21
+        "satisfied": 20
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 1503.79469525069,
+      "elapsed_ms": 3642.7330216392875,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "daemon-watch"
+        "daemon-watch",
+        "identifier-tokenization"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9252843267329456,
-      "mean_p1": 0.9130434782608695,
+      "mean_mrr": 0.9275362318840579,
+      "mean_ndcg10": 0.9042923118516337,
+      "mean_p1": 0.8695652173913043,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "foreground",
@@ -45,31 +46,32 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.8695652173913043
     },
     "hash-enriched": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 3,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 21
+        "satisfied": 20
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 1745.3307616524398,
+      "elapsed_ms": 3859.8936572670937,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "daemon-watch"
+        "daemon-watch",
+        "identifier-tokenization"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9252843267329456,
-      "mean_p1": 0.9130434782608695,
+      "mean_mrr": 0.9275362318840579,
+      "mean_ndcg10": 0.9042923118516337,
+      "mean_p1": 0.8695652173913043,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "hash-enriched",
@@ -79,7 +81,7 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.8695652173913043
     },
     "neural": {
       "audit_stage_counts": {
@@ -93,20 +95,20 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 1968.7053570523858,
+      "elapsed_ms": 3016.9781958684325,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.9347826086956522,
-      "mean_ndcg10": 0.9133256077564952,
+      "mean_mrr": 0.9275362318840579,
+      "mean_ndcg10": 0.9042923118516337,
       "mean_p1": 0.8695652173913043,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "neural",
       "neural_queries_executed": 23,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 19,
+      "neural_queries_with_results": 14,
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
@@ -114,8 +116,8 @@
     }
   },
   "runtime": {
-    "machine": "x86_64",
-    "release": "6.17.0-1025-oem",
+    "machine": "aarch64",
+    "release": "6.8.0-1057-aws",
     "system": "Linux"
   },
   "schema_version": 1,
@@ -132,6 +134,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "d47735db3dd0789fef1baf8c4cb258bf47dd3adbb7fd0fc21561919db6e0e607"
+    "sha256": "78c08df1684b37dbf758b59960822e11d132d45fad9e2ec6b22a6e1e8459c7cf"
   }
 }

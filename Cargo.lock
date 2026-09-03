@@ -2624,6 +2624,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
  "shlex 2.0.1",
  "smallvec",
  "streaming-iterator",
