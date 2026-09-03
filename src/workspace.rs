@@ -59,7 +59,8 @@ pub struct Workspace {
 ///  25: Python and Objective-C dependency graphs use source syntax
 ///  26: Rebuild legacy payloads using contained source reads
 ///  27: Preserve Unicode symbol names and identifier boundaries
-pub const INDEX_FORMAT_VERSION: u32 = 27;
+///  28: Rust dependency paths respect Cargo package and target roots
+pub const INDEX_FORMAT_VERSION: u32 = 28;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
