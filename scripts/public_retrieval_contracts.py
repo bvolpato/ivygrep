@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 
 
 EXECUTION_SCHEMA_VERSION = 1
@@ -730,6 +731,78 @@ def audit_public_profile(
     audit = audit_fit_queries(ledger, datasets, role)
     audit["reference"]["ledger_sha256"] = config["sha256"]
     return audit
+
+
+def attest_executed_fit_model(audit: dict, results: list[dict], binary_sha256: str) -> dict:
+    """Bind the fit ledger to runtime-reported model bytes, not just a model ID."""
+    reference = audit.get("reference", {})
+    expected_model = reference.get("model_sha256")
+    expected_id = reference.get("model_id")
+    valid_reference = (
+        audit.get("schema_version") == 2
+        and reference.get("verified") is True
+        and isinstance(expected_model, str)
+        and re.fullmatch(r"[0-9a-f]{64}", expected_model) is not None
+        and isinstance(expected_id, str) and bool(expected_id)
+        and isinstance(binary_sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", binary_sha256) is not None
+    )
+    observed_ids, observed_checksums = set(), set()
+    attested = 0
+    for result in results:
+        configuration = result.get("index_configuration", {})
+        model_id = configuration.get("reranker_model")
+        checksum = configuration.get("reranker_model_sha256")
+        if isinstance(model_id, str):
+            observed_ids.add(model_id)
+        if isinstance(checksum, str):
+            observed_checksums.add(checksum)
+        if (valid_reference and result.get("binary", {}).get("sha256") == binary_sha256
+                and configuration.get("reranker_mode") == "learned"
+                and model_id == expected_id and checksum == expected_model):
+            attested += 1
+    verified = bool(results) and attested == len(results)
+    audit["executed_binary"] = {
+        "applicability": "verified" if verified else "unverified",
+        "attestation": "runtime-reported-embedded-model-sha256",
+        "binary_sha256": binary_sha256,
+        "observed_model_ids": sorted(observed_ids),
+        "observed_model_sha256": sorted(observed_checksums),
+        "attested_results": attested, "results": len(results),
+        "reason": (
+            "Every result reports the model bytes bound to the fit ledger; this does not attest invocation on every query."
+            if verified else
+            "A model checksum, model ID, enabled mode, binary identity, or verified fit ledger is missing or mismatched."
+        ),
+    }
+    return audit
+
+
+def executed_fit_model_verified(audit: dict) -> bool:
+    execution = audit.get("executed_binary", {})
+    reference = audit.get("reference", {})
+    return (
+        audit.get("schema_version") == 2
+        and reference.get("verified") is True
+        and isinstance(reference.get("model_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", reference["model_sha256"]) is not None
+        and isinstance(reference.get("model_id"), str) and bool(reference["model_id"])
+        and execution.get("applicability") == "verified"
+        and execution.get("attestation") == "runtime-reported-embedded-model-sha256"
+        and execution.get("observed_model_sha256") == [reference.get("model_sha256")]
+        and execution.get("observed_model_ids") == [reference.get("model_id")]
+        and type(execution.get("results")) is int and execution["results"] > 0
+        and type(execution.get("attested_results")) is int
+        and execution.get("attested_results") == execution.get("results")
+    )
+
+
+def verified_fit_disjoint(audit: dict) -> bool:
+    return (
+        executed_fit_model_verified(audit)
+        and type(audit.get("queries")) is int and audit["queries"] > 0
+        and type(audit.get("overlap_queries")) is int and audit["overlap_queries"] == 0
+    )
 
 
 def validate_public_selection(

@@ -19,13 +19,20 @@ public-core release gate. IDs are qualified by query repository; this is not a
 claim that semantically similar questions or corpus documents are disjoint.
 Overlap alone does not prove model overfitting.
 
-Schema 2 separates verified `reference` model/ledger checksums from
-`executed_binary.applicability`, which remains `unverified`. A supplied binary
-can embed different weights, including weights with the same model ID. Neither
-that ID nor the binary's own checksum binds its embedded model to the checkout
-reference. No executed-model checksum attestation is currently available, so
-even zero reference-ID overlap does not certify fit disjointness for the
-evaluated binary. Observed binary checksums and model IDs are informational only.
+Schema 2 separates the verified `reference` model/ledger from the executed
+binary. New binaries expose `reranker_model_sha256` in workspace status and
+`--doctor --json`, computed from the embedded model bytes. The matrix checks
+that every result reports that checksum, the expected model ID, learned mode,
+and the selected binary checksum before marking applicability `verified`.
+Missing checksums, same-name/different-byte models, and disabled rerankers stay
+`unverified`.
+
+Use `--profile reranker-eval --require-fit-disjoint` to fail the matrix unless
+actual repository-qualified query IDs have zero fit-ledger overlap and every
+result attests the matching embedded model. This proves the stated ID/byte
+relationship, not semantic independence, lack of development-time exposure,
+or learned-reranker invocation on every query. Routing can skip the learned
+stage even when the model is available. It does not replace public-core.
 
 Existing public artifacts remain readable. The renderer labels public-core as
 regression evidence and does not upgrade legacy `verified` flags into
