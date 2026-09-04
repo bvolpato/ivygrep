@@ -500,10 +500,13 @@ fn index_workspace_with_options(
         .is_some_and(|metadata| metadata.skip_gitignore);
     let indexed_filter_is_current =
         workspace_index_matches_skip_gitignore(workspace, skip_gitignore);
+    let incomplete = workspace.indexing_incomplete_path().try_exists()?;
+    let mut rebuild_main = incomplete && !workspace.is_worktree();
     let index_health = workspace.quick_index_health();
     let mut reset_worktree_overlay =
         reset_worktree_overlay || (workspace.is_worktree() && index_health.needs_rebuild());
     if index_health.needs_rebuild()
+        && (!rebuild_main || workspace.index_layout_changed())
         && (!workspace.is_worktree()
             || preserved_metadata.is_none()
             || workspace.index_layout_changed())
@@ -520,7 +523,6 @@ fn index_workspace_with_options(
             uuid::Uuid::new_v4().to_string(),
         )?;
     }
-    let mut rebuild_main = false;
     if index_health.is_queryable()
         && let Err(error) = validate_existing_index_storage(workspace)
     {
@@ -624,11 +626,10 @@ fn index_workspace_with_options(
     });
 
     let result = retry_transient_tantivy_writes(|| {
-        // Overlay SQLite may have committed before Tantivy or the snapshot failed.
+        // SQLite may have committed before Tantivy or the snapshot failed.
         // If inputs change before a retry, replaying their old Merkle diff can
         // incorrectly become a no-op over those partially published stores.
-        let incomplete =
-            workspace.is_worktree() && workspace.indexing_incomplete_path().try_exists()?;
+        let incomplete = workspace.indexing_incomplete_path().try_exists()?;
         index_workspace_inner(
             workspace,
             embedding_model,
@@ -636,17 +637,15 @@ fn index_workspace_with_options(
             watcher_paths,
             skip_gitignore,
             reset_worktree_overlay || (incomplete && workspace.is_worktree()),
-            rebuild_main,
+            rebuild_main || (incomplete && !workspace.is_worktree()),
         )
     });
     let result = result.and_then(|summary| {
         record_indexed_skip_gitignore(workspace, skip_gitignore)?;
-        if workspace.is_worktree() {
-            match fs::remove_file(workspace.indexing_incomplete_path()) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
+        match fs::remove_file(workspace.indexing_incomplete_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         Ok(summary)
     });
@@ -1106,8 +1105,8 @@ fn index_workspace_inner(
     let use_overlay =
         initializing_overlay || workspace.has_overlay() || workspace.base_ref_path().exists();
     let is_fresh_index = initializing_overlay || rebuild_main || !workspace_is_indexed(workspace);
-    if use_overlay && !is_fresh_index {
-        // Leave this marker on every failed/aborted incremental overlay publication.
+    if !is_fresh_index {
+        // Leave this marker on every failed/aborted incremental publication.
         // Fresh builds already isolate writes in staging. No-op scans return
         // above without touching this marker or any index stores.
         fs::write(
@@ -1586,6 +1585,12 @@ fn index_workspace_inner(
         if initializing_overlay {
             staging.promote_overlay(workspace)?;
         } else {
+            // Main metadata and snapshot follow store promotion. A failure in
+            // that interval must not let an old snapshot authorize a no-op.
+            fs::write(
+                workspace.indexing_incomplete_path(),
+                b"publication pending\n",
+            )?;
             staging.promote(workspace)?;
         }
         staging_publish_started.elapsed().as_secs_f64() * 1_000.0
@@ -1670,6 +1675,10 @@ fn capture_base_overlay_state(workspace: &Workspace) -> Result<(u64, String, Mer
         .with_context(|| format!("failed to acquire base index lock {}", lock_path.display()))?;
 
     let state: Result<(u64, String, MerkleSnapshot)> = (|| {
+        anyhow::ensure!(
+            !workspace.indexing_incomplete_path().try_exists()?,
+            "base index publication is incomplete; retry indexing"
+        );
         let generation = workspace
             .read_metadata()?
             .map(|metadata| metadata.index_generation)
@@ -4439,6 +4448,19 @@ mod tests {
         let (committed, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
         let reader = committed.reader().unwrap();
         let old_searcher = reader.searcher();
+        let count_path = |searcher: &tantivy::Searcher, path: &str| {
+            searcher
+                .search(
+                    &tantivy::query::TermQuery::new(
+                        Term::from_field_text(fields.file_path, path),
+                        tantivy::schema::IndexRecordOption::Basic,
+                    ),
+                    &tantivy::collector::Count,
+                )
+                .unwrap()
+        };
+        assert_eq!(old_searcher.num_docs(), 2);
+        assert_eq!(count_path(&old_searcher, "removed.rs"), 0);
         let live_files = committed
             .load_metas()
             .unwrap()
@@ -4451,6 +4473,9 @@ mod tests {
                 (path, bytes)
             })
             .collect::<HashMap<_, _>>();
+        drop(old_searcher);
+        drop(reader);
+        drop(committed);
         assert!(
             live_files
                 .keys()
@@ -4463,7 +4488,7 @@ mod tests {
         fs::write(&unmanaged, "not managed by Tantivy").unwrap();
 
         fs::write(root.path().join("lib.rs"), "pub fn recovered_marker() {}\n").unwrap();
-        let failure = fail_tantivy_commits(&workspace.tantivy_dir());
+        let failure = fail_tantivy_commits(&workspace.index_dir);
         for _ in 0..2 {
             let error = index_workspace_for_watcher(&workspace, &model).unwrap_err();
             assert!(
@@ -4510,28 +4535,15 @@ mod tests {
         let (recovered, _) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
         let new_reader = recovered.reader().unwrap();
         let searcher = new_reader.searcher();
-        let count_path = |searcher: &tantivy::Searcher, path: &str| {
-            searcher
-                .search(
-                    &tantivy::query::TermQuery::new(
-                        Term::from_field_text(fields.file_path, path),
-                        tantivy::schema::IndexRecordOption::Basic,
-                    ),
-                    &tantivy::collector::Count,
-                )
-                .unwrap()
-        };
         assert_eq!(searcher.num_docs(), 2);
         assert_eq!(count_path(&searcher, "lib.rs"), 1);
         assert_eq!(count_path(&searcher, "stable.rs"), 1);
         assert_eq!(count_path(&searcher, "removed.rs"), 0);
-        assert_eq!(old_searcher.num_docs(), 2);
-        assert_eq!(count_path(&old_searcher, "removed.rs"), 0);
         assert!(indexed_texts_for_file(&workspace, "lib.rs")[0].contains("recovered_marker"));
         assert_eq!(count_chunks(&workspace.sqlite_path()).unwrap(), 2);
-        assert_eq!(
-            fs::read_to_string(unmanaged).unwrap(),
-            "not managed by Tantivy"
+        assert!(
+            !unmanaged.exists(),
+            "recovery must replace the partial store"
         );
         let noop = index_workspace_for_watcher(&workspace, &model).unwrap();
         assert_eq!(noop.indexed_files + noop.deleted_files, 0);

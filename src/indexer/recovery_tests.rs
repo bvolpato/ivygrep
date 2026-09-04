@@ -127,8 +127,13 @@ fn corrupt_store_recovery_rebuilds_all_sources_and_preserves_settings() {
             let mut incomplete = before.clone();
             incomplete.last_indexed_at_unix = None;
             workspace.write_metadata(&incomplete).unwrap();
-            index_workspace_inner(workspace, &fixture.model, false, None, true, false, false)
-                .unwrap()
+            let summary =
+                index_workspace_inner(workspace, &fixture.model, false, None, true, false, false)
+                    .unwrap();
+            // This test bypasses the outer entry point, which normally clears
+            // the publication marker after recording the indexed filter.
+            fs::remove_file(workspace.indexing_incomplete_path()).unwrap();
+            summary
         };
 
         assert_eq!(
@@ -232,4 +237,69 @@ fn interrupted_corrupt_store_recovery_preserves_live_generation_and_retries() {
             .indexed_files,
         0
     );
+}
+
+#[test]
+#[serial]
+fn failed_main_snapshot_publication_rebuilds_after_sources_change() {
+    for staged_rebuild in [false, true] {
+        let fixture = RecoveryFixture::new();
+        let workspace = &fixture.workspace;
+        let expected = stored_texts(workspace);
+        let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+        fs::write(
+            fixture.root.path().join("transient.rs"),
+            "pub fn transient_publication_marker() {}\n",
+        )
+        .unwrap();
+        if staged_rebuild {
+            fs::write(workspace.vector_path(), "corrupt vector store").unwrap();
+        }
+        let blocker = workspace.merkle_snapshot_path().with_extension("tmp");
+        fs::create_dir(&blocker).unwrap();
+        index_workspace_for_watcher(workspace, &fixture.model).unwrap_err();
+        assert!(stored_texts(workspace).contains_key("transient.rs"));
+        assert_eq!(
+            fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+        fs::remove_dir(blocker).unwrap();
+        fs::remove_file(fixture.root.path().join("transient.rs")).unwrap();
+
+        // The source diff against the old snapshot is now empty, even though
+        // the live stores include a file that no longer exists.
+        index_workspace_for_watcher(workspace, &fixture.model).unwrap();
+        assert_eq!(stored_texts(workspace), expected);
+        assert!(workspace.index_health().is_queryable());
+        assert!(!workspace.indexing_incomplete_path().exists());
+        assert_visible(workspace, "stable_recovery_marker", "stable.rs");
+        assert_eq!(
+            index_workspace_for_watcher(workspace, &fixture.model)
+                .unwrap()
+                .indexed_files,
+            0
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn doctor_repairs_failed_main_snapshot_publication() {
+    let fixture = RecoveryFixture::new();
+    let workspace = &fixture.workspace;
+    fixture.edit();
+    let blocker = workspace.merkle_snapshot_path().with_extension("tmp");
+    fs::create_dir(&blocker).unwrap();
+    index_workspace_for_watcher(workspace, &fixture.model).unwrap_err();
+    fs::remove_dir(blocker).unwrap();
+
+    let report = crate::doctor::inspect_workspace(workspace);
+    assert!(
+        !report.healthy,
+        "unfinished publication must not look healthy"
+    );
+    let repaired = crate::doctor::inspect_and_maybe_fix(workspace, true, true).unwrap();
+    assert!(repaired.healthy && repaired.repaired, "{repaired:?}");
+    assert_visible(workspace, "updated_recovery_marker", "changed.rs");
+    assert_visible(workspace, "stable_recovery_marker", "stable.rs");
 }

@@ -568,6 +568,9 @@ impl Workspace {
             .base_index_dir
             .as_ref()
             .context("worktree has no base index directory")?;
+        if self.has_unfinished_index_publication() || index_publication_is_unfinished(base_dir) {
+            return Ok(true);
+        }
         let metadata_path = base_dir.join("workspace.json");
         let metadata: WorkspaceMetadata = serde_json::from_slice(
             &fs::read(&metadata_path)
@@ -646,6 +649,16 @@ impl Workspace {
 
     pub(crate) fn indexing_incomplete_path(&self) -> PathBuf {
         self.index_dir.join(".indexing.incomplete")
+    }
+
+    pub(crate) fn has_unfinished_index_publication(&self) -> bool {
+        index_publication_is_unfinished(&self.index_dir)
+    }
+
+    pub(crate) fn base_has_unfinished_index_publication(&self) -> bool {
+        self.base_index_dir
+            .as_deref()
+            .is_some_and(index_publication_is_unfinished)
     }
 
     pub fn indexing_progress_path(&self) -> PathBuf {
@@ -1077,10 +1090,11 @@ impl Workspace {
             issues.push("workspace checkout role changed; rebuild required".to_string());
         }
 
-        if self.is_worktree() && self.indexing_incomplete_path().exists() {
-            issues.push(
-                "incremental overlay publication is incomplete; rebuild required".to_string(),
-            );
+        if self.has_unfinished_index_publication() {
+            issues.push("index publication is incomplete; rebuild required".to_string());
+        }
+        if self.base_has_unfinished_index_publication() {
+            issues.push("base index publication is incomplete; rebuild required".to_string());
         }
 
         // Detect crashed indexing: if .indexing.pid exists but the process is
@@ -2184,6 +2198,14 @@ fn shallow_dir_size_bytes(dir: &Path) -> u64 {
         .sum()
 }
 
+fn index_publication_is_unfinished(index_dir: &Path) -> bool {
+    index_dir.join(".indexing.incomplete").exists()
+        && !matches!(
+            legacy_pid_status(&index_dir.join(".indexing.pid"), false),
+            LegacyPidStatus::Alive
+        )
+}
+
 /// Check if a background process is alive by reading the PID file.
 /// Returns false (and cleans up the file) if the PID is stale.
 fn is_active_pid_alive(pid_path: &Path) -> bool {
@@ -2891,6 +2913,46 @@ mod tests {
         let health = ws.index_health();
         assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
         assert!(health.has_indexable_files);
+    }
+
+    #[test]
+    #[serial]
+    fn index_health_waits_for_active_publication_before_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "pub fn active_publication() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+
+        std::fs::write(
+            workspace.indexing_incomplete_path(),
+            "publication pending\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.indexing_pid_path(),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert!(!workspace.has_unfinished_index_publication());
+        assert!(workspace.quick_index_health().is_queryable());
+
+        std::fs::remove_file(workspace.indexing_pid_path()).unwrap();
+        assert!(workspace.has_unfinished_index_publication());
+        let health = workspace.quick_index_health();
+        assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("publication is incomplete"))
+        );
     }
 
     #[test]
