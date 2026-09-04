@@ -841,50 +841,67 @@ fn literal_search_paths(
     paths: &[(PathBuf, PathBuf)],
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let mut hits = paths
-        .par_iter()
-        .flat_map_iter(|(rel_path, path)| {
-            if options.is_cancelled() {
-                return Vec::new();
-            }
-            let Ok(content) = crate::workspace_file::read_to_string(root, path) else {
-                return Vec::new();
-            };
-            let lines = content.lines().collect::<Vec<_>>();
-            lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| {
-                    !options.is_cancelled() && line.to_ascii_lowercase().contains(query_lower)
-                })
-                .map(|(index, line)| {
-                    let line_number = index.saturating_add(1);
-                    let (start_line, end_line) = snippet_bounds(line_number, context, lines.len());
-                    SearchHit {
-                        file_path: rel_path.clone(),
-                        start_line,
-                        end_line,
-                        preview: lines[start_line.saturating_sub(1)..end_line].join("\n"),
-                        reason: format!("literal match: {}", truncate_for_reason(line.trim())),
-                        score: 1.0,
-                        sources: vec!["literal".to_string()],
-                        neural_requested: false,
-                        neural_executed: false,
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    let merge_hits = |mut left: Vec<SearchHit>, right: Vec<SearchHit>| {
+        left.extend(right);
+        left.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.end_line.cmp(&b.end_line))
+        });
+        left.truncate(max_hits);
+        left
+    };
+    let per_file = paths.par_iter().map(|(rel_path, path)| {
+        if options.is_cancelled() {
+            return Vec::new();
+        }
+        let Ok(content) = crate::workspace_file::read_to_string(root, path) else {
+            return Vec::new();
+        };
+        let lines = content.lines().collect::<Vec<_>>();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                !options.is_cancelled() && line.to_ascii_lowercase().contains(query_lower)
+            })
+            // File order and snippet bounds are monotonic in source order.
+            // Later matches cannot enter the final bounded result set.
+            .take(max_hits)
+            .map(|(index, line)| {
+                let line_number = index.saturating_add(1);
+                let (start_line, end_line) = snippet_bounds(line_number, context, lines.len());
+                SearchHit {
+                    file_path: rel_path.clone(),
+                    start_line,
+                    end_line,
+                    preview: lines[start_line.saturating_sub(1)..end_line].join("\n"),
+                    reason: format!("literal match: {}", truncate_for_reason(line.trim())),
+                    score: 1.0,
+                    sources: vec!["literal".to_string()],
+                    neural_requested: false,
+                    neural_executed: false,
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let hits = if max_hits == usize::MAX {
+        let hits = per_file.flatten_iter().collect();
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
+        merge_hits(Vec::new(), hits)
+    } else {
+        // Keep worker-local and merged sets bounded instead of collecting
+        // every file's matches before applying the request limit.
+        per_file
+            .fold(Vec::new, merge_hits)
+            .reduce(Vec::new, merge_hits)
+    };
     if options.is_cancelled() {
         return Ok(Vec::new());
     }
-    hits.sort_by(|left, right| {
-        left.file_path
-            .cmp(&right.file_path)
-            .then_with(|| left.start_line.cmp(&right.start_line))
-            .then_with(|| left.end_line.cmp(&right.end_line))
-    });
-    hits.truncate(max_hits);
     Ok(hits)
 }
 
@@ -6357,6 +6374,40 @@ mod tests {
         let hits = literal_search(&workspace, "apply_filter", &SearchOptions::default()).unwrap();
         assert_eq!(hits.len(), 1, "same source line must appear once: {hits:?}");
         assert!(hits[0].preview.contains("fn apply_filter"));
+    }
+
+    #[test]
+    fn literal_search_limits_preserve_parallel_path_and_snippet_order() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let paths = (0..48)
+            .rev()
+            .map(|index| {
+                let relative = PathBuf::from(format!("file_{index:03}.txt"));
+                let absolute = root.join(&relative);
+                fs::write(
+                    &absolute,
+                    "first needle\nno match\nsecond NEEDLE\nlast needle\n",
+                )
+                .unwrap();
+                (relative, absolute)
+            })
+            .collect::<Vec<_>>();
+        for context in [0, 2, 100] {
+            let options = SearchOptions::default();
+            let all = literal_search_paths(&root, "needle", context, usize::MAX, &paths, &options)
+                .unwrap();
+            assert_eq!(all.len(), 48 * 3);
+            assert_eq!(all[0].file_path, Path::new("file_000.txt"));
+            for limit in [0, 1, 2, 5, 49, 145] {
+                let hits = literal_search_paths(&root, "needle", context, limit, &paths, &options)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(hits).unwrap(),
+                    serde_json::to_value(&all[..limit.min(all.len())]).unwrap()
+                );
+            }
+        }
     }
 
     #[test]
