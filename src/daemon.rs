@@ -468,6 +468,120 @@ struct FileStamp {
     modified_nanos: u128,
 }
 
+/// Only filesystem inputs that can change workspace/base identity. Ordinary
+/// source edits and branch checkouts do not invalidate resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkspaceResolutionSignature {
+    root: PathBuf,
+    root_identity: DirectoryIdentity,
+    git_dir: PathBuf,
+    git_identity: DirectoryIdentity,
+    common_dir: PathBuf,
+    common_identity: DirectoryIdentity,
+    config: Option<Vec<u8>>,
+    worktree_config: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DirectoryIdentity {
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl DirectoryIdentity {
+    fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_dir() {
+            return None;
+        }
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        let created = metadata.created().ok();
+        #[cfg(not(unix))]
+        if created.is_none() {
+            return None;
+        }
+        Some(Self {
+            created,
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
+    }
+}
+
+impl WorkspaceResolutionSignature {
+    fn same_checkout(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.root_identity == other.root_identity
+            && self.git_dir == other.git_dir
+            && self.git_identity == other.git_identity
+            && self.common_dir == other.common_dir
+            && self.common_identity == other.common_identity
+    }
+
+    fn read(path: &Path) -> Option<Self> {
+        let root = path.canonicalize().ok()?;
+        let marker = root.join(".git");
+        let git_dir = if marker.is_dir() {
+            marker
+        } else {
+            let contents = read_optional_resolution_file(&marker)??;
+            let marker = std::str::from_utf8(&contents).ok()?;
+            root.join(marker.trim().strip_prefix("gitdir:")?.trim())
+        }
+        .canonicalize()
+        .ok()?;
+        // Unrecognized/non-Git roots must repeat ancestor discovery: an
+        // enclosing directory may have become a repository since the last call.
+        if !git_dir.join("HEAD").is_file() {
+            return None;
+        }
+        let commondir = read_optional_resolution_file(&git_dir.join("commondir"))?;
+        let common_dir = match commondir {
+            Some(contents) => git_dir.join(std::str::from_utf8(&contents).ok()?.trim()),
+            None => git_dir.clone(),
+        }
+        .canonicalize()
+        .ok()?;
+        if !common_dir.join("objects").is_dir() || !common_dir.join("refs").is_dir() {
+            return None;
+        }
+        Some(Self {
+            root_identity: DirectoryIdentity::read(&root)?,
+            git_identity: DirectoryIdentity::read(&git_dir)?,
+            common_identity: DirectoryIdentity::read(&common_dir)?,
+            config: read_optional_resolution_file(&common_dir.join("config"))?,
+            worktree_config: read_optional_resolution_file(&git_dir.join("config.worktree"))?,
+            root,
+            git_dir,
+            common_dir,
+        })
+    }
+}
+
+fn read_optional_resolution_file(path: &Path) -> Option<Option<Vec<u8>>> {
+    // Large/unreadable Git metadata falls back to uncached Git resolution.
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(None),
+        Err(_) => return None,
+    };
+    let mut contents = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut contents).ok()?;
+    (contents.len() <= 64 * 1024).then_some(Some(contents))
+}
+
+#[derive(Clone)]
+struct CachedWorkspace {
+    workspace: Workspace,
+    signature: WorkspaceResolutionSignature,
+}
+
 #[derive(Clone, Copy)]
 struct CachedWatchPolicy {
     metadata: FileStamp,
@@ -1137,6 +1251,7 @@ struct WorkspaceModeLease {
 }
 
 struct SearchLeaseSet {
+    workspaces: Vec<Workspace>,
     leases: Vec<WorkspaceModeLease>,
     metadata_stamps: Vec<Option<FileStamp>>,
 }
@@ -1240,7 +1355,8 @@ pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<WatchRegistry>>,
-    resolved_workspaces: Arc<Mutex<LruCache<PathBuf, Workspace>>>,
+    resolved_workspaces: Arc<Mutex<LruCache<PathBuf, CachedWorkspace>>>,
+    replaced_workspaces: Arc<Mutex<HashMap<String, uuid::Uuid>>>,
     neural_statuses: Arc<Mutex<LruCache<String, CachedNeuralStatus>>>,
     /// Last background enhancement trigger attempt per (workspace, mode).
     enhancement_triggers: Arc<Mutex<LruCache<EnhancementTriggerKey, std::time::Instant>>>,
@@ -1547,104 +1663,162 @@ impl DaemonState {
         skip_gitignore: bool,
         cancellation: Option<&SearchCancellation>,
     ) -> std::result::Result<Option<SearchLeaseSet>, DaemonResponse> {
-        let mut metadata_stamps = vec![None; workspaces.len()];
-        // A live watch only covers changes since registration. Catch up with
-        // the persisted snapshot before taking search leases or CPU capacity.
-        for (index, workspace) in workspaces.iter().enumerate() {
-            let (control, cached_policy) = {
-                let mut registry = self.watchers.lock();
-                (
-                    registry
-                        .registrations
-                        .get(&workspace.id)
-                        .map(|watch| watch.control.clone()),
-                    registry.policies.get(&workspace.id).copied(),
-                )
-            };
-            let control = match control {
-                Some(control) => Some(control),
-                None => {
-                    let (requires_watcher, metadata_stamp) =
-                        self.workspace_requires_watcher(workspace, cached_policy);
-                    metadata_stamps[index] = metadata_stamp;
-                    if !requires_watcher {
-                        continue;
+        let mut workspaces = workspaces.to_vec();
+        loop {
+            let mut metadata_stamps = vec![None; workspaces.len()];
+            // A live watch only covers changes since registration. Catch up with
+            // the persisted snapshot before taking search leases or CPU capacity.
+            for (index, workspace) in workspaces.iter().enumerate() {
+                if self.replaced_workspaces.lock().contains_key(&workspace.id) {
+                    let watch = workspace
+                        .read_metadata()
+                        .ok()
+                        .flatten()
+                        .is_some_and(|metadata| metadata.watch_enabled);
+                    let response = run_index_request(
+                        self.clone(),
+                        workspace.clone(),
+                        watch,
+                        skip_gitignore,
+                        None,
+                        std::time::Instant::now(),
+                    )
+                    .await;
+                    if !matches!(response, DaemonResponse::Ack { .. }) {
+                        return Err(response);
                     }
-                    let state = self.clone();
-                    let workspace = workspace.clone();
-                    let registration = tokio::task::spawn_blocking(move || {
-                        ensure_watcher(&state, &workspace)?;
-                        let control = state
-                            .watchers
-                            .lock()
-                            .get(&workspace.id)
-                            .map(|watch| watch.control.clone());
-                        Ok::<_, anyhow::Error>(control)
-                    })
-                    .await
-                    .map_err(|err| DaemonResponse::Error {
-                        message: format!("watcher readiness task failed: {err}"),
-                    })?;
-                    // The per-workspace preparation path reports a recorded
-                    // registration failure, preserving partial all-index results.
-                    registration.ok().flatten()
                 }
-            };
-            if let Some(control) = control {
-                let mut readiness = control.readiness.subscribe();
-                loop {
-                    let current = readiness.borrow().clone();
-                    match current {
-                        WatchReadiness::Ready => break,
-                        WatchReadiness::Failed(_) => break,
-                        WatchReadiness::Stopped => {
-                            return Err(DaemonResponse::Error {
-                                message: format!(
-                                    "watcher stopped while reconciling {}",
-                                    workspace.root.display()
-                                ),
-                            });
+                let (control, cached_policy) = {
+                    let mut registry = self.watchers.lock();
+                    (
+                        registry
+                            .registrations
+                            .get(&workspace.id)
+                            .map(|watch| watch.control.clone()),
+                        registry.policies.get(&workspace.id).copied(),
+                    )
+                };
+                let control = match control {
+                    Some(control) => Some(control),
+                    None => {
+                        let (requires_watcher, metadata_stamp) =
+                            self.workspace_requires_watcher(workspace, cached_policy);
+                        metadata_stamps[index] = metadata_stamp;
+                        if !requires_watcher {
+                            continue;
                         }
-                        WatchReadiness::Reconciling => {}
+                        let state = self.clone();
+                        let workspace = workspace.clone();
+                        let registration = tokio::task::spawn_blocking(move || {
+                            ensure_watcher(&state, &workspace)?;
+                            let control = state
+                                .watchers
+                                .lock()
+                                .get(&workspace.id)
+                                .map(|watch| watch.control.clone());
+                            Ok::<_, anyhow::Error>(control)
+                        })
+                        .await
+                        .map_err(|err| DaemonResponse::Error {
+                            message: format!("watcher readiness task failed: {err}"),
+                        })?;
+                        // The per-workspace preparation path reports a recorded
+                        // registration failure, preserving partial all-index results.
+                        registration.ok().flatten()
                     }
-                    if let Some(cancellation) = cancellation {
-                        tokio::select! {
-                            biased;
-                            () = cancellation.cancelled() => return Ok(None),
-                            changed = readiness.changed() => if changed.is_err() { return Ok(None); },
+                };
+                if let Some(control) = control {
+                    let mut readiness = control.readiness.subscribe();
+                    loop {
+                        let current = readiness.borrow().clone();
+                        match current {
+                            WatchReadiness::Ready => break,
+                            WatchReadiness::Failed(_) => break,
+                            WatchReadiness::Stopped => {
+                                return Err(DaemonResponse::Error {
+                                    message: format!(
+                                        "watcher stopped while reconciling {}",
+                                        workspace.root.display()
+                                    ),
+                                });
+                            }
+                            WatchReadiness::Reconciling => {}
                         }
-                    } else if readiness.changed().await.is_err() {
-                        return Ok(None);
+                        if let Some(cancellation) = cancellation {
+                            tokio::select! {
+                                biased;
+                                () = cancellation.cancelled() => return Ok(None),
+                                changed = readiness.changed() => if changed.is_err() { return Ok(None); },
+                            }
+                        } else if readiness.changed().await.is_err() {
+                            return Ok(None);
+                        }
                     }
                 }
             }
-        }
-        if !cancellation.is_some_and(SearchCancellation::is_cancelled)
-            && let Some(leases) = self.try_acquire_search_leases_inline(workspaces, skip_gitignore)
-        {
+            let leases = if !cancellation.is_some_and(SearchCancellation::is_cancelled) {
+                self.try_acquire_search_leases_inline(&workspaces, skip_gitignore)
+            } else {
+                None
+            };
+            let leases = match leases {
+                Some(leases) => Some(leases),
+                None => {
+                    let lease_state = self.clone();
+                    let lease_workspaces = workspaces.clone();
+                    let cancel_flag = cancellation.map(|cancellation| cancellation.flag.clone());
+                    tokio::task::spawn_blocking(move || {
+                        lease_state.acquire_workspace_modes_cancellable(
+                            &lease_workspaces,
+                            skip_gitignore,
+                            cancel_flag.as_deref(),
+                        )
+                    })
+                    .await
+                    .map_err(|join_err| DaemonResponse::Error {
+                        message: format!("workspace lease task panicked: {join_err:#}"),
+                    })?
+                }
+            };
+            let Some(leases) = leases else {
+                return Ok(None);
+            };
+
+            // Identity can change while this request waits behind an exclusive
+            // index run. Re-resolve while holding the acquired leases, then
+            // retry with the replacement identity and any newly required base
+            // lease before opening stores.
+            let mut resolved_after_wait = Vec::with_capacity(workspaces.len());
+            for workspace in &workspaces {
+                resolved_after_wait.push(self.resolve_workspace(&workspace.root).map_err(
+                    |error| DaemonResponse::Error {
+                        message: error.to_string(),
+                    },
+                )?);
+            }
+            let identity_changed =
+                workspaces
+                    .iter()
+                    .zip(&resolved_after_wait)
+                    .any(|(previous, current)| {
+                        previous.id != current.id
+                            || previous.repo_id != current.repo_id
+                            || previous.base_index_dir != current.base_index_dir
+                    });
+            let replacement_pending = resolved_after_wait
+                .iter()
+                .any(|workspace| self.replaced_workspaces.lock().contains_key(&workspace.id));
+            if identity_changed || replacement_pending {
+                drop(leases);
+                workspaces = resolved_after_wait;
+                continue;
+            }
             return Ok(Some(SearchLeaseSet {
+                workspaces: resolved_after_wait,
                 leases,
                 metadata_stamps,
             }));
         }
-        let lease_state = self.clone();
-        let lease_workspaces = workspaces.to_vec();
-        let cancel_flag = cancellation.map(|cancellation| cancellation.flag.clone());
-        let leases = tokio::task::spawn_blocking(move || {
-            lease_state.acquire_workspace_modes_cancellable(
-                &lease_workspaces,
-                skip_gitignore,
-                cancel_flag.as_deref(),
-            )
-        })
-        .await
-        .map_err(|join_err| DaemonResponse::Error {
-            message: format!("workspace lease task panicked: {join_err:#}"),
-        })?;
-        Ok(leases.map(|leases| SearchLeaseSet {
-            leases,
-            metadata_stamps,
-        }))
     }
 
     /// Take the exclusive mutation lease for an index run on the blocking
@@ -1806,12 +1980,16 @@ impl DaemonState {
             .await
             .ok_or_else(|| anyhow::anyhow!("daemon is shutting down"))?;
         let state = self.clone();
-        let workspace = workspace.clone();
         tokio::task::spawn_blocking(move || {
             let SearchLeaseSet {
+                workspaces,
                 leases,
                 metadata_stamps,
             } = search_leases;
+            let workspace = workspaces
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("context workspace disappeared"))?;
             state.prepare_workspace_for_hybrid_query_with_metadata_stamp(
                 &workspace,
                 skip_gitignore,
@@ -1833,17 +2011,48 @@ impl DaemonState {
     }
 
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
-        if path.is_absolute()
-            && let Some(workspace) = self.resolved_workspaces.lock().get(path).cloned()
+        let signature = path
+            .is_absolute()
+            .then(|| WorkspaceResolutionSignature::read(path))
+            .flatten();
+        if let Some(cached) = self.resolved_workspaces.lock().get(path)
+            && signature.as_ref() == Some(&cached.signature)
         {
-            return Ok(workspace);
+            return Ok(cached.workspace.clone());
         }
 
         let workspace = Workspace::resolve(path)?;
-        if path == workspace.root {
-            self.resolved_workspaces
-                .lock()
-                .put(path.to_path_buf(), workspace.clone());
+        // Preserve the previous identity if resolution raced a Git/root change,
+        // so the retry can still detect and reconcile the replacement.
+        anyhow::ensure!(
+            signature.is_none() || WorkspaceResolutionSignature::read(path) == signature,
+            "workspace identity changed while resolving {}; retry the request",
+            path.display()
+        );
+        let stable = path == workspace.root && signature.is_some();
+        let mut cache = self.resolved_workspaces.lock();
+        if let Some(previous) = cache.pop(path) {
+            let changed = signature
+                .as_ref()
+                .is_none_or(|signature| !previous.signature.same_checkout(signature))
+                || previous.workspace.repo_id != workspace.repo_id
+                || previous.workspace.base_index_dir != workspace.base_index_dir;
+            if changed {
+                // Publish invalidation before another resolver can use the new
+                // cache entry. Actual mutation waits for an exclusive lease.
+                self.replaced_workspaces
+                    .lock()
+                    .insert(workspace.id.clone(), uuid::Uuid::new_v4());
+            }
+        }
+        if stable && let Some(signature) = signature {
+            cache.put(
+                path.to_path_buf(),
+                CachedWorkspace {
+                    workspace: workspace.clone(),
+                    signature,
+                },
+            );
         }
         Ok(workspace)
     }
@@ -2207,6 +2416,9 @@ impl DaemonState {
         skip_gitignore: bool,
         signature: &WorkspaceReadinessSignature,
     ) -> bool {
+        if self.replaced_workspaces.lock().contains_key(&workspace.id) {
+            return false;
+        }
         let key = workspace_readiness_key(workspace, skip_gitignore);
         self.ready_workspaces
             .lock()
@@ -2334,6 +2546,7 @@ fn create_daemon_state() -> DaemonState {
         model_loading: Arc::new(AtomicBool::new(false)),
         watchers: Arc::new(Mutex::new(WatchRegistry::new())),
         resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
+        replaced_workspaces: Arc::new(Mutex::new(HashMap::new())),
         neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
         enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
         ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
@@ -2804,17 +3017,42 @@ async fn run_index_request(
     // request arrived advances it while the request waits for the exclusive
     // lease, the rescan is redundant. Earlier walks cannot vouch for edits made
     // after they scanned.
-    let generation_on_arrival = workspace
+    let mut generation_on_arrival = workspace
         .read_metadata()
         .ok()
         .flatten()
         .map(|metadata| metadata.index_generation);
 
     // Take the exclusive workspace lease before a CPU permit so requests
-    // parked behind an in-flight index never pin CPU capacity.
-    let mode_leases = match state.acquire_index_lease(&workspace).await {
-        Ok(leases) => leases,
-        Err(response) => return response,
+    // parked behind an in-flight index never pin CPU capacity. Re-resolve after
+    // waiting because another request may have detected a replaced checkout in
+    // the meantime; a linked replacement also needs its base lease.
+    let mut workspace = workspace;
+    let mode_leases = loop {
+        let leases = match state.acquire_index_lease(&workspace).await {
+            Ok(leases) => leases,
+            Err(response) => return response,
+        };
+        let current = match state.resolve_workspace(&workspace.root) {
+            Ok(current) => current,
+            Err(error) => {
+                return DaemonResponse::Error {
+                    message: error.to_string(),
+                };
+            }
+        };
+        if workspace.repo_id == current.repo_id
+            && workspace.base_index_dir == current.base_index_dir
+        {
+            break leases;
+        }
+        drop(leases);
+        workspace = current;
+        generation_on_arrival = workspace
+            .read_metadata()
+            .ok()
+            .flatten()
+            .map(|metadata| metadata.index_generation);
     };
     // Bound concurrent heavy index work (see #58).
     let permit = state.cpu_permits.clone().acquire_owned().await.ok();
@@ -2824,6 +3062,22 @@ async fn run_index_request(
         let _permit = permit;
         let _mode_leases = mode_leases;
         index_workspace_target.ensure_dirs()?;
+        let replacement = index_state
+            .replaced_workspaces
+            .lock()
+            .get(&index_workspace_target.id)
+            .copied();
+        if replacement.is_some() {
+            let registration = index_state
+                .watchers
+                .lock()
+                .remove(&index_workspace_target.id);
+            if let Some(registration) = registration {
+                stop_watcher(&index_workspace_target, registration);
+            }
+            index_state.clear_workspace_contexts(&index_workspace_target);
+            index_state.clear_watcher_failure(&index_workspace_target.id);
+        }
         let mut metadata = index_workspace_target.read_metadata()?.unwrap_or_else(|| {
             crate::workspace::WorkspaceMetadata {
                 id: index_workspace_target.id.clone(),
@@ -2838,12 +3092,23 @@ async fn run_index_request(
                 index_generation: 0,
             }
         });
-        let already_current = metadata.last_indexed_at_unix.is_some()
+        let obsolete_overlay = !index_workspace_target.is_worktree()
+            && index_workspace_target.base_ref_path().exists();
+        let already_current = replacement.is_none()
+            && !obsolete_overlay
+            && metadata.last_indexed_at_unix.is_some()
             && metadata.skip_gitignore == skip_gitignore
             && generation_on_arrival.is_some_and(|arrival| metadata.index_generation > arrival)
             && index_state.full_index_run_started_after(&index_workspace_target.id, arrived_at);
         metadata.skip_gitignore = skip_gitignore;
         metadata.watch_enabled = watch;
+        if obsolete_overlay {
+            // A linked checkout became a main checkout at the same pathname.
+            // Its thin overlay cannot serve as a standalone index.
+            index_state.clear_workspace_contexts(&index_workspace_target);
+            remove_workspace_index(&index_workspace_target)?;
+            index_workspace_target.ensure_dirs()?;
+        }
         index_workspace_target.write_metadata(&metadata)?;
         if !watch
             && let Some(registration) = index_state
@@ -2886,6 +3151,12 @@ async fn run_index_request(
         }
         if let Some(control) = control {
             complete_initial_watch_reconciliation(&control);
+        }
+        if let Some(replacement) = replacement {
+            let mut pending = index_state.replaced_workspaces.lock();
+            if pending.get(&index_workspace_target.id) == Some(&replacement) {
+                pending.remove(&index_workspace_target.id);
+            }
         }
         Result::<_, anyhow::Error>::Ok((Some(summary), watcher_error))
     })
@@ -3062,7 +3333,7 @@ async fn handle_request_with_cancellation(
             watch,
             skip_gitignore,
         } => {
-            let workspace = match Workspace::resolve(&path) {
+            let workspace = match state.resolve_workspace(&path) {
                 Ok(workspace) => workspace,
                 Err(err) => {
                     return DaemonResponse::Error {
@@ -3099,7 +3370,7 @@ async fn handle_request_with_cancellation(
             watch,
             skip_gitignore,
         } => {
-            let workspace = match Workspace::resolve(&path) {
+            let workspace = match state.resolve_workspace(&path) {
                 Ok(workspace) => workspace,
                 Err(err) => {
                     return DaemonResponse::Error {
@@ -3219,20 +3490,10 @@ async fn handle_request_with_cancellation(
                 workspaces.len()
             );
 
-            let neural_identities = workspaces
+            let has_neural_vectors = workspaces
                 .iter()
                 .map(|workspace| state_clone.cached_neural_identity(workspace))
-                .collect::<Vec<_>>();
-            if let Err(err) = state_clone.validate_forced_neural_workspaces(
-                &workspaces,
-                &neural_identities,
-                force_neural,
-            ) {
-                return DaemonResponse::Error {
-                    message: err.to_string(),
-                };
-            }
-            let has_neural_vectors = neural_identities.iter().any(Option::is_some);
+                .any(|identity| identity.is_some());
             if !options.is_cancelled()
                 && should_start_model_load(has_neural_vectors, &query, force_neural)
             {
@@ -3257,9 +3518,32 @@ async fn handle_request_with_cancellation(
                 Err(response) => return response,
             };
             let SearchLeaseSet {
+                workspaces,
                 leases: mode_leases,
                 metadata_stamps,
             } = search_leases;
+            let neural_identities = workspaces
+                .iter()
+                .map(|workspace| state_clone.cached_neural_identity(workspace))
+                .collect::<Vec<_>>();
+            if let Err(err) = state_clone.validate_forced_neural_workspaces(
+                &workspaces,
+                &neural_identities,
+                force_neural,
+            ) {
+                return DaemonResponse::Error {
+                    message: err.to_string(),
+                };
+            }
+            if !options.is_cancelled()
+                && should_start_model_load(
+                    neural_identities.iter().any(Option::is_some),
+                    &query,
+                    force_neural,
+                )
+            {
+                state_clone.maybe_start_model_load();
+            }
             tracing::trace!("daemon_search_lease={:?}", request_started.elapsed());
             // Bound concurrent heavy search work (see #58). The permit is held
             // for the whole blocking task and released when it completes.
@@ -3641,7 +3925,7 @@ async fn handle_request_with_cancellation(
                     .map(|cancellation| cancellation.flag.clone()),
             };
             // Workspace leases come before the CPU permit (see Search).
-            let mode_leases = match state
+            let search_leases = match state
                 .acquire_search_leases(&workspaces, skip_gitignore, cancellation.as_ref())
                 .await
             {
@@ -3651,6 +3935,11 @@ async fn handle_request_with_cancellation(
                 }
                 Err(response) => return response,
             };
+            let SearchLeaseSet {
+                workspaces,
+                leases: mode_leases,
+                ..
+            } = search_leases;
             // Bound concurrent heavy regex work (see #58).
             let Some(permit) = state.acquire_search_permit(cancellation.as_ref()).await else {
                 return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
@@ -3769,7 +4058,7 @@ async fn handle_request_with_cancellation(
 
             let state_clone = state.clone();
             // Workspace leases come before the CPU permit (see Search).
-            let mode_leases = match state_clone
+            let search_leases = match state_clone
                 .acquire_search_leases(&workspaces, options.skip_gitignore, cancellation.as_ref())
                 .await
             {
@@ -3779,6 +4068,11 @@ async fn handle_request_with_cancellation(
                 }
                 Err(response) => return response,
             };
+            let SearchLeaseSet {
+                workspaces,
+                leases: mode_leases,
+                ..
+            } = search_leases;
             // Bound concurrent heavy literal work (see #58).
             let Some(permit) = state_clone
                 .acquire_search_permit(cancellation.as_ref())
@@ -5479,6 +5773,7 @@ mod tests {
             model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(WatchRegistry::new())),
             resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
+            replaced_workspaces: Arc::new(Mutex::new(HashMap::new())),
             neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
             enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
             ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
@@ -6336,6 +6631,330 @@ mod tests {
             state.resolved_workspaces.lock().is_empty(),
             "subpaths must still perform full workspace resolution"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_main_to_linked_after_index() {
+        assert_replaced_workspace_searches_current_base(false, true, false, false, false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_main_to_linked_without_index() {
+        assert_replaced_workspace_searches_current_base(false, false, false, false, false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_linked_to_different_base_after_index() {
+        assert_replaced_workspace_searches_current_base(true, true, false, false, false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_linked_to_different_base_without_index() {
+        assert_replaced_workspace_searches_current_base(true, false, false, false, false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_tracks_retargeted_gitfile() {
+        assert_replaced_workspace_searches_current_base(true, false, true, false, false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_linked_to_main_after_index() {
+        assert_replaced_workspace_searches_current_base(true, true, false, true, false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_linked_to_main_without_index() {
+        assert_replaced_workspace_searches_current_base(true, false, false, true, false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_reconciliation_waits_for_existing_readers() {
+        assert_replaced_workspace_searches_current_base(false, false, false, false, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn daemon_workspace_identity_re_resolves_queued_index_request() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let target = repositories.path().join("target");
+        let replacement_base = repositories.path().join("replacement-base");
+        for (root, marker) in [
+            (&target, "oldorangedelta"),
+            (&replacement_base, "newvioletquartz"),
+        ] {
+            std::fs::create_dir(root).unwrap();
+            git(root, &["init", "-b", "main"]);
+            std::fs::write(root.join("lib.rs"), format!("pub fn {marker}() {{}}\n")).unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-qm", "initial"]);
+            index_workspace(
+                &Workspace::resolve(root).unwrap(),
+                create_hash_model().as_ref(),
+            )
+            .unwrap();
+        }
+
+        let original = Workspace::resolve(&target).unwrap();
+        let state = test_state();
+        let warm = handle_request(
+            state.clone(),
+            workspace_identity_search_request(&original, "oldorangedelta"),
+        )
+        .await;
+        assert!(matches!(warm, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
+
+        let reader = state.acquire_workspace_mode(&original, false);
+        let queued = tokio::spawn(handle_request(
+            state.clone(),
+            index_request_for(&original, false),
+        ));
+        let coordinator = state.workspace_mode_coordinator(&original.id);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while coordinator.state.lock().exclusive_waiters == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("index request should queue for the old workspace lease");
+
+        let queued_search = tokio::spawn(handle_request(
+            state.clone(),
+            workspace_identity_search_request(&original, "newvioletquartz"),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !queued_search.is_finished(),
+            "search should queue behind the pending exclusive index lease"
+        );
+
+        std::fs::rename(&target, repositories.path().join("previous")).unwrap();
+        git(
+            &replacement_base,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                target.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let replacement = state.resolve_workspace(&target).unwrap();
+        assert!(replacement.is_worktree());
+        assert!(state.replaced_workspaces.lock().contains_key(&original.id));
+
+        drop(reader);
+        let response = tokio::time::timeout(Duration::from_secs(30), queued)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(response, DaemonResponse::Ack { .. }),
+            "{response:?}"
+        );
+        assert!(replacement.overlay_sqlite_path().is_file());
+        assert!(replacement.base_ref_path().is_file());
+        assert!(!state.replaced_workspaces.lock().contains_key(&original.id));
+
+        let queued_search = tokio::time::timeout(Duration::from_secs(30), queued_search)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(queued_search, DaemonResponse::SearchResults { ref hits, .. } if hits.len() == 1),
+            "queued search should use the replacement workspace: {queued_search:?}"
+        );
+
+        let current = handle_request(
+            state.clone(),
+            workspace_identity_search_request(&replacement, "newvioletquartz"),
+        )
+        .await;
+        assert!(matches!(current, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
+        let stale = handle_request(
+            state,
+            workspace_identity_search_request(&replacement, "oldorangedelta"),
+        )
+        .await;
+        assert!(
+            matches!(stale, DaemonResponse::SearchResults { ref hits, .. } if hits.is_empty()),
+            "{stale:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_config_edit_preserves_index_generation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]);
+        std::fs::write(repo.path().join("lib.rs"), "pub fn unchangedmarker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
+        let state = test_state();
+        for change_config in [false, true] {
+            if change_config {
+                git(repo.path(), &["config", "user.name", "Different author"]);
+            }
+            let response = handle_request(
+                state.clone(),
+                workspace_identity_search_request(&workspace, "unchangedmarker"),
+            )
+            .await;
+            assert!(
+                matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1)
+            );
+            assert_eq!(
+                workspace.read_metadata().unwrap().unwrap().index_generation,
+                generation,
+                "an unrelated Git configuration edit must not force indexing"
+            );
+        }
+    }
+
+    fn workspace_identity_search_request(workspace: &Workspace, query: &str) -> DaemonRequest {
+        DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: query.to_owned(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        }
+    }
+
+    async fn assert_replaced_workspace_searches_current_base(
+        initially_linked: bool,
+        explicit_index: bool,
+        retarget_gitfile: bool,
+        replace_with_main: bool,
+        hold_existing_reader: bool,
+    ) {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let first = repositories.path().join("first");
+        let second = repositories.path().join("second");
+        for (root, marker) in [
+            (&first, "applecipherquartz"),
+            (&second, "bananaprotocolzircon"),
+        ] {
+            std::fs::create_dir(root).unwrap();
+            git(root, &["init", "-b", "main"]);
+            std::fs::write(root.join("lib.rs"), format!("pub fn {marker}() {{}}\n")).unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-qm", "initial"]);
+            index_workspace(
+                &Workspace::resolve(root).unwrap(),
+                create_hash_model().as_ref(),
+            )
+            .unwrap();
+        }
+        let target = if initially_linked {
+            let linked = repositories.path().join("linked");
+            git(
+                &first,
+                &["worktree", "add", "--detach", linked.to_str().unwrap()],
+            );
+            linked
+        } else {
+            first.clone()
+        };
+        let original = Workspace::resolve(&target).unwrap();
+        index_workspace(&original, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        let request = |query: &str| workspace_identity_search_request(&original, query);
+        let warm = handle_request(state.clone(), request("applecipherquartz")).await;
+        assert!(matches!(warm, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
+        let mut reader =
+            hold_existing_reader.then(|| state.acquire_workspace_mode(&original, false));
+        let original_generation = original.read_metadata().unwrap().unwrap().index_generation;
+
+        if retarget_gitfile {
+            // Change only the Git pointer and source, keeping the directory
+            // inode stable. Root replacement detection alone is insufficient.
+            let other_linked = repositories.path().join("other-linked");
+            git(
+                &second,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    other_linked.to_str().unwrap(),
+                ],
+            );
+            std::fs::copy(other_linked.join(".git"), target.join(".git")).unwrap();
+            std::fs::copy(second.join("lib.rs"), target.join("lib.rs")).unwrap();
+        } else {
+            std::fs::rename(&target, repositories.path().join("previous")).unwrap();
+            if replace_with_main {
+                git(&second, &["clone", ".", target.to_str().unwrap()]);
+            } else {
+                git(
+                    &second,
+                    &["worktree", "add", "--detach", target.to_str().unwrap()],
+                );
+            }
+        }
+        if explicit_index {
+            let response = handle_request(state.clone(), index_request_for(&original, false)).await;
+            assert!(
+                matches!(response, DaemonResponse::Ack { .. }),
+                "{response:?}"
+            );
+        }
+
+        // The same daemon must use the new base, including on repeated/cache-hit
+        // searches, without a restart or a CLI fallback hiding an error.
+        for _ in 0..2 {
+            let mut search = tokio::spawn(handle_request(
+                state.clone(),
+                request("bananaprotocolzircon"),
+            ));
+            if let Some(reader) = reader.take() {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), &mut search)
+                        .await
+                        .is_err(),
+                    "replacement reconciliation ran while an existing reader held the workspace"
+                );
+                assert_eq!(
+                    original.read_metadata().unwrap().unwrap().index_generation,
+                    original_generation
+                );
+                drop(reader);
+            }
+            let response = search.await.unwrap();
+            match response {
+                DaemonResponse::SearchResults { hits, warnings } => {
+                    assert!(warnings.is_empty(), "{warnings:?}");
+                    assert_eq!(hits.len(), 1, "{hits:?}");
+                    assert_eq!(hits[0].file_path, PathBuf::from("lib.rs"));
+                    assert!(hits[0].preview.contains("bananaprotocolzircon"), "{hits:?}");
+                }
+                other => panic!("replacement search failed: {other:?}"),
+            }
+        }
+        let response = handle_request(state, request("applecipherquartz")).await;
+        assert!(matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.is_empty()));
     }
 
     #[test]
