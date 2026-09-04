@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+use anyhow::Result;
 
 use ignore::WalkBuilder;
 
@@ -38,6 +40,56 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
         }
     }
     walker
+}
+
+/// Request-local ignore rules for source paths, including deleted Git files.
+pub(crate) struct SourcePathMatcher {
+    root: PathBuf,
+    owned_root: Option<PathBuf>,
+    ignore: ignore::IncrementalIgnore,
+    error: Option<ignore::Error>,
+}
+
+impl SourcePathMatcher {
+    pub(crate) fn new(root: &Path, skip_gitignore: bool) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            owned_root: owned_storage_root(root),
+            ignore: source_walker(root, skip_gitignore)
+                .build_matchers()
+                .pop()
+                .expect("source walker has exactly one root"),
+            error: None,
+        }
+    }
+
+    pub(crate) fn allows(&mut self, path: &Path) -> Result<bool> {
+        if path.as_os_str().is_empty()
+            || path.components().any(|part| match part {
+                Component::Normal(name) => name == ".git",
+                Component::CurDir => false,
+                _ => true,
+            })
+            || is_owned_storage_path(
+                &self.root,
+                &self.root.join(path),
+                self.owned_root.as_deref(),
+            )
+        {
+            return Ok(false);
+        }
+        if let Some(error) = &self.error {
+            return Err(error.clone().into());
+        }
+        let (matched, error) = self.ignore.matched_with_errors(path, false);
+        if let Some(error) = error.filter(|error| !is_ignore_pattern_warning(error)) {
+            // Directory rules are cached, including failed reads. Keep failures
+            // sticky so a later path cannot use a partially loaded policy.
+            self.error = Some(error.clone());
+            return Err(error.into());
+        }
+        Ok(!matched.is_ignore())
+    }
 }
 
 pub(crate) fn is_ivygrep_owned_path(root: &Path, path: &Path) -> bool {
@@ -82,6 +134,22 @@ fn is_owned_storage_path(root: &Path, path: &Path, owned_root: Option<&Path>) ->
         })
 }
 
+pub(crate) fn is_ignore_pattern_warning(error: &ignore::Error) -> bool {
+    // The walker reports malformed parent ignore patterns through the same
+    // callback as traversal failures. Only pure pattern warnings are harmless;
+    // a partial error containing any filesystem failure must still abort.
+    match error {
+        ignore::Error::Glob { .. } => true,
+        ignore::Error::Partial(errors) => {
+            !errors.is_empty() && errors.iter().all(is_ignore_pattern_warning)
+        }
+        ignore::Error::WithLineNumber { err, .. }
+        | ignore::Error::WithPath { err, .. }
+        | ignore::Error::WithDepth { err, .. } => is_ignore_pattern_warning(err),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,14 +161,42 @@ mod tests {
             .build()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
-            .map(|e| {
-                e.path()
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string()
-            })
+            .map(|e| crate::workspace::index_path_string(e.path().strip_prefix(root).unwrap()))
             .collect()
+    }
+
+    #[test]
+    fn incremental_source_rules_match_walk_and_cover_deleted_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("nested")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("blocked")).unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "*.rs\nblocked/\n").unwrap();
+        std::fs::write(tmp.path().join(".ignore"), "!visible.rs\nmissing.rs\n").unwrap();
+        std::fs::write(tmp.path().join("nested/.ignore"), "!allowed.rs\n").unwrap();
+        std::fs::write(tmp.path().join("blocked/.ignore"), "!child.rs\n").unwrap();
+        let paths = [
+            "visible.rs",
+            "hidden.rs",
+            "nested/allowed.rs",
+            "blocked/child.rs",
+        ];
+        for path in paths {
+            std::fs::write(tmp.path().join(path), "fn marker() {}\n").unwrap();
+        }
+        for skip in [false, true] {
+            let visible = collect_files(tmp.path(), skip);
+            let mut matcher = SourcePathMatcher::new(tmp.path(), skip);
+            for path in paths {
+                assert_eq!(
+                    matcher.allows(Path::new(path)).unwrap(),
+                    visible.contains(path),
+                    "{path}, skip={skip}"
+                );
+            }
+            assert_eq!(matcher.allows(Path::new("missing.rs")).unwrap(), skip);
+            assert!(!matcher.allows(Path::new(".git/config")).unwrap());
+            assert!(!matcher.allows(Path::new("../outside.rs")).unwrap());
+        }
     }
 
     #[test]

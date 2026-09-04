@@ -355,6 +355,10 @@ from matching indexed definition chunks.
 Context packs answer a different question from ranked search: which bounded set
 of evidence helps an agent implement a task safely?
 
+Context seeds and live graph expansion use the same hierarchical ignore policy as
+indexing, including `.ignore`, Git excludes, and deleted-file paths. Request-local
+matchers cache directory rules without scanning the repository.
+
 1. `src/context_input.rs` parses task text, explicit paths, stack traces, Git
    changes since a base, staged changes, dirty files, and untracked files.
 2. Search finds primary implementations and task anchors.

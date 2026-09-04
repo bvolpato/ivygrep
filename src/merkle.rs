@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::chunking::is_indexable_file;
+use crate::walker::is_ignore_pattern_warning;
 use crate::workspace::index_path_string;
 
 use std::io::IsTerminal;
@@ -550,22 +551,6 @@ impl MerkleSnapshot {
             self.root_hash = root_hash(&self.files);
         }
         Ok(Some(diff))
-    }
-}
-
-fn is_ignore_pattern_warning(error: &ignore::Error) -> bool {
-    // The walker reports malformed parent ignore patterns through the same
-    // callback as traversal failures. Only pure pattern warnings are harmless;
-    // a partial error containing any filesystem failure must still abort.
-    match error {
-        ignore::Error::Glob { .. } => true,
-        ignore::Error::Partial(errors) => {
-            !errors.is_empty() && errors.iter().all(is_ignore_pattern_warning)
-        }
-        ignore::Error::WithLineNumber { err, .. }
-        | ignore::Error::WithPath { err, .. }
-        | ignore::Error::WithDepth { err, .. } => is_ignore_pattern_warning(err),
-        _ => false,
     }
 }
 
