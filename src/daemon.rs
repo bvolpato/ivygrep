@@ -1195,6 +1195,7 @@ enum InflightIndexSlot {
 struct ModeLeasedEmbeddingModel {
     inner: Arc<dyn EmbeddingModel>,
     _leases: Vec<WorkspaceModeLease>,
+    _cpu_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl EmbeddingModel for ModeLeasedEmbeddingModel {
@@ -1769,32 +1770,48 @@ impl DaemonState {
         None
     }
 
-    pub(crate) fn prepare_context_model(
+    pub(crate) async fn prepare_context_model(
         &self,
         workspace: &Workspace,
         skip_gitignore: bool,
     ) -> Result<Arc<dyn EmbeddingModel>> {
-        if workspace
-            .read_metadata()?
-            .is_some_and(|metadata| metadata.watch_enabled)
-        {
-            if !self.watcher_registered(&workspace.id) {
-                ensure_watcher(self, workspace)?;
-            }
-            self.check_watcher_reconciliation(workspace)?;
-        }
-        let leases = self.acquire_workspace_modes(std::slice::from_ref(workspace), skip_gitignore);
-        self.prepare_workspace_for_hybrid_query(workspace, skip_gitignore)?;
-        let inner = if self.cached_neural_identity(workspace).is_none() {
-            cached_hash_model()
-        } else {
-            self.maybe_start_model_load();
-            self.get_model_for_search(false)?
-        };
-        Ok(Arc::new(ModeLeasedEmbeddingModel {
-            inner,
-            _leases: leases,
-        }))
+        let search_leases = self
+            .acquire_search_leases(std::slice::from_ref(workspace), skip_gitignore, None)
+            .await
+            .map_err(|response| match response {
+                DaemonResponse::Error { message } => anyhow::anyhow!(message),
+                response => anyhow::anyhow!("context preparation failed: {response:?}"),
+            })?
+            .ok_or_else(|| anyhow::anyhow!("context preparation cancelled"))?;
+        let permit = self
+            .acquire_cpu_permit()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("daemon is shutting down"))?;
+        let state = self.clone();
+        let workspace = workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            let SearchLeaseSet {
+                leases,
+                metadata_stamps,
+            } = search_leases;
+            state.prepare_workspace_for_hybrid_query_with_metadata_stamp(
+                &workspace,
+                skip_gitignore,
+                metadata_stamps.into_iter().next().flatten(),
+            )?;
+            let inner = if state.cached_neural_identity(&workspace).is_none() {
+                cached_hash_model()
+            } else {
+                state.maybe_start_model_load();
+                state.get_model_for_search(false)?
+            };
+            Ok(Arc::new(ModeLeasedEmbeddingModel {
+                inner,
+                _leases: leases,
+                _cpu_permit: permit,
+            }) as Arc<dyn EmbeddingModel>)
+        })
+        .await?
     }
 
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
@@ -2050,6 +2067,7 @@ impl DaemonState {
         })
     }
 
+    #[cfg(test)]
     fn prepare_workspace_for_hybrid_query(
         &self,
         workspace: &Workspace,
@@ -6593,9 +6611,63 @@ mod tests {
         assert!(state.get_model_for_search(true).is_err());
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn context_model_keeps_hash_only_workspaces_on_hash_vectors() {
+    async fn web_context_waiting_for_index_leaves_cpu_capacity_available() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn context_marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let mut state = test_state();
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let index_leases = state.acquire_index_lease(&workspace).await.unwrap();
+        let cpu_gate = state.acquire_cpu_permit().await.unwrap();
+        let params = HashMap::from([
+            ("mode".to_string(), vec!["context".to_string()]),
+            (
+                "workspace".to_string(),
+                vec![workspace.root.display().to_string()],
+            ),
+            ("q".to_string(), vec!["context_marker".to_string()]),
+        ]);
+        let mut request = std::pin::pin!(crate::web::run_search(state.clone(), &params));
+        // Poll on both sides of releasing CPU capacity. The old path queues
+        // for CPU first and takes it on the second poll while the index waits.
+        poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(cpu_gate);
+        poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let index_cpu =
+            tokio::time::timeout(Duration::from_secs(2), state.acquire_cpu_permit()).await;
+        let capacity_available = index_cpu.is_ok();
+        drop(index_cpu);
+        drop(index_leases);
+        let response = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .unwrap();
+        assert!(response.get("context_pack").is_some(), "{response}");
+        assert!(
+            capacity_available,
+            "context pinned CPU while waiting for the index workspace lease"
+        );
+        assert_eq!(state.cpu_permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn context_model_keeps_hash_only_workspaces_on_hash_vectors() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repo = tempdir().unwrap();
@@ -6611,7 +6683,10 @@ mod tests {
                 .set(Arc::new(TestNeuralModel) as Arc<dyn EmbeddingModel>)
                 .is_ok()
         );
-        let model = state.prepare_context_model(&workspace, false).unwrap();
+        let model = state
+            .prepare_context_model(&workspace, false)
+            .await
+            .unwrap();
         assert!(model.model_identity().is_none());
     }
 
