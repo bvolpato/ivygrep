@@ -159,6 +159,13 @@ complete staged recovery, not a replay of an empty or partial Merkle delta.
 These checks add store-opening/counting work even when source discovery is skipped;
 they do not validate every vector payload or compare concurrent enhancement markers.
 
+Main indexes and overlays mark live publication as incomplete before changing
+stores. The marker survives failures and is cleared only after stores, metadata,
+snapshot, and filter state publish successfully. Main recovery rebuilds in staging;
+no-op Git checks, watcher shortcuts, and base reuse cannot trust an unfinished
+publication. Fresh main builds also mark the interval between store promotion
+and snapshot publication.
+
 Hash and neural vector deletion journals prevent stale embeddings from becoming
 visible when another store fails. Merkle state is saved only after committed
 stores and metadata agree.

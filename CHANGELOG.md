@@ -15,6 +15,7 @@ All notable changes to ivygrep are documented in this file.
 - Context packs apply the indexer's ignore rules to changed files, explicit paths, and live dependency expansion, keeping excluded source out of CLI and MCP output unless `--skip-gitignore` is requested.
 - Literal searches apply the hit limit before building excess snippets and keep parallel partial results bounded, avoiding memory growth with every matching line while preserving deterministic result order.
 - Web context requests acquire workspace leases before CPU capacity, preventing a deadlock with concurrent indexing when search capacity is exhausted. Both resources remain held through context generation.
+- Failed main-index publication now forces complete recovery before reusing Git state or creating worktree overlays. Doctor detects unfinished publication instead of reporting stale stores as healthy.
 
 ## [1.2.13] - 2026-09-03
 

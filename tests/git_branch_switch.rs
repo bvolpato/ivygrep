@@ -3670,3 +3670,63 @@ fn worktree_overlay_auto_reindex_via_cli_e2e() {
     }
     assert_only_overlay_stores(&wt_workspace);
 }
+
+#[test]
+#[serial]
+fn worktree_recovers_base_after_failed_publication_and_git_restore() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("original.rs"),
+        "pub fn restored_publication_marker() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+    setup_and_index(root.path(), home.path());
+    let base = workspace_for(root.path());
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    fs::write(
+        root.path().join("original.rs"),
+        "pub fn abandoned_publication_marker() {}\n",
+    )
+    .unwrap();
+    let blocker = base.merkle_snapshot_path().with_extension("tmp");
+    fs::create_dir(&blocker).unwrap();
+    index_workspace(&base, &model).unwrap_err();
+    fs::remove_dir(blocker).unwrap();
+    git(root.path(), &["restore", "original.rs"]);
+
+    let parent = tempdir().unwrap();
+    let linked = parent.path().join("linked");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    setup_and_index(&linked, home.path());
+    let overlay = workspace_for(&linked);
+    for workspace in [&base, &overlay] {
+        let hits = ivygrep::search::literal_search(
+            workspace,
+            "restored_publication_marker",
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1, "restored source is missing: {workspace:?}");
+        assert!(workspace.index_health().is_queryable());
+    }
+    // A later explicit refresh must not accept poisoned Git-state metadata.
+    index_workspace(&base, &model).unwrap();
+    assert!(
+        stored_chunk_text(&base, "original.rs")
+            .unwrap()
+            .contains("restored_publication_marker")
+    );
+}

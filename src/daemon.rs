@@ -546,6 +546,9 @@ struct WorkspaceReadinessSignature {
     base_index_format: Option<FileStamp>,
     merkle: Option<FileStamp>,
     indexing_pid: Option<FileStamp>,
+    indexing_incomplete: Option<FileStamp>,
+    base_indexing_pid: Option<FileStamp>,
+    base_indexing_incomplete: Option<FileStamp>,
 }
 
 #[derive(Clone)]
@@ -1386,7 +1389,7 @@ impl DaemonState {
         workspaces: &[Workspace],
         skip_gitignore: bool,
     ) -> Vec<WorkspaceModeLease> {
-        self.acquire_workspace_leases(workspaces, skip_gitignore, false, None)
+        self.acquire_workspace_leases(workspaces, skip_gitignore, false, false, None)
             .expect("uncancelled workspace mode acquisition")
     }
 
@@ -1396,11 +1399,11 @@ impl DaemonState {
         skip_gitignore: bool,
         cancellation: Option<&AtomicBool>,
     ) -> Option<Vec<WorkspaceModeLease>> {
-        self.acquire_workspace_leases(workspaces, skip_gitignore, false, cancellation)
+        self.acquire_workspace_leases(workspaces, skip_gitignore, false, true, cancellation)
     }
 
     fn acquire_workspace_mutations(&self, workspaces: &[Workspace]) -> Vec<WorkspaceModeLease> {
-        self.acquire_workspace_leases(workspaces, false, true, None)
+        self.acquire_workspace_leases(workspaces, false, true, false, None)
             .expect("uncancelled workspace mutation acquisition")
     }
 
@@ -1409,14 +1412,19 @@ impl DaemonState {
         workspaces: &[Workspace],
         skip_gitignore: bool,
         direct_exclusive: bool,
+        unfinished_publication_exclusive: bool,
         cancellation: Option<&AtomicBool>,
     ) -> Option<Vec<WorkspaceModeLease>> {
         let mut requirements = HashMap::new();
         for workspace in workspaces {
+            let workspace_requires_mutation = direct_exclusive
+                || (unfinished_publication_exclusive
+                    && (workspace.has_unfinished_index_publication()
+                        || workspace.base_has_unfinished_index_publication()));
             requirements
                 .entry(workspace.id.clone())
-                .and_modify(|exclusive| *exclusive |= direct_exclusive)
-                .or_insert(direct_exclusive);
+                .and_modify(|exclusive| *exclusive |= workspace_requires_mutation)
+                .or_insert(workspace_requires_mutation);
             if workspace.is_worktree()
                 && let Some(main_root) = workspace.main_worktree_root()
                 && let Ok(base_workspace) = Workspace::resolve(&main_root)
@@ -1468,7 +1476,13 @@ impl DaemonState {
             )
         }) {
             drop(leases);
-            return self.acquire_workspace_leases(workspaces, skip_gitignore, true, cancellation);
+            return self.acquire_workspace_leases(
+                workspaces,
+                skip_gitignore,
+                true,
+                false,
+                cancellation,
+            );
         }
         Some(leases)
     }
@@ -1500,7 +1514,11 @@ impl DaemonState {
         workspaces: &[Workspace],
         skip_gitignore: bool,
     ) -> Option<Vec<WorkspaceModeLease>> {
-        if workspaces.iter().any(Workspace::is_worktree) {
+        if workspaces.iter().any(|workspace| {
+            workspace.is_worktree()
+                || workspace.has_unfinished_index_publication()
+                || workspace.base_has_unfinished_index_publication()
+        }) {
             return None;
         }
         let mut ids = workspaces
@@ -2242,6 +2260,16 @@ impl DaemonState {
         }
         for id in &affected {
             self.query_results.lock().remove_workspace(id);
+        }
+    }
+
+    fn clear_workspace_contexts_for_mutation(&self, workspace: &Workspace) {
+        if let Some(main_root) = workspace.main_worktree_root()
+            && let Ok(base) = Workspace::resolve(&main_root)
+        {
+            self.clear_workspace_contexts(&base);
+        } else {
+            self.clear_workspace_contexts(workspace);
         }
     }
 
@@ -4692,6 +4720,7 @@ fn ensure_queryable_workspace(
     }
 
     if health.is_queryable() {
+        state.clear_workspace_contexts_for_mutation(workspace);
         let model = cached_hash_model();
         index_workspace(workspace, model.as_ref())?;
         return Ok(true);
@@ -4723,6 +4752,7 @@ fn ensure_queryable_workspace(
             });
     metadata.skip_gitignore = skip_gitignore;
 
+    state.clear_workspace_contexts_for_mutation(workspace);
     remove_workspace_index(workspace)?;
     workspace.ensure_dirs()?;
     workspace.write_metadata(&metadata)?;
@@ -4848,6 +4878,10 @@ fn workspace_readiness_signature_with_metadata(
         base_index_format: base_dir.and_then(|dir| file_stamp(&dir.join("index_format_version"))),
         merkle: file_stamp(&workspace.merkle_snapshot_path()),
         indexing_pid: file_stamp(&workspace.indexing_pid_path()),
+        indexing_incomplete: file_stamp(&workspace.indexing_incomplete_path()),
+        base_indexing_pid: base_dir.and_then(|dir| file_stamp(&dir.join(".indexing.pid"))),
+        base_indexing_incomplete: base_dir
+            .and_then(|dir| file_stamp(&dir.join(".indexing.incomplete"))),
     }
 }
 
@@ -6457,6 +6491,86 @@ mod tests {
             .unwrap();
         assert!(!Arc::ptr_eq(&original_pool, &changed_context.pool));
         assert!(changed_context.neural_model.is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cached_queries_recover_incomplete_main_publication() {
+        for query_overlay in [false, true] {
+            let home = tempdir().unwrap();
+            unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+            let repositories = tempdir().unwrap();
+            let main = repositories.path().join("main");
+            let linked = repositories.path().join("linked");
+            std::fs::create_dir(&main).unwrap();
+            git(&main, &["init", "-b", "main"]);
+            let source = main.join("lib.rs");
+            std::fs::write(&source, "pub fn restored_cached_marker() {}\n").unwrap();
+            git(&main, &["add", "lib.rs"]);
+            git(&main, &["commit", "-m", "seed base"]);
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    linked.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            let base = Workspace::resolve(&main).unwrap();
+            let overlay = Workspace::resolve(&linked).unwrap();
+            let model = create_hash_model();
+            index_workspace(&overlay, model.as_ref()).unwrap();
+            let workspace = if query_overlay { &overlay } else { &base };
+            let state = test_state();
+            let request = DaemonRequest::Search {
+                path: Some(workspace.root.clone()),
+                query: "restored_cached_marker".into(),
+                limit: Some(5),
+                context: 2,
+                type_filter: None,
+                include_globs: Vec::new(),
+                exclude_globs: Vec::new(),
+                scope_path: None,
+                scope_is_file: false,
+                skip_gitignore: false,
+                force_neural: false,
+                disable_memory_expansion: true,
+            };
+            let first = handle_request(state.clone(), request.clone()).await;
+            assert!(matches!(first, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
+            let generation = base.read_metadata().unwrap().unwrap().index_generation;
+            std::fs::write(&source, "pub fn abandoned_cached_marker() {}\n").unwrap();
+            let failure = crate::indexer::fail_tantivy_commits(&base.index_dir);
+            index_workspace_for_watcher(&base, model.as_ref()).unwrap_err();
+            drop(failure);
+            assert_eq!(
+                base.read_metadata().unwrap().unwrap().index_generation,
+                generation
+            );
+            git(&main, &["restore", "lib.rs"]);
+
+            let response = handle_request(state.clone(), request).await;
+            assert!(
+                matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1)
+            );
+            let sqlite = crate::indexer::open_sqlite_readonly(&base.sqlite_path()).unwrap();
+            let raw: Vec<u8> = sqlite
+                .query_row(
+                    "SELECT text FROM chunks WHERE file_path = 'lib.rs'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                crate::indexer::try_decompress_text(raw)
+                    .unwrap()
+                    .contains("restored_cached_marker")
+            );
+            assert!(!base.indexing_incomplete_path().exists());
+            assert!(workspace.quick_index_health().is_queryable());
+        }
     }
 
     #[test]
@@ -9162,6 +9276,39 @@ mod tests {
         drop(second_leases);
         acquired.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(writer.join().unwrap());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn unfinished_publication_uses_exclusive_search_lease() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempdir().unwrap();
+        std::fs::write(root.path().join("lib.rs"), "pub fn lease_readiness() {}\n").unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        std::fs::write(
+            workspace.indexing_incomplete_path(),
+            "publication pending\n",
+        )
+        .unwrap();
+
+        let unfinished = state
+            .acquire_search_leases(std::slice::from_ref(&workspace), false, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(unfinished.leases[0].exclusive);
+        drop(unfinished);
+
+        std::fs::remove_file(workspace.indexing_incomplete_path()).unwrap();
+        let ready = state
+            .acquire_search_leases(std::slice::from_ref(&workspace), false, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!ready.leases[0].exclusive);
     }
 
     async fn wait_for_initial_watch_reconciliation(state: &DaemonState, workspace: &Workspace) {
