@@ -304,6 +304,11 @@ Live source reads use `workspace_file.rs` to open regular files beneath the
 selected workspace without following child symlinks. Preview metadata and text
 come from the same opened file; unavailable live previews use indexed text.
 
+Literal searches retain at most the requested hit count per file and per parallel
+partial result set. They preserve path/span ordering without materializing every
+matching snippet; source-file reads and explicit unbounded output retain their
+existing memory costs.
+
 Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,
 filtering, grouping, and output types where appropriate.
