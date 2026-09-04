@@ -621,23 +621,15 @@ fn search_value(hits: &[SearchHit], warnings: &[String], started: Instant) -> Va
     })
 }
 
-async fn run_search(state: DaemonState, params: &HashMap<String, Vec<String>>) -> Value {
+pub(crate) async fn run_search(state: DaemonState, params: &HashMap<String, Vec<String>>) -> Value {
     let started = Instant::now();
     if param(params, "mode") == Some("context") {
-        let params = params.clone();
-        let permit = state.acquire_cpu_permit().await;
-        return match tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            build_context_pack(&state, &params)
-        })
-        .await
-        {
-            Ok(Ok(bundle)) => json!({
+        return match build_context_pack(&state, params).await {
+            Ok(bundle) => json!({
                 "context_pack": bundle,
                 "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
             }),
-            Ok(Err(error)) => json!({"error": error.to_string()}),
-            Err(error) => json!({"error": format!("context task failed: {error}")}),
+            Err(error) => json!({"error": error.to_string()}),
         };
     }
     let request = match build_search_request(params) {
@@ -650,10 +642,9 @@ async fn run_search(state: DaemonState, params: &HashMap<String, Vec<String>>) -
     }
 }
 
-fn build_context_pack(
-    state: &DaemonState,
+fn resolve_context_workspace(
     params: &HashMap<String, Vec<String>>,
-) -> Result<crate::context::ContextBundle> {
+) -> Result<(Workspace, Option<crate::workspace::WorkspaceScope>)> {
     let selected = param(params, "workspace")
         .map(str::trim)
         .filter(|workspace| !workspace.is_empty() && *workspace != "__all__")
@@ -671,6 +662,16 @@ fn build_context_pack(
     if workspace.root != selected_root {
         bail!("scope is outside selected workspace");
     }
+    Ok((workspace, scope_filter))
+}
+
+async fn build_context_pack(
+    state: &DaemonState,
+    params: &HashMap<String, Vec<String>>,
+) -> Result<crate::context::ContextBundle> {
+    let workspace_params = params.clone();
+    let (workspace, scope_filter) =
+        tokio::task::spawn_blocking(move || resolve_context_workspace(&workspace_params)).await??;
     let query = param(params, "q").unwrap_or_default().trim();
     if query.is_empty() {
         bail!("missing q");
@@ -685,33 +686,43 @@ fn build_context_pack(
         bail!("budget_tokens must be between 256 and 131072");
     }
     let skip_gitignore = parse_bool_param(params, "skip_gitignore");
-    let model = state.prepare_context_model(&workspace, skip_gitignore)?;
-    crate::context::build_context_bundle_with_options(
-        &workspace,
-        query,
-        Some(model.as_ref()),
-        &crate::search::SearchOptions {
-            limit: None,
-            context: 12,
-            type_filter: param(params, "type")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string),
-            include_globs: csv_param(params, "include"),
-            exclude_globs: csv_param(params, "exclude"),
-            scope_filter,
-            skip_gitignore,
-            force_neural: false,
-            progress_tx: None,
-            cancel_token: None,
-        },
-        budget,
-        &crate::context::ContextBuildOptions {
-            since: param(params, "since")
-                .map(str::trim)
-                .filter(|since| !since.is_empty()),
-        },
-    )
+    let model = state
+        .prepare_context_model(&workspace, skip_gitignore)
+        .await?;
+    let options = crate::search::SearchOptions {
+        limit: None,
+        context: 12,
+        type_filter: param(params, "type")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        include_globs: csv_param(params, "include"),
+        exclude_globs: csv_param(params, "exclude"),
+        scope_filter,
+        skip_gitignore,
+        force_neural: false,
+        progress_tx: None,
+        cancel_token: None,
+    };
+    let query = query.to_string();
+    let since = param(params, "since")
+        .map(str::trim)
+        .filter(|since| !since.is_empty())
+        .map(ToString::to_string);
+    tokio::task::spawn_blocking(move || {
+        crate::context::build_context_bundle_with_options(
+            &workspace,
+            &query,
+            Some(model.as_ref()),
+            &options,
+            budget,
+            &crate::context::ContextBuildOptions {
+                since: since.as_deref(),
+            },
+        )
+    })
+    .await
+    .context("context task failed")?
 }
 
 async fn write_search_stream(

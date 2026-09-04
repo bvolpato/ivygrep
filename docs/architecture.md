@@ -405,6 +405,9 @@ without an incarnation reconcile once; unchanged files still use the shared base
 
 ## Daemon, watchers, and background work
 
+Web context generation follows the daemon's workspace-lease-before-CPU order,
+retaining both resources through model preparation and context assembly.
+
 Daemon owns long-lived state that should not be recreated for every query:
 
 - workspace watchers and adaptive debounce
