@@ -12,6 +12,7 @@ All notable changes to ivygrep are documented in this file.
 - Go caller searches recognize explicit generic invocations, including qualified, parenthesized, and zero-argument calls, when the generic function is defined in the index. Generic type conversions, collection indexing, and uncalled function values remain excluded. Go reference searches exclude type, alias, and interface method declaration names while preserving their uses.
 - Local indexing and first-query recovery rebuild saved stores when a tracked directory changes between a linked worktree and a standalone checkout, preserving workspace settings and removing the obsolete layout.
 - Clean Git checkouts reindex files included through `.ignore` whitelists and observe ancestor ignore-rule changes. Files hidden from Git status by index flags also refresh correctly, including when a worktree reuses its base.
+- Context packs apply the indexer's ignore rules to changed files, explicit paths, and live dependency expansion, keeping excluded source out of CLI and MCP output unless `--skip-gitignore` is requested.
 
 ## [1.2.13] - 2026-09-03
 

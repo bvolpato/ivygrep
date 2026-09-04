@@ -12,7 +12,7 @@ use crate::context_graph::{
     FileEdgeKind, GraphExpansion, expand_context_graph, expand_context_tests, extract_file_graph,
 };
 use crate::context_input::{
-    ContextChangeScope, ContextInputPath, ContextSeed, collect_context_input, path_is_git_ignored,
+    ContextChangeScope, ContextInputPath, ContextSeed, collect_context_input,
 };
 use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
 use crate::indexer::reconcile_worktree_overlay;
@@ -23,6 +23,7 @@ use crate::symbols::{
     SymbolSearchMode, likely_definition_names, search_symbol_relationships_in_current_index,
     search_symbols_in_current_index,
 };
+use crate::walker::SourcePathMatcher;
 use crate::workspace::Workspace;
 
 const MAX_ITEMS: usize = 20;
@@ -640,6 +641,7 @@ fn add_transient_graph_candidates(
     else {
         return;
     };
+    let mut source_paths = SourcePathMatcher::new(&workspace.root, options.skip_gitignore);
     for seed in seeds {
         let seed_path = &seed.file_path;
         let Ok(Some(content)) = context_seed_content(&workspace.root, seed) else {
@@ -676,7 +678,9 @@ fn add_transient_graph_candidates(
             } else {
                 edge.source_path.clone()
             };
-            if !context_path_allowed(&file_path, options, &path_matcher) {
+            if !context_path_allowed(&file_path, options, &path_matcher)
+                || !source_paths.allows(&file_path).unwrap_or(false)
+            {
                 continue;
             }
             let expansion = GraphExpansion {
@@ -692,9 +696,6 @@ fn add_transient_graph_candidates(
                 .ok()
                 .flatten()
                 .or_else(|| {
-                    if !options.skip_gitignore && path_is_git_ignored(&workspace.root, &file_path) {
-                        return None;
-                    }
                     context_seed_hit(
                         &workspace.root,
                         &ContextSeed {

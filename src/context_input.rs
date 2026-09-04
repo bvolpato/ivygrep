@@ -10,6 +10,7 @@ use serde::{Serialize, Serializer};
 use crate::chunking::{language_for_path, resolve_type_alias};
 use crate::path_glob::PathGlobMatcher;
 use crate::search::SearchOptions;
+use crate::walker::SourcePathMatcher;
 use crate::workspace::Workspace;
 
 const MAX_SERIALIZED_CHANGES: usize = 512;
@@ -155,10 +156,14 @@ pub(crate) fn collect_context_input(
         Some((scope, changes)) => (Some(scope), changes),
         None => (None, Vec::new()),
     };
-    let seed_changes = seed_changes
-        .into_iter()
-        .filter(|change| path_allowed(&change.file_path))
-        .collect::<Vec<_>>();
+    let mut source_paths = SourcePathMatcher::new(&workspace.root, options.skip_gitignore);
+    let mut allowed_changes = Vec::new();
+    for change in seed_changes {
+        if path_allowed(&change.file_path) && source_paths.allows(&change.file_path)? {
+            allowed_changes.push(change);
+        }
+    }
+    let seed_changes = allowed_changes;
     if let Some(scope) = &mut change_scope {
         scope.dirty_worktree = seed_changes.iter().any(|change| {
             change.sources.iter().any(|source| {
@@ -178,14 +183,12 @@ pub(crate) fn collect_context_input(
             .collect();
         scope.changes_truncated = scope.total_changes > scope.changes.len();
     }
-    let referenced_paths = referenced_task_paths(&workspace.root, task, options.skip_gitignore)
-        .into_iter()
-        .filter(|reference| {
-            path_allowed(&reference.file_path)
-                && (options.skip_gitignore
-                    || !path_is_git_ignored(&workspace.root, &reference.file_path))
-        })
-        .collect::<Vec<_>>();
+    let mut referenced_paths = Vec::new();
+    for reference in referenced_task_paths(&workspace.root, task, options.skip_gitignore) {
+        if path_allowed(&reference.file_path) && source_paths.allows(&reference.file_path)? {
+            referenced_paths.push(reference);
+        }
+    }
     let mut seeds = BTreeMap::<PathBuf, ContextSeed>::new();
     for reference in &referenced_paths {
         if !workspace.root.join(&reference.file_path).is_file() {
@@ -272,15 +275,6 @@ pub(crate) fn collect_context_input(
         referenced_paths,
         seeds,
     })
-}
-
-pub(crate) fn path_is_git_ignored(root: &Path, path: &Path) -> bool {
-    Command::new("git")
-        .args(["check-ignore", "-q", "--"])
-        .arg(path)
-        .current_dir(root)
-        .output()
-        .is_ok_and(|output| output.status.success())
 }
 
 fn seed_path_relevance(path: &Path, task_terms: &BTreeSet<String>) -> usize {
