@@ -16,6 +16,7 @@ All notable changes to ivygrep are documented in this file.
 - Literal searches apply the hit limit before building excess snippets and keep parallel partial results bounded, avoiding memory growth with every matching line while preserving deterministic result order.
 - Web context requests acquire workspace leases before CPU capacity, preventing a deadlock with concurrent indexing when search capacity is exhausted. Both resources remain held through context generation.
 - Failed main-index publication now forces complete recovery before reusing Git state or creating worktree overlays. Doctor detects unfinished publication instead of reporting stale stores as healthy.
+- Daemon hybrid searches refresh workspace and base-index identity when a checkout is replaced or its Git pointer changes, preventing missing results and stale matches without requiring a daemon restart.
 
 ## [1.2.13] - 2026-09-03
 

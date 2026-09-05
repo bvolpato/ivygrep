@@ -428,6 +428,13 @@ Watchers coalesce bursts and cap continuous-event starvation. Successful changes
 invalidate only cache entries involving affected workspaces. No-op indexing
 preserves valid cache entries.
 
+Cached Git workspace resolution checks filesystem identity and small Git metadata
+files without launching Git on unchanged searches. Non-Git paths repeat root
+discovery so a newly created ancestor repository is recognized. A changed cached
+identity triggers an exclusive index scan before hybrid searches resume; switching
+from a linked worktree to a main checkout also replaces the obsolete overlay
+stores.
+
 Watcher health is the daemon's job, not the client's. At startup and every 30
 seconds a supervisor registers a watcher for each enabled, indexed workspace
 that has none; a registration that fails (inotify limits, a missing root) is
