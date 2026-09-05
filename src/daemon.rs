@@ -66,6 +66,9 @@ const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 /// exact absolute roots so repeated daemon searches avoid reconstructing the
 /// same immutable path-derived workspace descriptor.
 const MAX_RESOLVED_WORKSPACES: usize = 128;
+/// Filesystem identity checks are cheap but still material for cached queries.
+/// Keep replacement detection prompt without repeating syscalls in a burst.
+const WORKSPACE_RESOLUTION_FRESHNESS: Duration = Duration::from_millis(50);
 const MAX_NEURAL_STATUSES: usize = 128;
 /// Bound on remembered enhancement-trigger attempts (one per workspace/mode).
 const MAX_ENHANCEMENT_TRIGGERS: usize = 256;
@@ -515,6 +518,13 @@ impl DirectoryIdentity {
 }
 
 impl WorkspaceResolutionSignature {
+    fn matches_cached_main_checkout(&self, path: &Path) -> bool {
+        self.root == path
+            && self.git_dir == self.common_dir
+            && self.git_dir == self.root.join(".git")
+            && DirectoryIdentity::read(&self.git_dir).as_ref() == Some(&self.git_identity)
+    }
+
     fn same_checkout(&self, other: &Self) -> bool {
         self.root == other.root
             && self.root_identity == other.root_identity
@@ -580,6 +590,7 @@ fn read_optional_resolution_file(path: &Path) -> Option<Option<Vec<u8>>> {
 struct CachedWorkspace {
     workspace: Workspace,
     signature: WorkspaceResolutionSignature,
+    checked_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -2011,15 +2022,24 @@ impl DaemonState {
     }
 
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
+        if path.is_absolute()
+            && let Some(cached) = self.resolved_workspaces.lock().get_mut(path)
+        {
+            if cached.checked_at.elapsed() < WORKSPACE_RESOLUTION_FRESHNESS {
+                return Ok(cached.workspace.clone());
+            }
+            if cached.signature.matches_cached_main_checkout(path)
+                || WorkspaceResolutionSignature::read(path).as_ref() == Some(&cached.signature)
+            {
+                cached.checked_at = std::time::Instant::now();
+                return Ok(cached.workspace.clone());
+            }
+        }
+
         let signature = path
             .is_absolute()
             .then(|| WorkspaceResolutionSignature::read(path))
             .flatten();
-        if let Some(cached) = self.resolved_workspaces.lock().get(path)
-            && signature.as_ref() == Some(&cached.signature)
-        {
-            return Ok(cached.workspace.clone());
-        }
 
         let workspace = Workspace::resolve(path)?;
         // Preserve the previous identity if resolution raced a Git/root change,
@@ -2051,6 +2071,7 @@ impl DaemonState {
                 CachedWorkspace {
                     workspace: workspace.clone(),
                     signature,
+                    checked_at: std::time::Instant::now(),
                 },
             );
         }
@@ -6749,7 +6770,8 @@ mod tests {
                 "HEAD",
             ],
         );
-        let replacement = state.resolve_workspace(&target).unwrap();
+        expire_workspace_resolution(&state, &original.root);
+        let replacement = state.resolve_workspace(&original.root).unwrap();
         assert!(replacement.is_worktree());
         assert!(state.replaced_workspaces.lock().contains_key(&original.id));
 
@@ -6841,6 +6863,12 @@ mod tests {
         }
     }
 
+    fn expire_workspace_resolution(state: &DaemonState, root: &Path) {
+        if let Some(cached) = state.resolved_workspaces.lock().get_mut(root) {
+            cached.checked_at = std::time::Instant::now() - WORKSPACE_RESOLUTION_FRESHNESS;
+        }
+    }
+
     async fn assert_replaced_workspace_searches_current_base(
         initially_linked: bool,
         explicit_index: bool,
@@ -6914,6 +6942,7 @@ mod tests {
                 );
             }
         }
+        expire_workspace_resolution(&state, &original.root);
         if explicit_index {
             let response = handle_request(state.clone(), index_request_for(&original, false)).await;
             assert!(
