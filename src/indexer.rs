@@ -27,6 +27,9 @@ use crate::vector_store::{HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, 
 use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
 mod compression;
+mod enhancement;
+#[cfg(test)]
+mod enhancement_tests;
 mod git_state;
 #[cfg(test)]
 mod integrity_tests;
@@ -40,6 +43,8 @@ mod storage;
 
 use compression::compress_text;
 pub use compression::{decompress_text, try_decompress_text};
+use enhancement::IndexLock;
+pub(crate) use enhancement::{EnhancementSnapshot, EnhancementSuperseded};
 use git_state::{
     clean_git_checkout_state, files_have_same_contents, indexed_git_state_path,
     record_indexed_git_state, refresh_clean_base_metadata,
@@ -387,7 +392,7 @@ pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
     unlock_result
 }
 
-/// Preserve both lock inodes while clearing stores and the job ledger. A
+/// Preserve lock inodes while clearing stores and the job ledger. A
 /// watcher can heartbeat during a rebuild, including its initial index.
 fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
     if !workspace.index_dir.exists() {
@@ -396,7 +401,10 @@ fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
     let _job_lock = jobs::lock_job_ledger(workspace)?;
     for entry in fs::read_dir(&workspace.index_dir)? {
         let entry = entry?;
-        if entry.file_name() == "index.lock" || entry.file_name() == "job.lock" {
+        if entry.file_name() == "index.lock"
+            || entry.file_name() == "job.lock"
+            || entry.file_name() == "enhancement.lock"
+        {
             continue;
         }
         let path = entry.path();
@@ -517,7 +525,7 @@ fn index_workspace_with_options(
     }
     // The index lock serializes creation. A new incarnation survives ordinary
     // incremental indexing, but removal/recreation must invalidate old overlays.
-    if !workspace.is_worktree() && workspace.read_index_incarnation()?.is_none() {
+    if workspace.read_index_incarnation()?.is_none() {
         fs::write(
             workspace.index_incarnation_path(),
             uuid::Uuid::new_v4().to_string(),
@@ -2394,6 +2402,30 @@ pub fn enhance_workspace_hash(
     workspace: &Workspace,
     hash_model: &dyn EmbeddingModel,
 ) -> Result<usize> {
+    enhance_workspace_hash_with_snapshot(workspace, hash_model, None)
+}
+
+pub(crate) fn enhance_workspace_hash_for_job(
+    workspace: &Workspace,
+    hash_model: &dyn EmbeddingModel,
+    expected: &EnhancementSnapshot,
+) -> Result<usize> {
+    enhance_workspace_hash_with_snapshot(workspace, hash_model, Some(expected))
+}
+
+fn enhance_workspace_hash_with_snapshot(
+    workspace: &Workspace,
+    hash_model: &dyn EmbeddingModel,
+    expected: Option<&EnhancementSnapshot>,
+) -> Result<usize> {
+    if !workspace.index_dir.exists() {
+        return Ok(0);
+    }
+    let _worker_lock = enhancement::lock_worker(workspace)?;
+    let initial_lock = IndexLock::acquire(workspace)?;
+    if let Some(expected) = expected {
+        expected.verify_current(workspace)?;
+    }
     let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
     let sqlite_path = if use_overlay {
         workspace.overlay_sqlite_path()
@@ -2409,10 +2441,8 @@ pub fn enhance_workspace_hash(
         return Ok(0);
     }
 
-    let index_generation = workspace
-        .read_metadata()?
-        .map(|metadata| metadata.index_generation)
-        .unwrap_or(0);
+    let snapshot = EnhancementSnapshot::capture(workspace)?;
+    let index_generation = snapshot.generation;
     let sqlite = open_sqlite(&sqlite_path)?;
     let total_chunks = sqlite
         .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
@@ -2486,6 +2516,7 @@ pub fn enhance_workspace_hash(
         Ok(())
     };
 
+    drop(initial_lock);
     let missing_keys = sparse_missing_vector_keys(&sqlite, &vector_index, total_chunks)?;
     visit_embedding_rows(&sqlite, missing_keys, |key, raw| {
         if vector_index.contains(key) || !batch_keys.insert(key) {
@@ -2497,13 +2528,16 @@ pub fn enhance_workspace_hash(
         batch.push((key, text));
         if batch.len() >= BATCH_SIZE {
             while let Some(reason) = check_system_constraints(EnhancementTier::Hash) {
-                let _ = fs::write(&paused_path, &reason);
+                {
+                    let _publication = snapshot.lock_current(workspace)?;
+                    let _ = fs::write(&paused_path, &reason);
+                }
                 std::thread::sleep(std::time::Duration::from_secs(10));
             }
-            let _ = fs::remove_file(&paused_path);
-
             process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
             batch_keys.clear();
+            let _publication = snapshot.lock_current(workspace)?;
+            let _ = fs::remove_file(&paused_path);
             progress_count += BATCH_SIZE;
             let _ = fs::write(&progress_path, progress_count.to_string());
             if newly_processed.is_multiple_of(CHECKPOINT_INTERVAL) {
@@ -2517,11 +2551,15 @@ pub fn enhance_workspace_hash(
     while !batch.is_empty()
         && let Some(reason) = check_system_constraints(EnhancementTier::Hash)
     {
-        let _ = fs::write(&paused_path, &reason);
+        {
+            let _publication = snapshot.lock_current(workspace)?;
+            let _ = fs::write(&paused_path, &reason);
+        }
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
-    let _ = fs::remove_file(&paused_path);
     process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+    let _publication = snapshot.lock_current(workspace)?;
+    let _ = fs::remove_file(&paused_path);
     progress_count += tail_len;
     let _ = fs::write(&progress_path, progress_count.to_string());
     if total_chunks == 0 && removed_tombstones {
@@ -2556,6 +2594,30 @@ pub fn enhance_workspace_neural(
     workspace: &Workspace,
     neural_model: &dyn EmbeddingModel,
 ) -> Result<usize> {
+    enhance_workspace_neural_with_snapshot(workspace, neural_model, None)
+}
+
+pub(crate) fn enhance_workspace_neural_for_job(
+    workspace: &Workspace,
+    neural_model: &dyn EmbeddingModel,
+    expected: &EnhancementSnapshot,
+) -> Result<usize> {
+    enhance_workspace_neural_with_snapshot(workspace, neural_model, Some(expected))
+}
+
+fn enhance_workspace_neural_with_snapshot(
+    workspace: &Workspace,
+    neural_model: &dyn EmbeddingModel,
+    expected: Option<&EnhancementSnapshot>,
+) -> Result<usize> {
+    if !workspace.index_dir.exists() {
+        return Ok(0);
+    }
+    let _worker_lock = enhancement::lock_worker(workspace)?;
+    let initial_lock = IndexLock::acquire(workspace)?;
+    if let Some(expected) = expected {
+        expected.verify_current(workspace)?;
+    }
     let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
     let sqlite_path = if use_overlay {
         workspace.overlay_sqlite_path()
@@ -2579,10 +2641,8 @@ pub fn enhance_workspace_neural(
         );
     }
 
-    let index_generation = workspace
-        .read_metadata()?
-        .map(|metadata| metadata.index_generation)
-        .unwrap_or(0);
+    let snapshot = EnhancementSnapshot::capture(workspace)?;
+    let index_generation = snapshot.generation;
     let profile = neural_model.profile_info().unwrap_or("general");
     let model_identity = neural_model.model_identity();
     let identity_matches = match (workspace.neural_model_identity(), model_identity) {
@@ -2668,6 +2728,7 @@ pub fn enhance_workspace_neural(
     // Discover missing keys from the covering index, then point-fetch text for
     // those keys. Keep the sequential scan for fresh or incomplete stores,
     // where indexed point lookups cost more than one table pass.
+    drop(initial_lock);
     let sparse_missing_keys = sparse_missing_vector_keys(&sqlite, &vector_index, total_chunks)?;
 
     let document_character_limit = neural_model.document_character_limit();
@@ -2713,14 +2774,17 @@ pub fn enhance_workspace_neural(
                 while neural_model.respects_system_constraints()
                     && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
                 {
-                    let _ = std::fs::write(&paused_path, &reason);
+                    {
+                        let _publication = snapshot.lock_current(workspace)?;
+                        let _ = std::fs::write(&paused_path, &reason);
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(10));
                 }
-                let _ = std::fs::remove_file(&paused_path);
-
                 let processed_len = batch.len();
                 process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
                 batch_keys.clear();
+                let _publication = snapshot.lock_current(workspace)?;
+                let _ = fs::remove_file(&paused_path);
                 progress_count += processed_len;
                 let _ = std::fs::write(&progress_path, progress_count.to_string());
                 if last_batch_size_refresh.elapsed() >= NEURAL_BATCH_SIZE_REFRESH_INTERVAL {
@@ -2743,11 +2807,15 @@ pub fn enhance_workspace_neural(
         && !batch.is_empty()
         && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
     {
-        let _ = std::fs::write(&paused_path, &reason);
+        {
+            let _publication = snapshot.lock_current(workspace)?;
+            let _ = std::fs::write(&paused_path, &reason);
+        }
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
-    let _ = std::fs::remove_file(&paused_path);
     process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+    let _publication = snapshot.lock_current(workspace)?;
+    let _ = fs::remove_file(&paused_path);
     progress_count += tail_len;
 
     let _ = std::fs::write(&progress_path, progress_count.to_string());

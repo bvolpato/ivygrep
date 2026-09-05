@@ -99,11 +99,18 @@ impl FreshIndexStaging {
         mut self,
         workspace: &Workspace,
         artifacts: Vec<PathBuf>,
-        promotions: Vec<(PathBuf, PathBuf)>,
+        mut promotions: Vec<(PathBuf, PathBuf)>,
     ) -> Result<()> {
         anyhow::ensure!(self.sqlite_path.is_file(), "staged SQLite index is missing");
         anyhow::ensure!(self.tantivy_dir.is_dir(), "staged Tantivy index is missing");
         anyhow::ensure!(self.vector_path.is_file(), "staged vector index is missing");
+
+        // Rotate with the stores, including on overlay recreation. Generation
+        // numbers alone can repeat after removal, and an old enhancer may still
+        // hold the replaced SQLite file open. Rollback restores the old identity.
+        let staged_incarnation = self.dir.join("index_incarnation");
+        fs::write(&staged_incarnation, uuid::Uuid::new_v4().to_string())?;
+        promotions.insert(0, (staged_incarnation, workspace.index_incarnation_path()));
 
         let backup_dir = workspace
             .index_dir
@@ -195,6 +202,7 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 fn main_store_artifacts(workspace: &Workspace) -> Vec<PathBuf> {
     let sqlite_path = workspace.sqlite_path();
     vec![
+        workspace.index_incarnation_path(),
         sqlite_path.clone(),
         sqlite_sidecar_path(&sqlite_path, "-wal"),
         sqlite_sidecar_path(&sqlite_path, "-shm"),
@@ -226,6 +234,7 @@ fn overlay_store_artifacts(workspace: &Workspace) -> Vec<PathBuf> {
     let neural = workspace.vector_neural_path();
     vec![
         workspace.metadata_path(),
+        workspace.index_incarnation_path(),
         sqlite.clone(),
         sqlite_sidecar_path(&sqlite, "-wal"),
         sqlite_sidecar_path(&sqlite, "-shm"),

@@ -566,8 +566,27 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_hash_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
+        let (completion_snapshot, setup_lock) =
+            crate::indexer::EnhancementSnapshot::begin(&workspace)?;
+        drop(setup_lock);
         let hash_model = crate::embedding::create_hash_model();
-        let result = crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref());
+        let result = crate::indexer::enhance_workspace_hash_for_job(
+            &workspace,
+            hash_model.as_ref(),
+            &completion_snapshot,
+        );
+        let cleanup_lock = match completion_snapshot.lock_current(&workspace) {
+            Ok(lock) => lock,
+            Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if std::fs::read_to_string(workspace.enhancing_pid_path())
+            .ok()
+            .is_some_and(|owner| owner.trim() != std::process::id().to_string())
+        {
+            // A newly spawned worker owns the shared progress files.
+            return result.map(|_| ());
+        }
         if let Err(error) = &result {
             let _ = std::fs::write(
                 workspace.index_dir.join(".enhancing.error"),
@@ -587,6 +606,7 @@ pub async fn run() -> Result<()> {
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
         let _ = std::fs::remove_file(workspace.enhancing_phase_path());
         let _ = std::fs::remove_file(workspace.enhancing_paused_path());
+        drop(cleanup_lock);
         if result.is_ok() {
             workspace.trigger_queued_neural_enhancement()?;
         }
@@ -597,10 +617,16 @@ pub async fn run() -> Result<()> {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
 
+        let (completion_snapshot, setup_lock) =
+            crate::indexer::EnhancementSnapshot::begin(&workspace)?;
         // Write PID file so --status can show "enhancing..."
         let pid_path = workspace.enhancing_pid_path();
         let _ = std::fs::write(&pid_path, std::process::id().to_string());
-        let _ = jobs::start_job(&workspace, JobKind::Enhancement, "starting", 1);
+        let heartbeat_nonce = jobs::start_job(&workspace, JobKind::Enhancement, "starting", 1)
+            .ok()
+            .and_then(|record| record.nonce);
+        let completion_nonce = heartbeat_nonce.clone();
+        drop(setup_lock);
         let stop_heartbeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let heartbeat_stop = stop_heartbeat.clone();
         let heartbeat_workspace = workspace.clone();
@@ -644,18 +670,55 @@ pub async fn run() -> Result<()> {
                 if let Some(reason) = paused_reason {
                     update.details.insert("paused_reason".to_string(), reason);
                 }
-                let _ = jobs::heartbeat_job(&heartbeat_workspace, JobKind::Enhancement, update);
+                if let Some(nonce) = &heartbeat_nonce {
+                    let _ = jobs::heartbeat_job_if_current(
+                        &heartbeat_workspace,
+                        JobKind::Enhancement,
+                        nonce,
+                        update,
+                    );
+                }
             }
         });
 
         let result = (|| {
             let hash_model = crate::embedding::create_hash_model();
-            crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref())?;
+            crate::indexer::enhance_workspace_hash_for_job(
+                &workspace,
+                hash_model.as_ref(),
+                &completion_snapshot,
+            )?;
 
             let model = crate::embedding::create_neural_model_background()?;
             ensure_compatible_worktree_base_model(&workspace, model.as_ref())?;
-            crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
+            crate::indexer::enhance_workspace_neural_for_job(
+                &workspace,
+                model.as_ref(),
+                &completion_snapshot,
+            )
         })();
+        stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cleanup_lock = match completion_snapshot.lock_current(&workspace) {
+            Ok(lock) => lock,
+            Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => {
+                std::process::exit(0)
+            }
+            Err(error) => return Err(error),
+        };
+        if completion_nonce.as_deref().is_some_and(|nonce| {
+            jobs::job_status(
+                &workspace,
+                JobKind::Enhancement,
+                jobs::ENHANCEMENT_HEARTBEAT_TTL_SECS,
+            )
+            .record
+            .and_then(|record| record.nonce)
+            .as_deref()
+                != Some(nonce)
+        }) {
+            // Another worker now owns completion and progress for this index.
+            std::process::exit(0);
+        }
         if let Err(e) = &result {
             let _ = std::fs::write(
                 workspace.index_dir.join(".enhancing.error"),
@@ -686,6 +749,7 @@ pub async fn run() -> Result<()> {
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
         let _ = std::fs::remove_file(workspace.enhancing_phase_path());
+        drop(cleanup_lock);
         if let Err(error) = workspace.trigger_queued_neural_enhancement() {
             let _ = jobs::finish_job(
                 &workspace,
