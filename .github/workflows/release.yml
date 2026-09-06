@@ -210,7 +210,7 @@ jobs:
           fi
 
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@aa80c8c5bd439a416a62804f2151ab38c671a638 # v0.24.1
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           file: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
           format: spdx-json
@@ -391,7 +391,7 @@ jobs:
 
       - name: Set up QEMU
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
         with:
           platforms: arm64
           cache-image: false
@@ -656,7 +656,7 @@ jobs:
           echo "notes_file=release_notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           body_path: ${{ steps.extract_notes.outputs.notes_file }}
           files: release-assets/*
