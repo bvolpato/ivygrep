@@ -16,6 +16,6 @@
   },
   "dependencies": {
     "highlight.js": "^11.12.0",
-    "markdown-it": "^15.0.0"
+    "markdown-it": "^15.0.1"
   }
 }
