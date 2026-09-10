@@ -4,7 +4,9 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -266,6 +268,64 @@ def native_training_fixture(
 
 
 class PublicBenchmarkTest(unittest.TestCase):
+    def test_current_head_source_hash_ignores_gitignored_build_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            root = temporary_root / "checkout"
+            root.mkdir()
+            source = root / "src" / "search.rs"
+            source.parent.mkdir()
+            source.write_text("fn search() {}\n")
+            (root / ".gitignore").write_text("target/\n")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "user.name=ivygrep tests",
+                    "-c",
+                    "user.email=tests@ivygrep.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                cwd=root,
+                check=True,
+            )
+
+            initial = current_head_runner.source_inputs_sha256(root)
+            ignored = root / "vendor" / "dependency" / "target" / "cache.bin"
+            ignored.parent.mkdir(parents=True)
+            ignored.write_bytes(b"generated")
+            self.assertEqual(current_head_runner.source_inputs_sha256(root), initial)
+
+            tracked_input = root / "vendor" / "dependency" / "src" / "lib.rs"
+            tracked_input.parent.mkdir(parents=True)
+            tracked_input.write_text("pub fn dependency() {}\n")
+            self.assertNotEqual(current_head_runner.source_inputs_sha256(root), initial)
+
+            tracked_input.unlink()
+            archive = subprocess.run(
+                ["git", "archive", "--format=tar", "HEAD"],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            outer = temporary_root / "outer"
+            outer.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            (outer / ".gitignore").write_text("archive/vendor/\n")
+            archive_root = outer / "archive"
+            archive_root.mkdir()
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as handle:
+                handle.extractall(archive_root, filter="data")
+            self.assertEqual(
+                current_head_runner.source_inputs_sha256(archive_root), initial
+            )
+
     def test_current_head_evidence_rejects_changed_search_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
