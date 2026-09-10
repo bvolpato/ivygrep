@@ -8,8 +8,8 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "2f9acd4d38bf6a67ed2c69490135bfd98ca2231a10681200a949dde5008a4454",
-      "source_commit": "1cdc715105dd85d49949c49db05a929c508fbb5a",
+      "sha256": "66e26ec4d46b281f529ccb81870bddd975bc4c4a60d0516a67cdb7f30a3ff436",
+      "source_commit": "2251e0801e520cd4072919d8df50d8ece949a9ab",
       "summary": {
         "binary_sha256": "0df08293659eeffa57c4a3bfecf770731e7c5655c80aee9ef41d80ae3857f0f6",
         "fixture": {

@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "1cdc715105dd85d49949c49db05a929c508fbb5a",
+  "ivygrep_commit": "2251e0801e520cd4072919d8df50d8ece949a9ab",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
