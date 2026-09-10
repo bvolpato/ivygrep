@@ -4,6 +4,8 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.14] - 2026-09-10
+
 ### Fixed
 
 - Symbol definitions, references, and callers preserve Unicode identifiers, including combining marks and qualified names, instead of dropping or conflating them. Existing dollar-sigil aliases remain supported. Index format v27 rebuilds unchanged files to repair previously truncated symbol keys.
@@ -19,7 +21,12 @@ All notable changes to ivygrep are documented in this file.
 - Daemon hybrid searches refresh workspace and base-index identity when a checkout is replaced or its Git pointer changes, preventing missing results and stale matches without requiring a daemon restart.
 - Background hash and neural enhancement discard obsolete work when an index is removed or rebuilt, including worktree overlays and reused generation numbers. Model computation still runs alongside lexical indexing; checkpoints and completion publish under the index lock.
 
-## [1.2.13] - 2026-09-03
+### Testing
+
+- Windows cross-platform E2E allows 60 minutes for the expanded test suite instead of cancelling a still-passing run at the previous 30-minute limit.
+- Linux ARM release acceptance runs its procedures and daemon-equivalence check offline in an image containing both Git and Python.
+
+## [1.2.13] - 2026-09-10
 
 ### Added
 

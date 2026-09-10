@@ -1,15 +1,13 @@
 # Releasing ivygrep
 
 A release tag starts the build pipeline; it must not be used as a substitute
-for finishing review or checking the intended source revision. The v1.2.13
-preparation PR is not a published release.
+for finishing review or checking the intended source revision. A preparation
+PR is not a published release.
 
 ## Before tagging
 
-1. Land the intended fixes and require their terminal CI results. For this
-   campaign, the CoSQA fix in #324 is required by the unchanged public gate;
-   the runtime fixes in #325 and native conversion in #322 need their platform
-   checks. Finish the other reviewed test/benchmark PRs before freezing source.
+1. Land the intended fixes and require their terminal CI and platform results
+   before freezing source.
 2. Keep `Cargo.toml`, the root `Cargo.lock` package, both plugin manifests, and
    the versioned changelog section consistent. Update the planned release date
    if publication moves to a different day.
@@ -18,10 +16,10 @@ preparation PR is not a published release.
 
    ```bash
    cargo build --locked --release --bin ig
-   python3 scripts/run_current_head_benchmark.py \
+   uv run scripts/run_current_head_benchmark.py \
      --binary target/release/ig --require-neural
-   python3 scripts/render_evidence_dashboard.py
-   python3 scripts/check_release_readiness.py --tag v1.2.13
+   uv run scripts/render_evidence_dashboard.py
+   uv run scripts/check_release_readiness.py --tag v1.2.14
    ```
 
 4. Commit the evidence, rerun checks, and inspect the final diff. Do not copy

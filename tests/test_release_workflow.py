@@ -87,9 +87,12 @@ class ReleaseWorkflowTest(unittest.TestCase):
             "- name: Run exact Linux aarch64 archive under QEMU", maxsplit=1
         )[1].split("- name: Reject elevated x86 ISA requirements", maxsplit=1)[0]
 
-        self.assertIn("--network none", arm_acceptance)
-        self.assertIn("--entrypoint sh", arm_acceptance)
-        self.assertIn("alpine/git@sha256:", arm_acceptance)
+        self.assertEqual(arm_acceptance.count("--network none"), 2)
+        self.assertEqual(arm_acceptance.count("--entrypoint sh"), 2)
+        self.assertIn("FROM alpine/git@sha256:", arm_acceptance)
+        self.assertIn("RUN apk add --no-cache python3", arm_acceptance)
+        self.assertEqual(arm_acceptance.count('"$ARM_ACCEPTANCE_IMAGE" -c'), 2)
+        self.assertNotIn("python:3.13-alpine", arm_acceptance)
 
     def test_release_publishes_sbom_and_provenance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
