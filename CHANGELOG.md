@@ -25,6 +25,7 @@ All notable changes to ivygrep are documented in this file.
 
 - Windows cross-platform E2E allows 60 minutes for the expanded test suite instead of cancelling a still-passing run at the previous 30-minute limit.
 - Linux ARM release acceptance runs its procedures and daemon-equivalence check offline in an image containing both Git and Python.
+- Release evidence hashing excludes Git-ignored build outputs while still including tracked and nonignored source inputs, so clean tag checkouts reproduce locally generated evidence.
 
 ## [1.2.13] - 2026-09-10
 

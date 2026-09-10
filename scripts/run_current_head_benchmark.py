@@ -53,13 +53,52 @@ def package_version(root: Path = ROOT) -> str:
 
 
 def source_inputs_sha256(root: Path = ROOT) -> str:
-    paths = []
-    for name in SOURCE_INPUTS:
-        path = root / name
-        if path.is_file():
-            paths.append(path)
-        elif path.is_dir():
-            paths.extend(candidate for candidate in path.rglob("*") if candidate.is_file())
+    try:
+        repository_root = Path(
+            os.fsdecode(
+                subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    cwd=root,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout.rstrip(b"\n")
+            )
+        ).resolve()
+        if repository_root != root.resolve():
+            raise ValueError("root is not the Git repository root")
+        listed = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                *SOURCE_INPUTS,
+            ],
+            cwd=root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+        paths = []
+        for name in SOURCE_INPUTS:
+            path = root / name
+            if path.is_file():
+                paths.append(path)
+            elif path.is_dir():
+                paths.extend(
+                    candidate for candidate in path.rglob("*") if candidate.is_file()
+                )
+    else:
+        paths = [
+            root / os.fsdecode(path)
+            for path in listed.split(b"\0")
+            if path and (root / os.fsdecode(path)).is_file()
+        ]
 
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda candidate: candidate.relative_to(root).as_posix()):
