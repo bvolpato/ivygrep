@@ -466,7 +466,7 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
     let mut offset = 0;
     let mut in_block_comment = false;
     // Brackets still open from a multi-line annotation such as `@router.get(`.
-    let mut open_brackets = 0usize;
+    let mut open_brackets = None;
 
     for line in text.split_inclusive('\n') {
         let line_start = offset;
@@ -485,14 +485,11 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
         }
 
         let mut rest = trimmed;
-        if open_brackets > 0 {
-            match close_open_brackets(trimmed, open_brackets) {
-                Ok(end) => {
-                    open_brackets = 0;
-                    rest = trimmed[end..].trim_start();
-                }
+        if let Some(open) = open_brackets.take() {
+            match close_open_brackets(trimmed, open) {
+                Ok(end) => rest = trimmed[end..].trim_start(),
                 Err(still_open) => {
-                    open_brackets = still_open;
+                    open_brackets = Some(still_open);
                     continue;
                 }
             }
@@ -511,7 +508,7 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
         let code = match strip_annotation_prefix(rest) {
             Ok(code) => code,
             Err(still_open) => {
-                open_brackets = still_open;
+                open_brackets = Some(still_open);
                 continue;
             }
         };
@@ -545,8 +542,8 @@ pub fn strip_leading_annotations(line: &str) -> &str {
 }
 
 /// Like [`strip_leading_annotations`], but an annotation left unclosed at the
-/// end of the line reports how many brackets remain open.
-fn strip_annotation_prefix(mut line: &str) -> Result<&str, usize> {
+/// end of the line reports what remains open.
+fn strip_annotation_prefix(mut line: &str) -> Result<&str, OpenBrackets> {
     loop {
         if let Some(rest) = line.strip_prefix('@') {
             let identifier_end = rest
@@ -559,50 +556,99 @@ fn strip_annotation_prefix(mut line: &str) -> Result<&str, usize> {
             }
             let mut rest = &rest[identifier_end..];
             if rest.starts_with('(') {
-                rest = &rest[close_open_brackets(rest, 0)?..];
+                rest = &rest[close_open_brackets(rest, OpenBrackets::default())?..];
             }
             line = rest.trim_start();
             continue;
         }
-        if let Some(rest) = line.strip_prefix('#')
+        // Rust `#[...]` and `#![...]`.
+        if let Some(rest) = line.strip_prefix("#!").or_else(|| line.strip_prefix('#'))
             && rest.starts_with('[')
         {
-            line = rest[close_open_brackets(rest, 0)?..].trim_start();
+            line = rest[close_open_brackets(rest, OpenBrackets::default())?..].trim_start();
+            continue;
+        }
+        // C# `[Route(...)]`. A bare `[Obsolete]` line is skipped by callers.
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name_end) = rest.find(|character: char| {
+                !character.is_ascii_alphanumeric() && !matches!(character, '_' | '.')
+            })
+            && name_end > 0
+            && rest[name_end..].starts_with('(')
+        {
+            line = line[close_open_brackets(line, OpenBrackets::default())?..].trim_start();
             continue;
         }
         return Ok(line);
     }
 }
 
+/// What a multi-line annotation leaves open at the end of a line.
+#[derive(Clone, Copy, Debug, Default)]
+struct OpenBrackets {
+    depth: usize,
+    /// A backtick or triple-quoted string that continues on the next line.
+    string: Option<&'static [u8]>,
+}
+
+/// String delimiters, longest first so `"""` wins over `"`.
+const STRING_DELIMITERS: [&[u8]; 5] = [b"\"\"\"", b"'''", b"\"", b"'", b"`"];
+
 /// Scans `text` with `open` brackets already unclosed. Returns the byte offset
-/// just past the bracket that closes them all, or the count still open at the
-/// end. `()`, `[]`, and `{}` share one depth, and quoted strings are skipped.
-fn close_open_brackets(text: &str, mut open: usize) -> Result<usize, usize> {
-    let mut quote = None;
-    let mut escaped = false;
-    for (offset, byte) in text.bytes().enumerate() {
-        if let Some(delimiter) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == delimiter {
-                quote = None;
+/// just past the bracket that closes them all, or what is still open at the
+/// end. `()`, `[]`, and `{}` share one depth. Quoted strings and `#` / `//`
+/// line comments are skipped; only backtick and triple-quoted strings carry
+/// over to the next line.
+fn close_open_brackets(text: &str, mut open: OpenBrackets) -> Result<usize, OpenBrackets> {
+    let bytes = text.as_bytes();
+    let mut string = open.string.take();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        if let Some(delimiter) = string {
+            if rest[0] == b'\\' {
+                offset += 2;
+            } else if rest.starts_with(delimiter) {
+                string = None;
+                offset += delimiter.len();
+            } else {
+                offset += 1;
             }
             continue;
         }
-        match byte {
-            b'"' | b'\'' => quote = Some(byte),
-            b'(' | b'[' | b'{' => open += 1,
+        if let Some(delimiter) = STRING_DELIMITERS
+            .into_iter()
+            .find(|delimiter| rest.starts_with(delimiter))
+        {
+            string = Some(delimiter);
+            offset += delimiter.len();
+            continue;
+        }
+        // `# note (see` ends the line, and so does a line starting `// legacy (v1`.
+        // `#fff`, `r#"`, and Python's `n // 2` do not.
+        let comment = if rest.starts_with(b"//") {
+            bytes[..offset].iter().all(u8::is_ascii_whitespace)
+        } else {
+            rest[0] == b'#'
+                && (offset == 0 || bytes[offset - 1].is_ascii_whitespace())
+                && rest.get(1).is_none_or(u8::is_ascii_whitespace)
+        };
+        if comment {
+            break;
+        }
+        match rest[0] {
+            b'(' | b'[' | b'{' => open.depth += 1,
             b')' | b']' | b'}' => {
-                open = open.saturating_sub(1);
-                if open == 0 {
+                open.depth = open.depth.saturating_sub(1);
+                if open.depth == 0 {
                     return Ok(offset + 1);
                 }
             }
             _ => {}
         }
+        offset += 1;
     }
+    open.string = string.filter(|delimiter| delimiter.len() == 3 || delimiter[0] == b'`');
     Err(open)
 }
 
@@ -739,6 +785,32 @@ mod tests {
             (
                 "[Obsolete(\"use Run\")]\npublic void Start() {}\n",
                 "public void Start() {}",
+            ),
+            // Brackets inside comments and multi-line strings do not count.
+            (
+                "@settings(\n    x=1,  # note (see above\n    description=\"\"\"\n    Lists users (active only\n    \"\"\",\n)\ndef list_users():\n",
+                "def list_users():",
+            ),
+            (
+                "@RequestMapping(\n    // legacy route (v1\n    value = \"/users\"\n)\npublic List<User> list() {\n",
+                "public List<User> list() {",
+            ),
+            (
+                "@Component({\n  template: `\n    <p>(draft</p>\n  `})\nexport class Draft {}\n",
+                "export class Draft {}",
+            ),
+            (
+                "#![cfg_attr(\n    docsrs,\n    feature(doc_cfg)\n)]\npub mod api;\n",
+                "pub mod api;",
+            ),
+            (
+                "[Route(\n    \"api/users\",\n    Name = \"users\"\n)]\npublic class UsersController {\n",
+                "public class UsersController {",
+            ),
+            // Python floor division is not a comment.
+            (
+                "@lru_cache(maxsize=256 // 4)\ndef cached():\n",
+                "def cached():",
             ),
         ] {
             let range = first_code_line_range(text).unwrap();

@@ -1673,15 +1673,28 @@ fn captured_definition_ranges(
         }
         let definition_row = node.start_position().row;
         // Python decorators, including multi-line calls, belong to the
-        // definition's chunk. Check the language first: `Node::parent`
-        // searches down from the root.
-        let start_row = if language == "python" {
-            node.parent()
-                .filter(|parent| parent.kind() == "decorated_definition")
-                .map_or(definition_row, |parent| parent.start_position().row)
-        } else {
-            definition_row
+        // definition's chunk. So do JS/TS decorators before `export class`,
+        // which the grammar attaches to `export_statement`. Check the language
+        // and kind first: `Node::parent` searches down from the root.
+        let decorated_parent = match language {
+            "python" => node
+                .parent()
+                .filter(|parent| parent.kind() == "decorated_definition"),
+            "javascript" | "typescript"
+                if matches!(
+                    node.kind(),
+                    "class_declaration" | "abstract_class_declaration"
+                ) =>
+            {
+                node.parent().filter(|parent| {
+                    parent.kind() == "export_statement"
+                        && parent.child_by_field_name("decorator").is_some()
+                })
+            }
+            _ => None,
         };
+        let start_row =
+            decorated_parent.map_or(definition_row, |parent| parent.start_position().row);
         // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
         ranges.push((
             start_row + 1,
@@ -3074,6 +3087,65 @@ mod tests {
             assert_eq!(
                 chunk.text.lines().nth(1),
                 Some("// continuation of def handler():"),
+                "{}-{}",
+                chunk.start_line,
+                chunk.end_line
+            );
+        }
+    }
+
+    #[test]
+    fn decorators_on_exported_classes_stay_with_the_class() {
+        let source = "import { Component } from '@angular/core';\n\n@Component({\n  selector: 'app-root',\n})\nexport class AppComponent {\n  title = 'app';\n}\n";
+        let signature = |chunk: &Chunk| {
+            crate::text::first_code_line_range(&chunk.text)
+                .map(|range| chunk.text[range].to_string())
+        };
+        for path in [
+            "web/app.component.ts",
+            "web/app.component.tsx",
+            "web/app.component.js",
+        ] {
+            let chunks = chunk_source(Path::new(path), source);
+            let class = chunks
+                .iter()
+                .find(|chunk| chunk.kind == ChunkKind::Class)
+                .expect("class chunk");
+            assert_eq!(class.start_line, 3, "{path}: {chunks:?}");
+            assert_eq!(
+                signature(class).as_deref(),
+                Some("export class AppComponent {"),
+                "{path}"
+            );
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| chunk.kind == ChunkKind::Class || !chunk.text.contains("selector")),
+                "{path}: {chunks:?}"
+            );
+        }
+
+        let body = (0..200)
+            .map(|index| format!("  value{index} = {index};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!(
+            "@Injectable({{\n  providedIn: 'root',\n}})\nexport abstract class Store {{\n{body}\n}}\n"
+        );
+        let chunks = chunk_source(Path::new("web/store.ts"), &source);
+        assert!(
+            chunks.len() > 1,
+            "expected continuation windows: {chunks:?}"
+        );
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(
+            signature(&chunks[0]).as_deref(),
+            Some("export abstract class Store {")
+        );
+        for chunk in &chunks[1..] {
+            assert_eq!(
+                chunk.text.lines().nth(1),
+                Some("// continuation of export abstract class Store {"),
                 "{}-{}",
                 chunk.start_line,
                 chunk.end_line
