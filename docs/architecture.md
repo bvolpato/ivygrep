@@ -123,7 +123,9 @@ the appropriate stores before local queries use them.
    disabled.
 4. Build a flat Merkle snapshot of relative paths and file fingerprints.
 5. Send files through a bounded scanner/chunker producer.
-6. Parse supported languages with Tree-sitter or a bounded text fallback.
+6. Parse supported languages with Tree-sitter or a bounded text fallback. The
+   parse budget counts parser operations, so a file takes the same path on any
+   machine; a CPU-time allowance per operation only stops pathological inputs.
 7. Extract symbols, imports, documentation relationships, tests, configuration,
    and unresolved dependency records.
 8. Persist lexical documents and metadata to staging stores.
@@ -398,7 +400,7 @@ without indexed definitions remain references only. Bounded requests widen
 indexed candidate batches after rejected matches, up to 25,000 chunks. CLI `--no-limit` retains its 50,000-candidate
 ceiling; unbounded API requests (`limit: None`) scan all indexed literal candidates.
 Each candidate file is parsed at most once for occurrence matching with the
-chunker's 100 ms parse budget. Go generic-function evidence is parsed separately
+chunker's parse budget. Go generic-function evidence is parsed separately
 from matching indexed definition chunks.
 
 ## Context-pack pipeline
