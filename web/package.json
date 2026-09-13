@@ -8,11 +8,11 @@
     "check": "tsc --noEmit && vitest run"
   },
   "devDependencies": {
-    "@playwright/test": "1.62.1",
+    "@playwright/test": "1.63.0",
     "@types/markdown-it": "^14.2.0",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   },
   "dependencies": {
     "highlight.js": "^11.12.0",
