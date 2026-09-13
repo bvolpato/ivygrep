@@ -941,7 +941,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     // enough to exercise usearch HNSW behaviour rather than a trivial set.
     // The guarded `*_distinct_hot` benches use 50K distinct seeded vectors; the
     // earlier `*_hot` names measured a fixture with only 97 distinct values, so
-    // their history is not comparable. `vector_search_in_50k_distinct_hot`
+    // their history is not comparable. `hash_vector_search_in_50k_distinct_hot`
     // measures the hash-tier graph and
     // `neural_vector_search_in_50k_distinct_hot` the default-parameter graph
     // used by neural stores.
@@ -968,7 +968,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("vector_search_in_50k_distinct_hot", |b| {
+    group.bench_function("hash_vector_search_in_50k_distinct_hot", |b| {
         let (_ann_dir, ann_path, query) =
             ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
         let store = VectorStore::open_readonly(
