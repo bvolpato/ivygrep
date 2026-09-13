@@ -312,6 +312,12 @@ impl MerkleSnapshot {
                     Ok(r) => r.to_path_buf(),
                     Err(_) => return ignore::WalkState::Continue,
                 };
+                // Index keys are UTF-8 strings. A lossy key cannot be reopened,
+                // so one such file would otherwise fail the whole index build.
+                if rel.to_str().is_none() {
+                    tracing::warn!("skipping non-UTF-8 path {}", path.display());
+                    return ignore::WalkState::Continue;
+                }
 
                 let metadata = match fs::metadata(path) {
                     Ok(m) => m,
@@ -458,6 +464,10 @@ impl MerkleSnapshot {
         validate_workspace_root(root)?;
         let mut updates = BTreeMap::new();
         for rel_path in rel_paths {
+            // Full walks skip non-UTF-8 names; a lossy key could alias a real file.
+            if rel_path.to_str().is_none() {
+                continue;
+            }
             if rel_path.as_os_str().is_empty()
                 || rel_path
                     .file_name()
@@ -1120,6 +1130,28 @@ mod tests {
 
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"\n").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_names_are_skipped_without_failing_snapshot() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("valid.rs"), "fn valid() {}\n").unwrap();
+        let invalid = root.join(std::ffi::OsStr::from_bytes(b"invalid\xff.rs"));
+        if fs::write(&invalid, "fn invalid() {}\n").is_err() {
+            // Some filesystems, such as APFS, reject non-UTF-8 names.
+            return;
+        }
+
+        for snapshot in [
+            MerkleSnapshot::build(root, false).unwrap(),
+            MerkleSnapshot::build_content_based(root, false).unwrap(),
+        ] {
+            assert_eq!(snapshot.files.keys().collect::<Vec<_>>(), vec!["valid.rs"]);
+        }
     }
 
     #[test]

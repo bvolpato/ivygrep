@@ -200,3 +200,65 @@ fn git_reuse_observes_assume_unchanged_and_present_skip_worktree_files() {
         assert_found(&workspace, "next_flag_marker", true);
     }
 }
+
+#[test]
+#[serial]
+fn git_reuse_observes_edits_hidden_by_submodule_ignore_settings() {
+    for ignore in ["dirty", "all"] {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let upstream = parent.path().join("upstream");
+        let root = parent.path().join("repo");
+        for directory in [&upstream, &root] {
+            fs::create_dir(directory).unwrap();
+            git(directory, &["init", "-b", "main"]);
+        }
+        fs::write(
+            upstream.join("lib.rs"),
+            "pub fn initial_submodule_marker() {}\n",
+        )
+        .unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-m", "initial"]);
+        fs::write(root.join("main.rs"), "pub fn superproject_marker() {}\n").unwrap();
+        git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                upstream.to_str().unwrap(),
+                "vendor/sub",
+            ],
+        );
+        git(
+            &root,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.vendor/sub.ignore",
+                ignore,
+            ],
+        );
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-m", "add submodule"]);
+        let workspace = Workspace::resolve(&root).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace_for_watcher(&workspace, &model).unwrap();
+        assert_found(&workspace, "initial_submodule_marker", true);
+
+        // The walker indexes submodule sources even when these settings hide
+        // their edits from the superproject's default status.
+        fs::write(
+            root.join("vendor/sub/lib.rs"),
+            "pub fn updated_submodule_marker() {}\n",
+        )
+        .unwrap();
+        assert_clean(&root);
+        index_workspace_for_watcher(&workspace, &model).unwrap();
+        assert_found(&workspace, "updated_submodule_marker", true);
+    }
+}

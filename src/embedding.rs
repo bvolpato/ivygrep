@@ -538,6 +538,65 @@ impl HashEmbeddingModel {
     }
 }
 
+/// SipHash-1-3 with zero keys over `str::hash` input (bytes, then 0xff), which is
+/// what `DefaultHasher::new()` computes today. Hash vectors are persisted, and
+/// the standard library does not promise that algorithm across releases.
+fn stable_token_hash(token: &str) -> u64 {
+    #[inline]
+    fn round(v: &mut [u64; 4]) {
+        v[0] = v[0].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(13);
+        v[1] ^= v[0];
+        v[0] = v[0].rotate_left(32);
+        v[2] = v[2].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(16);
+        v[3] ^= v[2];
+        v[0] = v[0].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(21);
+        v[3] ^= v[0];
+        v[2] = v[2].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(17);
+        v[1] ^= v[2];
+        v[2] = v[2].rotate_left(32);
+    }
+
+    let bytes = token.as_bytes();
+    let message_len = bytes.len() + 1;
+    let byte_at = |index: usize| bytes.get(index).copied().unwrap_or(0xff);
+    let mut v = [
+        0x736f_6d65_7073_6575u64,
+        0x646f_7261_6e64_6f6du64,
+        0x6c79_6765_6e65_7261u64,
+        0x7465_6462_7974_6573u64,
+    ];
+    let full_blocks = message_len / 8;
+    for block in 0..full_blocks {
+        let start = block * 8;
+        let m = match bytes.get(start..start + 8) {
+            Some(chunk) => u64::from_le_bytes(chunk.try_into().expect("8-byte block")),
+            None => (0..8).fold(0u64, |m, offset| {
+                m | (u64::from(byte_at(start + offset)) << (8 * offset))
+            }),
+        };
+        v[3] ^= m;
+        round(&mut v);
+        v[0] ^= m;
+    }
+    let tail_start = full_blocks * 8;
+    let mut b = ((message_len as u64) & 0xff) << 56;
+    for offset in 0..message_len % 8 {
+        b |= u64::from(byte_at(tail_start + offset)) << (8 * offset);
+    }
+    v[3] ^= b;
+    round(&mut v);
+    v[0] ^= b;
+    v[2] ^= 0xff;
+    for _ in 0..3 {
+        round(&mut v);
+    }
+    v[0] ^ v[1] ^ v[2] ^ v[3]
+}
+
 impl EmbeddingModel for HashEmbeddingModel {
     fn dimensions(&self) -> usize {
         self.dimensions
@@ -560,10 +619,7 @@ impl EmbeddingModel for HashEmbeddingModel {
                 let normalized = self.normalize_token(&singular);
                 token_count += 1;
 
-                use std::hash::{DefaultHasher, Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                normalized.hash(&mut hasher);
-                let hash_val = hasher.finish();
+                let hash_val = stable_token_hash(normalized);
 
                 let bucket = (hash_val as usize) % self.dimensions;
                 let sign = if (hash_val >> 16) & 1 == 0 { 1.0 } else { -1.0 };
@@ -1220,6 +1276,32 @@ fn semantic_token_variants(raw_token: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn stable_token_hash_is_pinned_and_matches_current_default_hasher() {
+        // Persisted hash vectors depend on these exact values.
+        for (token, expected) in [
+            ("", 0x3040_6ea5_23c5_3def),
+            ("token", 0xe43f_d60a_2cc5_e3c4),
+            ("cache", 0x401f_09f7_eb70_9e11),
+            ("vector_store", 0xfa3a_177a_bf2d_35e4),
+            ("calculate_tax", 0x8a76_76c4_8fba_1ebc),
+            ("错误", 0xb3f7_cbc4_1239_0cb7),
+        ] {
+            assert_eq!(stable_token_hash(token), expected, "{token:?}");
+        }
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        for length in 0..40 {
+            let token = "abcXYZ_09é"
+                .chars()
+                .cycle()
+                .take(length)
+                .collect::<String>();
+            let mut hasher = DefaultHasher::new();
+            token.hash(&mut hasher);
+            assert_eq!(stable_token_hash(&token), hasher.finish(), "{token:?}");
+        }
+    }
 
     // macOS uses Accelerate, which does not support CPU F16 matmul. This
     // regression exercises the GEMM implementation used by portable builds.

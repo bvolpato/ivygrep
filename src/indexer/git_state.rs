@@ -109,8 +109,15 @@ fn git_index_hash(root: &Path) -> Option<String> {
 }
 
 fn git_worktree_is_clean(root: &Path) -> bool {
+    // The walker indexes submodule sources, so submodule ignore settings must
+    // not hide their edits.
     std::process::Command::new("git")
-        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
+        .args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ])
         .current_dir(root)
         .output()
         .is_ok_and(|output| output.status.success() && output.stdout.is_empty())

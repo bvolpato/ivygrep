@@ -6,6 +6,12 @@ use anyhow::{Context, Result};
 
 use crate::workspace::Workspace;
 
+const STAGING_DIR_PREFIX: &str = ".fresh-index-staging-";
+const BACKUP_DIR_PREFIX: &str = ".fresh-index-backup-";
+/// Marks backups kept after a failed rollback. They may hold the only copy of
+/// the previous generation, so abandoned-staging cleanup keeps them.
+pub(super) const RETAINED_BACKUP_MARKER: &str = "retained";
+
 pub(super) struct FreshIndexStaging {
     pub(super) dir: PathBuf,
     pub(super) sqlite_path: PathBuf,
@@ -21,7 +27,7 @@ impl FreshIndexStaging {
             .unwrap_or_default()
             .as_nanos();
         let dir = workspace.index_dir.join(format!(
-            ".fresh-index-staging-{}-{unique}",
+            "{STAGING_DIR_PREFIX}{}-{unique}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -114,7 +120,7 @@ impl FreshIndexStaging {
 
         let backup_dir = workspace
             .index_dir
-            .join(format!(".fresh-index-backup-{}", uuid::Uuid::new_v4()));
+            .join(format!("{BACKUP_DIR_PREFIX}{}", uuid::Uuid::new_v4()));
         fs::create_dir(&backup_dir)?;
         let mut backups = Vec::new();
         for (index, live_path) in artifacts.into_iter().enumerate() {
@@ -124,6 +130,7 @@ impl FreshIndexStaging {
             let backup_path = backup_dir.join(index.to_string());
             if let Err(error) = fs::rename(&live_path, &backup_path) {
                 if let Err(rollback_error) = restore_main_store_backups(&backups) {
+                    let _ = fs::write(backup_dir.join(RETAINED_BACKUP_MARKER), "");
                     anyhow::bail!(
                         "failed to preserve live index {}: {error}; rollback failed: \
                          {rollback_error:#}; backups retained at {}",
@@ -143,6 +150,7 @@ impl FreshIndexStaging {
         for (staged_path, live_path) in promotions {
             if let Err(error) = promote_path(&staged_path, &live_path) {
                 if let Err(rollback_error) = rollback_main_store(&promoted, &backups) {
+                    let _ = fs::write(backup_dir.join(RETAINED_BACKUP_MARKER), "");
                     anyhow::bail!(
                         "failed to promote staged index {} -> {}: {error}; rollback failed: \
                          {rollback_error:#}; backups retained at {}",
@@ -180,6 +188,31 @@ impl Drop for FreshIndexStaging {
     fn drop(&mut self) {
         if self.active {
             let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+/// Removes staging and promotion backups left by a killed indexer. Owners hold
+/// the index lock for these directories' whole lifetime, so a caller holding
+/// that lock cannot remove a live build's files.
+pub(super) fn remove_abandoned_staging(workspace: &Workspace) {
+    let Ok(entries) = fs::read_dir(&workspace.index_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        let abandoned = name.starts_with(STAGING_DIR_PREFIX)
+            || (name.starts_with(BACKUP_DIR_PREFIX) && !path.join(RETAINED_BACKUP_MARKER).exists());
+        if abandoned
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && let Err(error) = fs::remove_dir_all(&path)
+        {
+            tracing::warn!(
+                "failed to remove abandoned index staging {}: {error}",
+                path.display()
+            );
         }
     }
 }
