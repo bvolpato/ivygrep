@@ -995,6 +995,17 @@ fn substring_candidate_files(
         return Ok(None);
     };
     let query = constrain_query_to_scope(query, &ctx.fields, options.scope_filter.as_ref())?;
+    let filtered_out = |path: &Path| {
+        options
+            .scope_filter
+            .as_ref()
+            .is_some_and(|scope| !scope.matches(path))
+            || !path_matcher.matches(path)
+            || options.type_filter.as_deref().is_some_and(|filter| {
+                let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
+                crate::chunking::language_for_path(path) != Some(expected)
+            })
+    };
     let mut paths = HashSet::new();
     for (index, searcher) in ctx.searchers.iter().enumerate() {
         if options.is_cancelled() {
@@ -1024,20 +1035,26 @@ fn substring_candidate_files(
                 .is_some_and(|value| value > 0);
             if ctx.is_shadowed_base_file(index, &path)
                 || (!options.skip_gitignore && ignored)
-                || options
-                    .scope_filter
-                    .as_ref()
-                    .is_some_and(|scope| !scope.matches(&path))
-                || !path_matcher.matches(&path)
-                || options.type_filter.as_deref().is_some_and(|filter| {
-                    let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
-                    crate::chunking::language_for_path(&path) != Some(expected)
-                })
+                || filtered_out(&path)
             {
                 continue;
             }
             paths.insert(path);
         }
+    }
+    // Also verify files the lexical index skipped, such as minified bundles.
+    // Their visibility comes from the indexer, so excluded paths stay hidden.
+    if let Some(unindexed) = crate::regex_search::unindexed_literal_candidates(workspace, options) {
+        paths.extend(
+            unindexed
+                .recorded
+                .iter()
+                .filter(|path| !filtered_out(path))
+                .cloned(),
+        );
+    }
+    if options.is_cancelled() {
+        return Ok(Some(Vec::new()));
     }
     let mut paths = paths
         .into_iter()
@@ -6627,6 +6644,91 @@ mod tests {
         let hits = literal_search(&workspace, "ppl", &SearchOptions::default()).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].file_path, PathBuf::from("filter.rs"));
+    }
+
+    fn literal_hit_paths(workspace: &Workspace, query: &str) -> HashSet<PathBuf> {
+        literal_search(workspace, query, &SearchOptions::default())
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.file_path)
+            .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_includes_minified_files_outside_lexical_index() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("indexed.rs"),
+            "pub fn shared_literal_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("minified.js"),
+            format!("{}shared_literal_marker", "a".repeat(50_001)),
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        assert_eq!(
+            literal_hit_paths(&workspace, "shared_literal_marker"),
+            HashSet::from([PathBuf::from("indexed.rs"), PathBuf::from("minified.js")])
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_hides_unindexed_file_excluded_after_reindex() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for name in ["kept.js", "excluded.js"] {
+            std::fs::write(
+                root.path().join(name),
+                format!("{}excluded_literal_marker", "a".repeat(50_001)),
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        assert_eq!(
+            literal_hit_paths(&workspace, "excluded_literal_marker"),
+            HashSet::from([PathBuf::from("excluded.js"), PathBuf::from("kept.js")])
+        );
+
+        std::fs::create_dir_all(root.path().join(".git/info")).unwrap();
+        std::fs::write(root.path().join(".git/info/exclude"), "excluded.js\n").unwrap();
+        index_workspace(&workspace, &model).unwrap();
+        assert!(root.path().join("excluded.js").is_file());
+
+        let kept = HashSet::from([PathBuf::from("kept.js")]);
+        assert_eq!(
+            literal_hit_paths(&workspace, "excluded_literal_marker"),
+            kept
+        );
+        let regex_paths = crate::regex_search::regex_search_with_options(
+            &workspace,
+            "excluded_literal_marker",
+            &SearchOptions::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.file_path)
+        .collect::<HashSet<_>>();
+        assert_eq!(regex_paths, kept);
     }
 
     #[test]

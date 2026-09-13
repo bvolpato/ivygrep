@@ -71,6 +71,7 @@ All notable changes to ivygrep are documented in this file.
 - Indexing removes staging and promotion-backup directories abandoned by a killed indexer. Backups retained after a failed rollback are kept.
 - Background enhancement tolerates an interrupted trailing append in a vector tombstone journal instead of failing on every later pass.
 - Hash embeddings use a pinned SipHash-1-3 implementation instead of the standard library's unspecified `DefaultHasher`, so a toolchain upgrade cannot silently invalidate stored hash vectors. Current vectors are unchanged.
+- Literal search also matches files the lexical index stores without chunks, such as minified bundles, using the file list from the last completed index publication instead of a separate walk. Files hidden by ignore rules or Git excludes, including external linked-worktree excludes, stay out of literal results. Regex search reuses that file list, still finds files the index never recorded, such as files over 16 MiB or files created since the last publication, and hides those files again as soon as an ignore rule excludes them.
 
 ## [1.2.14] - 2026-09-10
 

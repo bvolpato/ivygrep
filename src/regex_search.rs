@@ -19,36 +19,63 @@ use tantivy::schema::IndexRecordOption;
 use tantivy::schema::Value;
 
 use crate::indexer::{open_sqlite_readonly, open_tantivy_index};
+use crate::merkle::MerkleSnapshot;
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::SearchOptions;
+use crate::walker::SourcePathMatcher;
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 
 const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_REGEX_COVERAGE_CACHE_ENTRIES: usize = 32;
-const MAX_REGEX_UNINDEXED_FILES: usize = 4_096;
+const MAX_COVERAGE_CACHE_ENTRIES: usize = 32;
+const MAX_UNINDEXED_FILES: usize = 4_096;
 const REGEX_PARALLEL_BATCH_FILES: usize = 256;
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct RegexCoverageKey {
-    workspace_id: String,
-    index_generation: u64,
-    base_generation: u64,
-    skip_gitignore: bool,
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum CoverageConsumer {
+    Literal,
+    Regex,
 }
 
-/// `None` records that a generation has too many unindexed files to enumerate,
-/// so later queries skip the walk instead of repeating it.
-type RegexCoverage = Option<Arc<Vec<PathBuf>>>;
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct CoverageKey {
+    workspace_id: String,
+    consumer: CoverageConsumer,
+    skip_gitignore: bool,
+    publication: PublicationStamp,
+}
 
-fn regex_coverage_cache() -> &'static Mutex<HashMap<RegexCoverageKey, RegexCoverage>> {
-    static CACHE: OnceLock<Mutex<HashMap<RegexCoverageKey, RegexCoverage>>> = OnceLock::new();
+/// Identifies one completed index publication. Each publication bumps a
+/// generation and atomically replaces the saved Merkle snapshot.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct PublicationStamp {
+    index_generation: u64,
+    base_generation: u64,
+    snapshot: crate::merkle::SnapshotStamp,
+}
+
+/// Files outside the lexical index that queries must read directly.
+pub(crate) struct UnindexedPaths {
+    /// Snapshot files stored without chunks, such as minified bundles. The
+    /// indexer decided their visibility for this publication.
+    pub(crate) recorded: Vec<PathBuf>,
+    /// Regex only: files the walk found that the snapshot never recorded, such
+    /// as files over the indexing size limit or created since publication.
+    unrecorded: Vec<PathBuf>,
+}
+
+/// `None` records that a publication has too many unindexed files to
+/// enumerate, so later queries skip the work instead of repeating it.
+type Coverage = Option<Arc<UnindexedPaths>>;
+
+fn coverage_cache() -> &'static Mutex<HashMap<CoverageKey, Coverage>> {
+    static CACHE: OnceLock<Mutex<HashMap<CoverageKey, Coverage>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn remember_regex_coverage(key: RegexCoverageKey, coverage: RegexCoverage) -> RegexCoverage {
-    if let Ok(mut cache) = regex_coverage_cache().lock() {
-        if cache.len() >= MAX_REGEX_COVERAGE_CACHE_ENTRIES {
+fn remember_coverage(key: CoverageKey, coverage: Coverage) -> Coverage {
+    if let Ok(mut cache) = coverage_cache().lock() {
+        if cache.len() >= MAX_COVERAGE_CACHE_ENTRIES {
             cache.clear();
         }
         cache.insert(key, coverage.clone());
@@ -247,8 +274,6 @@ fn index_prefilter_files(
 
     candidate_files.extend(unindexed_matching_paths(
         workspace,
-        use_overlay,
-        &shadowed_paths,
         scope_filter,
         path_matcher,
         options,
@@ -285,15 +310,22 @@ fn overlay_shadowed_paths(workspace: &Workspace) -> Option<(bool, HashSet<String
 
 fn unindexed_matching_paths(
     workspace: &Workspace,
-    use_overlay: bool,
-    shadowed_paths: &HashSet<String>,
     scope_filter: Option<&WorkspaceScope>,
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
-    let uncovered = uncovered_regex_paths(workspace, use_overlay, shadowed_paths, options)?;
+    let coverage = cached_unindexed_paths(workspace, CoverageConsumer::Regex, options)?;
+    let candidates = coverage
+        .recorded
+        .iter()
+        .map(|path| (path, true))
+        .chain(coverage.unrecorded.iter().map(|path| (path, false)));
+    // Unrecorded paths come from a walk cached per publication. Recheck live
+    // ignore rules, so an exclude added since that walk hides them even when
+    // reindexing finds nothing to publish.
+    let mut source_paths = None;
     let mut paths = Vec::new();
-    for rel in uncovered.iter() {
+    for (rel, recorded) in candidates {
         if options.is_cancelled() {
             return Some(Vec::new());
         }
@@ -301,6 +333,13 @@ fn unindexed_matching_paths(
         if scope_filter.is_none_or(|scope| scope.matches(rel))
             && path_matcher.matches(rel)
             && type_match != PathTypeFilterMatch::Reject
+            && (recorded
+                || source_paths
+                    .get_or_insert_with(|| {
+                        SourcePathMatcher::new(&workspace.root, options.skip_gitignore)
+                    })
+                    .allows(rel)
+                    .ok()?)
             && (type_match != PathTypeFilterMatch::ValidateText
                 || unknown_file_is_indexable_text(&workspace.root, rel))
         {
@@ -325,12 +364,94 @@ fn collect_sqlite_paths(
     Some(())
 }
 
-fn uncovered_regex_paths(
+/// Unindexed files that literal verification must still read, such as
+/// minified bundles. Visibility comes from the saved Merkle snapshot rather
+/// than a separate walk, so ignored and excluded paths stay hidden on every
+/// platform. Files over the indexing size limit are never recorded and remain
+/// regex-only. `None` means coverage is unknown or too large, and callers keep
+/// only indexed candidates.
+pub(crate) fn unindexed_literal_candidates(
     workspace: &Workspace,
-    use_overlay: bool,
-    shadowed_paths: &HashSet<String>,
     options: &SearchOptions,
-) -> Option<Arc<Vec<PathBuf>>> {
+) -> Coverage {
+    cached_unindexed_paths(workspace, CoverageConsumer::Literal, options)
+}
+
+fn cached_unindexed_paths(
+    workspace: &Workspace,
+    consumer: CoverageConsumer,
+    options: &SearchOptions,
+) -> Coverage {
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    if use_overlay && workspace.worktree_overlay_is_stale().ok()? {
+        return None;
+    }
+    let key = CoverageKey {
+        workspace_id: workspace.id.clone(),
+        consumer,
+        skip_gitignore: options.skip_gitignore,
+        publication: publication_stamp(workspace)?,
+    };
+    if let Some(coverage) = coverage_cache().lock().ok()?.get(&key) {
+        return coverage.clone();
+    }
+
+    let snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).ok()?;
+    let covered = chunk_backed_paths(workspace, use_overlay)?;
+    // Stores commit before the snapshot is saved. Never pair chunks from one
+    // publication with the file list of another.
+    if publication_stamp(workspace)? != key.publication {
+        return None;
+    }
+    let mut recorded = Vec::new();
+    for (path, hash) in &snapshot.files {
+        if covered.contains(path) || (!options.skip_gitignore && hash.ends_with("-1")) {
+            continue;
+        }
+        recorded.push(PathBuf::from(path));
+        if recorded.len() > MAX_UNINDEXED_FILES {
+            return remember_coverage(key, None);
+        }
+    }
+    let unrecorded = match consumer {
+        CoverageConsumer::Literal => {
+            // Empty files and files with a NUL in the sniffed prefix cannot
+            // produce a literal hit. Drop them once per publication instead of
+            // reading every binary asset on each query.
+            recorded = recorded
+                .into_par_iter()
+                .filter(|path| !options.is_cancelled() && may_contain_text(&workspace.root, path))
+                .collect();
+            Vec::new()
+        }
+        CoverageConsumer::Regex => {
+            match unrecorded_regex_paths(workspace, &snapshot, recorded.len(), options)? {
+                Some(unrecorded) => unrecorded,
+                None => return remember_coverage(key, None),
+            }
+        }
+    };
+    if options.is_cancelled() {
+        return None;
+    }
+    remember_coverage(
+        key,
+        Some(Arc::new(UnindexedPaths {
+            recorded,
+            unrecorded,
+        })),
+    )
+}
+
+/// Returns `None` while this index or its base carries a publication marker,
+/// including after a failed publication, because stores and the snapshot may
+/// then disagree.
+fn publication_stamp(workspace: &Workspace) -> Option<PublicationStamp> {
+    if workspace.has_unfinished_index_publication()
+        || workspace.base_has_unfinished_index_publication()
+    {
+        return None;
+    }
     let index_generation = workspace
         .read_metadata()
         .ok()?
@@ -341,64 +462,94 @@ fn uncovered_regex_paths(
         .and_then(|base| fs::read(base.join("workspace.json")).ok())
         .and_then(|raw| serde_json::from_slice::<crate::workspace::WorkspaceMetadata>(&raw).ok())
         .map_or(0, |metadata| metadata.index_generation);
-    let cache_key = RegexCoverageKey {
-        workspace_id: workspace.id.clone(),
+    Some(PublicationStamp {
         index_generation,
         base_generation,
-        skip_gitignore: options.skip_gitignore,
-    };
-    if let Some(coverage) = regex_coverage_cache().lock().ok()?.get(&cache_key) {
-        return coverage.clone();
-    }
+        snapshot: crate::merkle::snapshot_stamp(&workspace.merkle_snapshot_path())?,
+    })
+}
 
-    let sqlite_path = if use_overlay {
-        workspace.overlay_sqlite_path()
-    } else {
-        workspace.sqlite_path()
-    };
-    let sqlite = open_sqlite_readonly(&sqlite_path).ok()?;
-    let mut indexed_paths = HashSet::new();
+/// Paths with chunks in the effective index. Worktree tombstones hide base
+/// chunks, including base files replaced by content the indexer skips.
+fn chunk_backed_paths(workspace: &Workspace, use_overlay: bool) -> Option<HashSet<String>> {
+    // Seek `idx_chunks_file_path` once per distinct path. `SELECT DISTINCT`
+    // visits every chunk row, which costs several times more on large indexes.
+    const CHUNK_PATHS: &str = "WITH RECURSIVE paths(file_path) AS (
+            SELECT MIN(file_path) FROM chunks
+            UNION ALL
+            SELECT (SELECT MIN(file_path) FROM chunks WHERE file_path > paths.file_path)
+            FROM paths WHERE paths.file_path IS NOT NULL
+        )
+        SELECT file_path FROM paths WHERE file_path IS NOT NULL";
+    let mut covered = HashSet::new();
+    if !use_overlay {
+        let sqlite = open_sqlite_readonly(&workspace.sqlite_path()).ok()?;
+        collect_sqlite_paths(&sqlite, CHUNK_PATHS, &mut covered)?;
+        return Some(covered);
+    }
+    let base =
+        open_sqlite_readonly(&workspace.base_index_dir.as_ref()?.join("metadata.sqlite3")).ok()?;
+    collect_sqlite_paths(&base, CHUNK_PATHS, &mut covered)?;
+    let overlay = open_sqlite_readonly(&workspace.overlay_sqlite_path()).ok()?;
+    let mut tombstones = HashSet::new();
     collect_sqlite_paths(
-        &sqlite,
-        "SELECT DISTINCT file_path FROM chunks",
-        &mut indexed_paths,
+        &overlay,
+        "SELECT file_path FROM tombstones",
+        &mut tombstones,
     )?;
-    if use_overlay {
-        let base =
-            open_sqlite_readonly(&workspace.base_index_dir.as_ref()?.join("metadata.sqlite3"))
-                .ok()?;
-        let mut base_paths = HashSet::new();
-        collect_sqlite_paths(
-            &base,
-            "SELECT DISTINCT file_path FROM chunks",
-            &mut base_paths,
-        )?;
-        indexed_paths.extend(
-            base_paths
-                .into_iter()
-                .filter(|path| !shadowed_paths.contains(path)),
-        );
-    }
+    covered.retain(|path| !tombstones.contains(path));
+    collect_sqlite_paths(&overlay, CHUNK_PATHS, &mut covered)?;
+    Some(covered)
+}
 
-    let mut uncovered = Vec::new();
+/// Matches literal verification, which finds no text in empty files or files
+/// with a NUL in the prefix indexing sniffs. Unreadable files stay candidates,
+/// so a transient open failure cannot hide them for a whole publication.
+fn may_contain_text(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(file) = crate::workspace_file::open(root, path) else {
+        return true;
+    };
+    let mut sample = Vec::with_capacity(crate::chunking::TEXT_SNIFF_BYTES);
+    match file
+        .take(crate::chunking::TEXT_SNIFF_BYTES as u64)
+        .read_to_end(&mut sample)
+    {
+        Ok(_) => !sample.is_empty() && !sample.contains(&0),
+        Err(_) => true,
+    }
+}
+
+/// Files the snapshot never recorded, found by walking with the query's ignore
+/// rules: files over the indexing size limit, files created since publication,
+/// and ignored files when a query skips ignore rules the index applied. The
+/// outer `None` skips caching, for example after a walk error. The inner `None`
+/// records too many unindexed files.
+fn unrecorded_regex_paths(
+    workspace: &Workspace,
+    snapshot: &MerkleSnapshot,
+    recorded: usize,
+    options: &SearchOptions,
+) -> Option<Option<Vec<PathBuf>>> {
+    let mut unrecorded = Vec::new();
     for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
         if options.is_cancelled() {
-            return Some(Arc::new(Vec::new()));
+            return None;
         }
         let entry = entry.ok()?;
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
         let relative = entry.path().strip_prefix(&workspace.root).ok()?;
-        if !indexed_paths.contains(&index_path_string(relative)) {
-            uncovered.push(relative.to_path_buf());
-            if uncovered.len() > MAX_REGEX_UNINDEXED_FILES {
-                return remember_regex_coverage(cache_key, None);
-            }
+        if snapshot.files.contains_key(&index_path_string(relative)) {
+            continue;
+        }
+        unrecorded.push(relative.to_path_buf());
+        if recorded + unrecorded.len() > MAX_UNINDEXED_FILES {
+            return Some(None);
         }
     }
-    uncovered.sort();
-    remember_regex_coverage(cache_key, Some(Arc::new(uncovered)))
+    unrecorded.sort();
+    Some(Some(unrecorded))
 }
 
 fn constrain_query_to_scope(
@@ -1389,6 +1540,43 @@ mod tests {
 
         assert!(paths.contains(std::path::Path::new("indexed.rs")));
         assert!(paths.contains(std::path::Path::new("minified.js")));
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_finds_new_files_until_live_ignore_rules_exclude_them() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("indexed.rs"),
+            "pub fn live_rule_marker() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        std::fs::write(
+            root.path().join("created.rs"),
+            "pub fn live_rule_marker() {}\n",
+        )
+        .unwrap();
+        let regex_paths = || {
+            regex_search_with_options(&workspace, "live_rule_marker", &SearchOptions::default())
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.file_path)
+                .collect::<HashSet<_>>()
+        };
+
+        // Files created since the last publication stay visible, as without an index.
+        assert_eq!(
+            regex_paths(),
+            HashSet::from([PathBuf::from("created.rs"), PathBuf::from("indexed.rs")])
+        );
+        // The cached walk must not keep a file an exclude added before reindexing hides.
+        std::fs::write(root.path().join(".gitignore"), "created.rs\n").unwrap();
+        assert_eq!(regex_paths(), HashSet::from([PathBuf::from("indexed.rs")]));
     }
 
     #[test]

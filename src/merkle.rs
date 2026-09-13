@@ -50,15 +50,15 @@ pub struct MerkleDiff {
 /// mtime-preserving restore or a same-length overwrite on a coarse-timestamp
 /// filesystem; ctime changes on every write and cannot be set by userland, and
 /// the inode changes when the file is replaced.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SnapshotStamp {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SnapshotStamp {
     len: u64,
     modified_nanos: u128,
     inode: u64,
     changed_nanos: i128,
 }
 
-fn snapshot_stamp(path: &Path) -> Option<SnapshotStamp> {
+pub(crate) fn snapshot_stamp(path: &Path) -> Option<SnapshotStamp> {
     let metadata = fs::metadata(path).ok()?;
     let modified_nanos = metadata
         .modified()
