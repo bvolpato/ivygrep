@@ -10,7 +10,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Changed
 
-- Query expansion no longer maps phrases to identifiers from ivygrep's own source or the Linux kernel relevance fixture (`cpu_permits`, `vector_store`, `daemon_request`, `daemon_response`, `indexable`, `doctor`, `block_io`, `workqueue`). Two phrase aliases that tokenization could never match are removed. Self-repository relevance gates are re-baselined on the remaining generic vocabulary.
+- Query expansion no longer maps phrases to identifiers from ivygrep's own source or the Linux kernel relevance fixture (`cpu_permits`, `vector_store`, `daemon_request`, `daemon_response`, `indexable`, `doctor`, `block_io`, `workqueue`). Two phrase aliases that tokenization could never match are removed. Self-repository relevance gate floors are lowered to match. Many remaining phrase aliases still come from the same fixture-fitting history and are candidates for corpus-derived expansion.
 
 ### Security
 

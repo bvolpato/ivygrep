@@ -78,7 +78,7 @@ jobs:
           python3 scripts/eval_relevance.py \
             --skip-build \
             --binary target/release/ig \
-            --check --min-mrr 0.85 --min-p1 0.78 --min-recall5 0.87
+            --check --min-mrr 0.85 --min-p1 0.78 --min-recall5 0.86
 
       - name: Public retrieval fixture
         run: |
