@@ -20,7 +20,7 @@ use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::{SearchContext, SearchOptions, hybrid_search_with_context};
 use crate::symbols::{
-    SymbolSearchMode, likely_definition_names, search_symbol_relationships_in_current_index,
+    SymbolSearchMode, likely_definition_names, search_symbol_relationships_with_context,
     search_symbols_in_current_index,
 };
 use crate::walker::SourcePathMatcher;
@@ -310,7 +310,12 @@ pub fn build_context_bundle_with_options(
         if !relationship_anchors.contains(&symbol.to_ascii_lowercase()) {
             continue;
         }
-        match search_symbol_relationships_in_current_index(workspace, symbol, &symbol_options) {
+        match search_symbol_relationships_with_context(
+            workspace,
+            &search_context,
+            symbol,
+            &symbol_options,
+        ) {
             Ok((callers, references)) => {
                 for (role, hits, weight, verb, prefer_last) in [
                     (ContextRole::Caller, callers, 0.76, "calls", true),

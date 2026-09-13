@@ -1543,6 +1543,8 @@ impl DaemonState {
         cancellation: Option<&AtomicBool>,
     ) -> Option<Vec<WorkspaceModeLease>> {
         let mut requirements = HashMap::new();
+        // `main_worktree_root` runs `git worktree list`; resolve each base once.
+        let mut base_ids = HashMap::new();
         for workspace in workspaces {
             let workspace_requires_mutation = direct_exclusive
                 || (unfinished_publication_exclusive
@@ -1562,6 +1564,7 @@ impl DaemonState {
                         skip_gitignore,
                         &workspace_readiness_signature(workspace),
                     );
+                base_ids.insert(workspace.id.clone(), base_workspace.id.clone());
                 requirements
                     .entry(base_workspace.id)
                     .and_modify(|exclusive| *exclusive |= base_requires_mutation)
@@ -1574,12 +1577,10 @@ impl DaemonState {
             workspaces
                 .iter()
                 .filter(|workspace| {
-                    workspace.is_worktree()
-                        && workspace
-                            .main_worktree_root()
-                            .and_then(|root| Workspace::resolve(&root).ok())
-                            .and_then(|base| requirements.get(&base.id))
-                            .is_some_and(|exclusive| !exclusive)
+                    base_ids
+                        .get(&workspace.id)
+                        .and_then(|base_id| requirements.get(base_id))
+                        .is_some_and(|exclusive| !exclusive)
                 })
                 .collect::<Vec<_>>()
         };
@@ -3370,7 +3371,14 @@ async fn handle_request_with_cancellation(
         },
         DaemonRequest::RuntimeStatus { path } => {
             let workspace = match path {
-                Some(path) => match Workspace::resolve(&path) {
+                // Status only reads per-root runtime state. If cached resolution
+                // races a Git identity change, resolve uncached instead of
+                // returning an error that CLI clients treat as an incompatible
+                // daemon and restart.
+                Some(path) => match state
+                    .resolve_workspace(&path)
+                    .or_else(|_| Workspace::resolve(&path))
+                {
                     Ok(workspace) => {
                         let watch_enabled = workspace
                             .read_metadata()
@@ -3997,7 +4005,7 @@ async fn handle_request_with_cancellation(
                 return cancelled_search_response();
             }
             let workspace_set = if let Some(ref p) = path {
-                match Workspace::resolve(p) {
+                match state.resolve_workspace(p) {
                     Ok(workspace) => SearchWorkspaceSet {
                         workspaces: vec![workspace],
                         warnings: Vec::new(),
@@ -4009,7 +4017,7 @@ async fn handle_request_with_cancellation(
                     }
                 }
             } else {
-                match select_all_indexed_workspaces(Workspace::resolve) {
+                match select_all_indexed_workspaces(|root| state.resolve_workspace(root)) {
                     Ok(workspaces) => workspaces,
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -4128,7 +4136,7 @@ async fn handle_request_with_cancellation(
                 return cancelled_search_response();
             }
             let workspace_set = if let Some(ref p) = path {
-                match Workspace::resolve(p) {
+                match state.resolve_workspace(p) {
                     Ok(workspace) => SearchWorkspaceSet {
                         workspaces: vec![workspace],
                         warnings: Vec::new(),
@@ -4140,7 +4148,7 @@ async fn handle_request_with_cancellation(
                     }
                 }
             } else {
-                match select_all_indexed_workspaces(Workspace::resolve) {
+                match select_all_indexed_workspaces(|root| state.resolve_workspace(root)) {
                     Ok(workspaces) => workspaces,
                     Err(err) => {
                         return DaemonResponse::Error {

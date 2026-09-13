@@ -738,7 +738,7 @@ struct StaticEmbeddingModel {
 #[cfg(feature = "neural")]
 impl StaticEmbeddingModel {
     fn new(profile: NeuralProfile, is_background: bool) -> anyhow::Result<Self> {
-        use candle_core::{DType, Device, safetensors::MmapedSafetensors};
+        use candle_core::{Device, safetensors::MmapedSafetensors};
         use hf_hub::{Repo, RepoType, api::sync::Api};
 
         let repo = Repo::with_revision(
@@ -766,14 +766,7 @@ impl StaticEmbeddingModel {
         // tensor is copied into owned memory below.
         let tensors = unsafe { MmapedSafetensors::new(weights_path)? };
         let dimensions = profile.dimensions();
-        let embeddings = tensors
-            .load(embedding_tensor, &Device::Cpu)?
-            // PotionCode v2 stores float16 weights; the pooling math is f32.
-            .to_dtype(DType::F32)?
-            .narrow(1, 0, dimensions)?
-            .contiguous()?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
+        let embeddings = load_static_embedding_matrix(&tensors, embedding_tensor, dimensions)?;
         let (token_mapping, token_weights) = if profile == NeuralProfile::PotionCode {
             let mapping = tensors
                 .load("mapping", &Device::Cpu)?
@@ -868,6 +861,58 @@ impl StaticEmbeddingModel {
         }
         embedding
     }
+}
+
+/// Static embedding matrices are converted in row blocks of about this size.
+#[cfg(feature = "neural")]
+const STATIC_EMBEDDING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
+
+/// Copy the leading `dimensions` columns of a 2-D embedding matrix into f32
+/// rows. Converting the whole tensor at once kept the file-dtype copy, the f32
+/// copy, and the flattened result alive together at several times the retained
+/// size; bounded blocks keep peak memory near the retained matrix.
+#[cfg(feature = "neural")]
+fn load_static_embedding_matrix(
+    tensors: &candle_core::safetensors::MmapedSafetensors,
+    name: &str,
+    dimensions: usize,
+) -> anyhow::Result<Vec<f32>> {
+    use candle_core::{DType, Device, Tensor};
+
+    let view = tensors.get(name)?;
+    let dtype = DType::try_from(view.dtype())?;
+    let &[rows, columns] = view.shape() else {
+        anyhow::bail!("static embedding tensor {name} must be two-dimensional");
+    };
+    anyhow::ensure!(
+        (1..=columns).contains(&dimensions),
+        "static embedding tensor {name} has {columns} columns; expected at least {dimensions}"
+    );
+    let row_bytes = columns * dtype.size_in_bytes();
+    let data = view.data();
+    anyhow::ensure!(
+        data.len() == rows * row_bytes,
+        "static embedding tensor {name} payload does not match its shape"
+    );
+    let block_rows = (STATIC_EMBEDDING_BLOCK_BYTES / row_bytes).max(1);
+    let mut embeddings = Vec::with_capacity(rows * dimensions);
+    for block in data.chunks(block_rows * row_bytes) {
+        embeddings.extend(
+            Tensor::from_raw_buffer(
+                block,
+                dtype,
+                &[block.len() / row_bytes, columns],
+                &Device::Cpu,
+            )?
+            // PotionCode v2 stores float16 weights; the pooling math is f32.
+            .to_dtype(DType::F32)?
+            .narrow(1, 0, dimensions)?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1::<f32>()?,
+        );
+    }
+    Ok(embeddings)
 }
 
 #[cfg(feature = "neural")]
