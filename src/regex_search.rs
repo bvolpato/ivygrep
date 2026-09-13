@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
-use grep_regex::RegexMatcherBuilder;
+use grep_matcher::Matcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 // Lossy decoding keeps matches on lines with invalid UTF-8; UTF8 aborts the file.
 use grep_searcher::sinks::Lossy;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder};
@@ -435,6 +436,19 @@ fn text_searcher() -> Searcher {
         .build()
 }
 
+/// Bounds a matching line, keeping its first match inside the preview window.
+fn regex_preview_line(matcher: &RegexMatcher, line: &str) -> String {
+    if line.len() <= crate::search::MAX_PREVIEW_LINE_BYTES {
+        return line.to_string();
+    }
+    let found = matcher
+        .find(line.as_bytes())
+        .ok()
+        .flatten()
+        .map(|found| found.start()..found.end());
+    crate::search::preview_line_window(line, found).into_owned()
+}
+
 /// Parallel regex search over a known set of file paths.
 fn regex_search_parallel(
     workspace: &Workspace,
@@ -477,7 +491,7 @@ fn regex_search_parallel(
                     file_path: rel_path.clone(),
                     start_line: line_num,
                     end_line: line_num,
-                    preview: line.trim().to_string(),
+                    preview: regex_preview_line(&matcher, line.trim()),
                     reason: "regex line match".to_string(),
                     score: 1.0,
                     sources: vec!["regex".to_string()],
@@ -597,7 +611,7 @@ fn regex_search_walk(
                     file_path: rel_path.clone(),
                     start_line: line_num,
                     end_line: line_num,
-                    preview: line.trim().to_string(),
+                    preview: regex_preview_line(&matcher, line.trim()),
                     reason: "regex line match".to_string(),
                     score: 1.0,
                     sources: vec!["regex".to_string()],
@@ -768,9 +782,25 @@ fn expand_regex_context_with_paths(
             let focus = hit.start_line.clamp(1, lines.len());
             let start = focus.saturating_sub(context).max(1);
             let end = focus.saturating_add(context).min(lines.len());
+            // The search already windowed a long matching line around its match.
+            let matched = std::mem::take(&mut hit.preview);
             hit.start_line = start;
             hit.end_line = end;
-            hit.preview = lines[start.saturating_sub(1)..end].join("\n");
+            hit.preview = lines[start.saturating_sub(1)..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, line)| {
+                    if start + offset == focus
+                        && line.len() > crate::search::MAX_PREVIEW_LINE_BYTES
+                        && !matched.contains('\n')
+                    {
+                        std::borrow::Cow::Borrowed(matched.as_str())
+                    } else {
+                        crate::search::preview_line_window(line, None)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
         }
     }
 }

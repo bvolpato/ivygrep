@@ -43,6 +43,7 @@ All notable changes to ivygrep are documented in this file.
 - Literal search folds case for all Unicode letters, one character at a time, so word-final Greek sigma and other context-sensitive letters still match inside longer words.
 - Regex coverage caching remembers workspaces with too many unindexed files, so later regex queries skip the repeated walk.
 - Regex searches with a limit return the first matches in path order on every run instead of a thread-scheduling-dependent subset.
+- Literal and regex previews of lines longer than 1 KiB, such as minified bundles or source maps, return a 1 KiB window around the first match on that line, marked with `…` on each cut side, instead of the whole line. Line numbers are unchanged, and shorter lines are returned byte-for-byte.
 - Hybrid queries without ASCII letters or digits, such as CJK or Cyrillic text, use exact substring matching instead of returning no results.
 - A daemon started by `ig --web` restores configured watchers and runs the watcher supervisor like any other daemon. Previously, watched workspaces stayed unwatched until a query touched them, and failed watchers were never retried.
 - The Windows installer upgrades over a running `ig.exe`, such as the daemon, an MCP server, or a TUI session. It moves the running binary aside, restores it if the copy fails or is interrupted, and removes set-aside copies after a later successful install.
