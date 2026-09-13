@@ -290,15 +290,6 @@ streams eligible SQLite keys and exactly scores fixed-size batches. This can
 scan the eligible corpus, but does not allocate a corpus-sized ANN result set.
 Ordinary ANN requests retain shared metadata hydration when no keys are rejected.
 
-Candidate cutoffs do not depend on segment layout. Tantivy breaks equal scores
-by document address, and Block-WAND can move one document's BM25 score by a few
-ULPs between layouts, so lexical, path, literal, and Boolean pools collect past
-their limit until the tie band at the cutoff is complete (scores within `1e-5`
-relative are equal). Ties are ordered by indexed path, span, and chunk key, so
-rebuilding identical sources with any number of indexing threads yields the same
-pools. Expansion stops at 16 times the limit or 100,000 documents past it; a tie
-band larger than that keeps Tantivy's address order at the extended boundary.
-
 Explicit Boolean requests are parsed before expansion. All retrieval signals
 are restricted to a request-local pool of raw-query matches bounded by the
 normal lexical candidate budget. Semantic scoring ranks only keys in that pool;

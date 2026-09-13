@@ -388,7 +388,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                 constrain_query_to_scope(parsed, &ctx.fields, options.scope_filter.as_ref())?;
             let parsed = constrain_query_to_glob_paths(parsed, &ctx.fields, &glob_path_filter);
             for (i, searcher) in ctx.searchers.iter().enumerate() {
-                let docs = collect_stable_top_docs(
+                let docs = collect_top_docs_with_eligibility(
                     searcher,
                     parsed.as_ref(),
                     &ctx.fields,
@@ -403,7 +403,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     path_candidate_limit,
                     options.cancel_token.as_ref(),
                 )?;
-                for (score, doc) in docs {
+                for (score, addr) in docs {
+                    let doc = searcher.doc::<TantivyDocument>(addr)?;
                     if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
                         .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
                         .filter(|c| type_matches(c, options.type_filter.as_deref()))

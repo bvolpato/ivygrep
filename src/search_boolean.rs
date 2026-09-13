@@ -194,7 +194,7 @@ pub(super) fn boolean_candidates(
     let mut keys = HashSet::new();
     for (index, searcher) in ctx.searchers.iter().enumerate() {
         let eligibility = CandidateEligibility::new(ctx, index, options, paths, None);
-        for (score, document) in collect_stable_top_docs(
+        for (score, address) in collect_top_docs_with_eligibility(
             searcher,
             query.as_ref(),
             &ctx.fields,
@@ -203,6 +203,7 @@ pub(super) fn boolean_candidates(
             limit,
             options.cancel_token.as_ref(),
         )? {
+            let document = searcher.doc::<TantivyDocument>(address)?;
             if let Some(chunk) = fetch_chunk_by_id(document.clone(), &ctx.fields) {
                 keys.insert(chunk.vector_key);
                 documents.push((index, score, document));
