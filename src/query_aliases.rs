@@ -87,10 +87,7 @@ mod tests {
         assert_eq!(phrase_aliases(&tokens), vec!["cli"]);
 
         let tokens = vec!["work".to_string(), "item".to_string()];
-        assert_eq!(
-            phrase_aliases(&tokens),
-            vec!["job", "queue", "worker", "workqueue"]
-        );
+        assert_eq!(phrase_aliases(&tokens), vec!["job", "queue", "worker"]);
 
         let tokens = vec!["binary".to_string(), "part".to_string()];
         assert_eq!(phrase_aliases(&tokens), vec!["multipart"]);
@@ -114,10 +111,7 @@ mod tests {
         );
 
         let tokens = vec!["search".to_string(), "run".to_string()];
-        assert_eq!(
-            phrase_aliases(&tokens),
-            vec!["cpu_permits", "semaphore", "permit"]
-        );
+        assert_eq!(phrase_aliases(&tokens), vec!["semaphore", "permit"]);
 
         let tokens = vec![
             "server".to_string(),

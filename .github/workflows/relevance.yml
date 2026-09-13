@@ -69,15 +69,16 @@ jobs:
       - name: Build ig (hash-only)
         run: cargo build --release --locked --no-default-features --bin ig
 
-      # Keep margin below the current deterministic hash baseline (MRR 0.95,
-      # p@1 0.91, recall@5 0.96). Exact-baseline gates fail when unrelated
-      # source files change corpus statistics and provide no regression budget.
+      # Keep margin below the deterministic hash baseline after removing
+      # corpus-specific query aliases (local hash-only build: MRR 0.90, p@1 0.83,
+      # recall@5 0.91). Exact-baseline gates fail when unrelated source files
+      # change corpus statistics and provide no regression budget.
       - name: Relevance gate
         run: |
           python3 scripts/eval_relevance.py \
             --skip-build \
             --binary target/release/ig \
-            --check --min-mrr 0.90 --min-p1 0.85 --min-recall5 0.95
+            --check --min-mrr 0.85 --min-p1 0.78 --min-recall5 0.87
 
       - name: Public retrieval fixture
         run: |
@@ -169,7 +170,7 @@ jobs:
             --binary target/release/ig \
             --neural \
             --no-audit-recall \
-            --check --min-mrr 0.90 --min-p1 0.85 --min-recall5 0.90
+            --check --min-mrr 0.82 --min-p1 0.72 --min-recall5 0.86
 
       - name: Upload public retrieval result
         if: always()
