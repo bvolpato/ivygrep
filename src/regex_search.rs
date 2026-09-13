@@ -438,15 +438,17 @@ fn text_searcher() -> Searcher {
 
 /// Bounds a matching line, keeping its first match inside the preview window.
 fn regex_preview_line(matcher: &RegexMatcher, line: &str) -> String {
-    if line.len() <= crate::search::MAX_PREVIEW_LINE_BYTES {
-        return line.to_string();
+    let trimmed = line.trim();
+    if trimmed.len() <= crate::search::MAX_PREVIEW_LINE_BYTES {
+        return trimmed.to_string();
     }
-    let found = matcher
-        .find(line.as_bytes())
-        .ok()
-        .flatten()
-        .map(|found| found.start()..found.end());
-    crate::search::preview_line_window(line, found).into_owned()
+    let trimmed_start = line.len() - line.trim_start().len();
+    let trimmed_end = trimmed_start + trimmed.len();
+    let found = matcher.find(line.as_bytes()).ok().flatten().map(|found| {
+        found.start().clamp(trimmed_start, trimmed_end) - trimmed_start
+            ..found.end().clamp(trimmed_start, trimmed_end) - trimmed_start
+    });
+    crate::search::preview_line_window(trimmed, found).into_owned()
 }
 
 /// Parallel regex search over a known set of file paths.
@@ -491,7 +493,7 @@ fn regex_search_parallel(
                     file_path: rel_path.clone(),
                     start_line: line_num,
                     end_line: line_num,
-                    preview: regex_preview_line(&matcher, line.trim()),
+                    preview: regex_preview_line(&matcher, line),
                     reason: "regex line match".to_string(),
                     score: 1.0,
                     sources: vec!["regex".to_string()],
@@ -611,7 +613,7 @@ fn regex_search_walk(
                     file_path: rel_path.clone(),
                     start_line: line_num,
                     end_line: line_num,
-                    preview: regex_preview_line(&matcher, line.trim()),
+                    preview: regex_preview_line(&matcher, line),
                     reason: "regex line match".to_string(),
                     score: 1.0,
                     sources: vec!["regex".to_string()],
@@ -840,6 +842,21 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    #[test]
+    fn regex_preview_uses_the_untrimmed_match_span() {
+        let matcher = RegexMatcherBuilder::new()
+            .case_insensitive(true)
+            .build(r"needle\s+$")
+            .unwrap();
+        let line = format!("{}needle   \n", "a".repeat(2_000));
+
+        let preview = regex_preview_line(&matcher, &line);
+
+        assert!(preview.starts_with('…'));
+        assert!(preview.contains("needle"));
+        assert!(preview.len() <= crate::search::MAX_PREVIEW_LINE_BYTES + '…'.len_utf8());
     }
 
     #[test]
