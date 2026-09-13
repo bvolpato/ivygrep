@@ -815,8 +815,32 @@ const TREE_SITTER_PARSE_CPU_PER_OPERATION: std::time::Duration =
 struct ParseBudget {
     max_operations: u64,
     operations: std::cell::Cell<u64>,
-    wall_start: std::time::Instant,
-    cpu_start: Option<std::time::Duration>,
+    /// Starts at the first progress callback, so grammar loading, query
+    /// compilation, and waits for another thread compiling the same queries
+    /// do not count as parse work.
+    clock: std::cell::Cell<Option<ParseClock>>,
+}
+
+#[derive(Clone, Copy)]
+struct ParseClock {
+    wall: std::time::Instant,
+    cpu: Option<std::time::Duration>,
+}
+
+impl ParseClock {
+    fn start() -> Self {
+        Self {
+            wall: std::time::Instant::now(),
+            cpu: thread_cpu_time(),
+        }
+    }
+
+    fn elapsed(self) -> std::time::Duration {
+        match (self.cpu, thread_cpu_time()) {
+            (Some(start), Some(now)) => now.saturating_sub(start),
+            _ => self.wall.elapsed(),
+        }
+    }
 }
 
 impl ParseBudget {
@@ -828,8 +852,7 @@ impl ParseBudget {
         Self {
             max_operations,
             operations: std::cell::Cell::new(0),
-            wall_start: std::time::Instant::now(),
-            cpu_start: thread_cpu_time(),
+            clock: std::cell::Cell::new(None),
         }
     }
 
@@ -840,17 +863,22 @@ impl ParseBudget {
             .get()
             .saturating_add(TREE_SITTER_OPERATIONS_PER_PROGRESS_CALLBACK);
         self.operations.set(operations);
-        operations > self.max_operations || self.pathologically_slow(operations)
+        if operations > self.max_operations {
+            return true;
+        }
+        match self.clock.get() {
+            Some(clock) => Self::pathologically_slow(clock, operations),
+            None => {
+                self.clock.set(Some(ParseClock::start()));
+                false
+            }
+        }
     }
 
-    fn pathologically_slow(&self, operations: u64) -> bool {
-        let elapsed = match (self.cpu_start, thread_cpu_time()) {
-            (Some(start), Some(now)) => now.saturating_sub(start),
-            _ => self.wall_start.elapsed(),
-        };
+    fn pathologically_slow(clock: ParseClock, operations: u64) -> bool {
         let per_operation = TREE_SITTER_PARSE_CPU_PER_OPERATION
             .saturating_mul(u32::try_from(operations).unwrap_or(u32::MAX));
-        elapsed > TREE_SITTER_PARSE_CPU_FLOOR.saturating_add(per_operation)
+        clock.elapsed() > TREE_SITTER_PARSE_CPU_FLOOR.saturating_add(per_operation)
     }
 }
 
@@ -866,7 +894,42 @@ fn thread_cpu_time() -> Option<std::time::Duration> {
     (rc == 0).then(|| std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
 }
 
-#[cfg(not(unix))]
+/// Thread times advance in scheduler ticks (about 15.6 ms), well below the
+/// allowance floor.
+#[cfg(windows)]
+fn thread_cpu_time() -> Option<std::time::Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: GetCurrentThread returns a pseudo-handle for the calling thread
+    // that needs no cleanup, and GetThreadTimes only writes into the FILETIME
+    // values we own for the duration of the call.
+    let ok = unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    // FILETIME counts 100-nanosecond intervals.
+    let intervals =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    (ok != 0).then(|| {
+        std::time::Duration::from_nanos(
+            intervals(kernel)
+                .saturating_add(intervals(user))
+                .saturating_mul(100),
+        )
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn thread_cpu_time() -> Option<std::time::Duration> {
     None
 }
@@ -4736,6 +4799,18 @@ export function register(p: Plugin) {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn parse_budget_ignores_time_off_cpu() {
+        let budget = ParseBudget::new();
+        let pause = TREE_SITTER_PARSE_CPU_FLOOR + std::time::Duration::from_millis(50);
+        // Grammar setup can wait for another thread compiling the same queries.
+        std::thread::sleep(pause);
+        assert!(!budget.record_progress());
+        // A parse thread descheduled on a busy machine keeps its allowance.
+        std::thread::sleep(pause);
+        assert!(!budget.record_progress());
     }
 
     #[test]
