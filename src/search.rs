@@ -964,16 +964,6 @@ fn substring_candidate_files(
             paths.insert(path);
         }
     }
-    // Regex search also scans files the lexical index skipped. Unknown coverage
-    // keeps the indexed candidates rather than falling back to a full walk.
-    if let Some(unindexed) =
-        crate::regex_search::unindexed_literal_candidates(workspace, path_matcher, options)
-    {
-        paths.extend(unindexed);
-    }
-    if options.is_cancelled() {
-        return Ok(Some(Vec::new()));
-    }
     let mut paths = paths
         .into_iter()
         .map(|path| {

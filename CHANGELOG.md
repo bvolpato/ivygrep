@@ -11,7 +11,8 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 
 - Literal and regex searches match files containing invalid UTF-8, as indexing already did, and regex context expansion and previews decode those files lossily instead of dropping them.
-- Literal search folds case for all Unicode letters, matching regex search, and also scans files the lexical index skips: minified bundles, files over the indexing size limit, and unknown text types.
+- Literal search folds case for all Unicode letters, matching regex search.
+- Regex coverage caching remembers workspaces with too many unindexed files, so later regex queries skip the repeated walk.
 - Regex searches with a limit return the first matches in path order on every run instead of a thread-scheduling-dependent subset.
 - Hybrid queries without ASCII letters or digits, such as CJK or Cyrillic text, use exact substring matching instead of returning no results.
 

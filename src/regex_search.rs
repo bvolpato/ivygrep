@@ -27,8 +27,6 @@ const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REGEX_COVERAGE_CACHE_ENTRIES: usize = 32;
 const MAX_REGEX_UNINDEXED_FILES: usize = 4_096;
 const REGEX_PARALLEL_BATCH_FILES: usize = 256;
-/// Literal verification reads whole files; larger unindexed files stay regex-only.
-const MAX_LITERAL_UNINDEXED_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct RegexCoverageKey {
@@ -308,30 +306,6 @@ fn unindexed_matching_paths(
             paths.push(rel.clone());
         }
     }
-    Some(paths)
-}
-
-/// Files outside the lexical index that exact literal lookups must still scan:
-/// minified bundles, files over the indexing size limit, and unknown text types.
-/// `None` means coverage is unknown, for example on a stale worktree overlay.
-pub(crate) fn unindexed_literal_candidates(
-    workspace: &Workspace,
-    path_matcher: &PathGlobMatcher,
-    options: &SearchOptions,
-) -> Option<Vec<PathBuf>> {
-    let (use_overlay, shadowed_paths) = overlay_shadowed_paths(workspace)?;
-    let mut paths = unindexed_matching_paths(
-        workspace,
-        use_overlay,
-        &shadowed_paths,
-        options.scope_filter.as_ref(),
-        path_matcher,
-        options,
-    )?;
-    paths.retain(|rel| {
-        fs::metadata(workspace.root.join(rel))
-            .is_ok_and(|metadata| metadata.len() <= MAX_LITERAL_UNINDEXED_FILE_BYTES)
-    });
     Some(paths)
 }
 
@@ -1337,17 +1311,6 @@ mod tests {
 
         assert!(paths.contains(std::path::Path::new("indexed.rs")));
         assert!(paths.contains(std::path::Path::new("minified.js")));
-
-        let literal_paths =
-            crate::search::literal_search(&workspace, "shared_regex_marker", &Default::default())
-                .unwrap()
-                .into_iter()
-                .map(|hit| hit.file_path)
-                .collect::<HashSet<_>>();
-        assert_eq!(
-            literal_paths,
-            HashSet::from([PathBuf::from("indexed.rs"), PathBuf::from("minified.js")])
-        );
     }
 
     #[test]
