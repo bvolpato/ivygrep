@@ -109,16 +109,23 @@ fn backtick_runs(query: &str) -> HashMap<usize, VecDeque<usize>> {
     runs
 }
 
+/// Multi-line input, with or without Boolean operators, leaves `signature` out
+/// of the default fields (see `hybrid_search_with_context_and_neural_job`). The
+/// field keeps its boost, so an explicit `signature:` clause scores the same on
+/// any query shape.
 pub(super) fn lexical_query_parser(
     ctx: &SearchContext,
-    fields: &TantivyFields,
+    query_text: &str,
     conjunction: bool,
 ) -> QueryParser {
+    let fields = &ctx.fields;
     // Raw STRING paths remain available through explicit file_path: clauses,
     // not defaults, so they cannot hide unsupported phrase queries.
     let mut default_fields = vec![fields.text];
     default_fields.extend(fields.file_path_text);
-    default_fields.extend(fields.signature);
+    if !is_multiline_query(query_text) {
+        default_fields.extend(fields.signature);
+    }
     let mut parser = QueryParser::for_index(&ctx.indexes[0], default_fields);
     parser.set_field_boost(fields.file_path, 2.0);
     if let Some(field) = fields.file_path_text {
@@ -181,7 +188,7 @@ pub(super) fn boolean_candidates(
     if !has_explicit_boolean_operators(text) {
         return Ok(None);
     }
-    let parser = lexical_query_parser(ctx, &ctx.fields, should_use_conjunctive_numeric_query(text));
+    let parser = lexical_query_parser(ctx, text, should_use_conjunctive_numeric_query(text));
     let mut ast = tantivy::query_grammar::parse_query(text)
         .map_err(|_| anyhow::anyhow!(boolean_query_error(text)))?;
     anchor_negative_clauses(&mut ast);
