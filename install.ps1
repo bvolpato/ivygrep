@@ -109,7 +109,52 @@ try {
     Expand-Archive $archivePath -DestinationPath $tempDir -Force
     New-Item $installDir -ItemType Directory -Force | Out-Null
     $source = Join-Path $tempDir "ivygrep-$tag-windows-x86_64\ig.exe"
-    Copy-Item $source (Join-Path $installDir "ig.exe") -Force
+    $target = Join-Path $installDir "ig.exe"
+    # Windows refuses to overwrite a running executable (the ivygrep daemon, an
+    # MCP server, a TUI session) but allows renaming it. Move the current binary
+    # aside so the copy succeeds; running processes keep their mapped image.
+    $previous = $null
+    $installed = $false
+    try {
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            $previous = "$target.$([guid]::NewGuid().ToString('N')).old"
+            Move-Item -LiteralPath $target -Destination $previous
+        }
+        try {
+            Copy-Item -LiteralPath $source -Destination $target -Force
+            $installed = $true
+        } catch {
+            $copyError = $_
+            if ($previous) {
+                $restoring = $previous
+                $previous = $null
+                try {
+                    Move-Item -LiteralPath $restoring -Destination $target -Force
+                } catch {
+                    Write-Warning "Could not restore the previous ivygrep binary ($($_.Exception.Message)); it remains at $restoring"
+                }
+            }
+            throw $copyError
+        }
+    } finally {
+        # An interrupt can skip the catch block before or during Copy-Item. Until
+        # the copy is confirmed, remove any partial target and restore the old binary.
+        if (-not $installed -and $previous) {
+            try {
+                if (Test-Path -LiteralPath $target) {
+                    Remove-Item -LiteralPath $target -Force
+                }
+                Move-Item -LiteralPath $previous -Destination $target
+            } catch {
+                Write-Warning "Could not restore the previous ivygrep binary ($($_.Exception.Message)); it remains at $previous"
+            }
+        }
+    }
+    # Binaries set aside by this and earlier upgrades are removable once nothing
+    # runs them. Cleanup waits for a successful copy, so a set-aside binary is
+    # never deleted while it is the only remaining copy.
+    Get-ChildItem -LiteralPath $installDir -Filter "ig.exe.*.old" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $pathEntries = @($userPath -split ";" | Where-Object { $_ })

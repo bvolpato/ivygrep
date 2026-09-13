@@ -166,6 +166,33 @@ jobs:
           & ./install.ps1
           & (Join-Path $env:IVYGREP_INSTALL_DIR "ig.exe") --version
 
+      - name: Upgrade PowerShell installer over running daemon
+        if: matrix.name == 'Windows x86_64 (Hash-only fallback)'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $env:IVYGREP_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "ivygrep-installer"
+          $env:IVYGREP_HOME = Join-Path $env:RUNNER_TEMP "ivygrep-installer-home"
+          $binary = Join-Path $env:IVYGREP_INSTALL_DIR "ig.exe"
+          $daemon = Start-Process -FilePath $binary -ArgumentList "--daemon" -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 2
+            if ($daemon.HasExited) {
+              throw "ig.exe --daemon exited before the upgrade with code $($daemon.ExitCode)"
+            }
+            & ./install.ps1
+            if ($daemon.HasExited) {
+              throw "ig.exe --daemon exited during the upgrade with code $($daemon.ExitCode)"
+            }
+            & $binary --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "upgraded ig.exe --version failed with code $LASTEXITCODE"
+            }
+          } finally {
+            Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:

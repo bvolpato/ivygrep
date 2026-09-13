@@ -770,3 +770,118 @@ fn non_loopback_web_uses_token_cookie_and_rejects_unauthorized_api_calls() {
         200
     );
 }
+
+/// Stops a daemon the CLI autospawned, which leaves no `Child` handle, through
+/// the pid recorded under its isolated home.
+#[cfg(unix)]
+struct RecordedDaemonGuard(PathBuf);
+
+#[cfg(unix)]
+impl Drop for RecordedDaemonGuard {
+    fn drop(&mut self) {
+        let Ok(pid) = std::fs::read_to_string(self.0.join("daemon.pid")) else {
+            return;
+        };
+        let pid = pid.trim().to_string();
+        if pid.is_empty() {
+            return;
+        }
+        let _ = Command::new("kill").arg(&pid).status();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5)
+            && Command::new("kill")
+                .args(["-0", pid.as_str()])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// `(watch_enabled, watcher_alive)` for the only workspace under `home`.
+#[cfg(unix)]
+fn single_workspace_watch_state(home: &Path) -> Option<(bool, bool)> {
+    let output = Command::new(bin())
+        .args(["--status", "--json"])
+        .env("IVYGREP_HOME", home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let [workspace] = status.as_array()?.as_slice() else {
+        return None;
+    };
+    Some((
+        workspace["watch_enabled"].as_bool()?,
+        workspace["watcher_alive"].as_bool()?,
+    ))
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn web_autospawned_daemon_restores_configured_watchers() {
+    let home = tempdir().unwrap();
+    let repo = tempdir().unwrap();
+    create_repo(repo.path());
+
+    // Index without a daemon so the only daemon comes from `ig --web`.
+    let add = Command::new(bin())
+        .arg("--add")
+        .arg(repo.path())
+        .arg("--hash")
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    assert_eq!(
+        single_workspace_watch_state(home.path()),
+        Some((true, false)),
+        "local indexing should configure watching without a live watcher"
+    );
+
+    let _daemon_guard = RecordedDaemonGuard(home.path().to_path_buf());
+    let started = Instant::now();
+    loop {
+        let web = Command::new(bin())
+            .args(["--web", "--host", "127.0.0.1", "--port", "0"])
+            .arg(repo.path())
+            .env("IVYGREP_HOME", home.path())
+            .env_remove("IVYGREP_NO_AUTOSPAWN")
+            .env("IVYGREP_NO_BROWSER", "1")
+            .output()
+            .unwrap();
+        if web.status.success()
+            && String::from_utf8_lossy(&web.stdout).contains("ivygrep web listening at")
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "ig --web did not start: {}",
+            String::from_utf8_lossy(&web.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Nothing searches the workspace, so only daemon startup can restore it.
+    let started = Instant::now();
+    loop {
+        let state = single_workspace_watch_state(home.path());
+        if state == Some((true, true)) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "web-started daemon did not restore the configured watcher: {state:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
