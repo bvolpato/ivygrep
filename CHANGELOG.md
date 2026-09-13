@@ -15,6 +15,7 @@ All notable changes to ivygrep are documented in this file.
 - Context packs reuse their loaded search context across relationship anchors instead of reopening index stores for each anchor's callers and references.
 - Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
 - Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
+- Background hash and neural enhancement insert vectors through at most four concurrent lanes instead of one at a time, keeping neural recall@10 within 0.5 points of serial builds. On a 179K-chunk repository, hash enhancement runs 2.0x faster and neural enhancement 2.4x faster. Stores under 1,024 vectors keep serial inserts, and `IVYGREP_INDEX_THREADS=1` restores them everywhere.
 
 ### Testing
 
@@ -30,10 +31,6 @@ All notable changes to ivygrep are documented in this file.
 - The Web UI requires the session token on loopback listeners too. Other local users could previously read indexed files, list directories, search, and launch the editor through `127.0.0.1`. Open the URL printed by `ig --web`; bare `http://127.0.0.1:4747/` returns 401. The printed URL contains the token, so keep terminal output and logs that capture it private.
 - `ig --web` opens the browser through an owner-only HTML redirect file under the ivygrep app home instead of passing the tokenized URL to `xdg-open`, `open`, or `ShellExecuteW`, so the token no longer appears in process arguments other local users can read. On Unix the file is mode 0600 in a 0700 `browser/` directory; a later launch removes files older than two minutes. `IVYGREP_NO_BROWSER=1` skips the launch and the file.
 - The token URL answers with a same-origin page that sets the HttpOnly `SameSite=Strict` cookie and refreshes to the app without the token. A redirect lost the cookie when the URL was opened from a local file, as the launcher's redirect page does. The cookie is named per listener port (`ivygrep_session_<port>`), so daemons on different ports keep separate sessions.
-
-### Performance
-
-- Background hash and neural enhancement insert vectors through at most four concurrent lanes instead of one at a time, keeping neural recall@10 within 0.5 points of serial builds. On a 179K-chunk repository, hash enhancement runs 2.0x faster and neural enhancement 2.4x faster. Stores under 1,024 vectors keep serial inserts, and `IVYGREP_INDEX_THREADS=1` restores them everywhere.
 
 ### Fixed
 
