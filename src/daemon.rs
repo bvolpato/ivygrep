@@ -5666,7 +5666,7 @@ fn recover_stale_daemon_endpoint() -> bool {
     }
 }
 
-async fn spawn_daemon_if_missing(request: &DaemonRequest, autospawn: bool) {
+async fn spawn_daemon_if_missing(autospawn: bool) {
     if !autospawn
         || crate::ipc::socket_exists()
         || std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_some()
@@ -5682,10 +5682,9 @@ async fn spawn_daemon_if_missing(request: &DaemonRequest, autospawn: bool) {
     }
 
     let mut cmd = std::process::Command::new(exe);
+    // Web-started daemons serve the same clients as any other daemon, so they
+    // keep watcher restore and supervision.
     cmd.arg("--daemon");
-    if matches!(request, DaemonRequest::ServeWeb { .. }) {
-        cmd.env("IVYGREP_SKIP_WATCHER_RESTORE", "1");
-    }
 
     // Redirect daemon I/O to a log file to keep the CLI terminal clean.
     if let Ok(mut log_file) = open_daemon_log_file() {
@@ -5728,14 +5727,11 @@ async fn spawn_daemon_if_missing(request: &DaemonRequest, autospawn: bool) {
     }
 }
 
-async fn connect_to_daemon(
-    request: &DaemonRequest,
-    autospawn: bool,
-) -> Option<crate::ipc::IpcStream> {
+async fn connect_to_daemon(autospawn: bool) -> Option<crate::ipc::IpcStream> {
     // At most one stale-endpoint recovery and one retry. Every connection
     // attempt has the same bound, including the first probe.
     for attempt in 0..2 {
-        spawn_daemon_if_missing(request, autospawn).await;
+        spawn_daemon_if_missing(autospawn).await;
         if !crate::ipc::socket_exists() {
             return None;
         }
@@ -5778,7 +5774,7 @@ async fn request_unchecked_with_id<F>(
 where
     F: FnMut(String, usize, usize) + Send,
 {
-    let Some(mut stream) = connect_to_daemon(request, autospawn).await else {
+    let Some(mut stream) = connect_to_daemon(autospawn).await else {
         return Ok(None);
     };
 

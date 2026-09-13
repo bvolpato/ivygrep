@@ -44,6 +44,8 @@ All notable changes to ivygrep are documented in this file.
 - Regex coverage caching remembers workspaces with too many unindexed files, so later regex queries skip the repeated walk.
 - Regex searches with a limit return the first matches in path order on every run instead of a thread-scheduling-dependent subset.
 - Hybrid queries without ASCII letters or digits, such as CJK or Cyrillic text, use exact substring matching instead of returning no results.
+- A daemon started by `ig --web` restores configured watchers and runs the watcher supervisor like any other daemon. Previously, watched workspaces stayed unwatched until a query touched them, and failed watchers were never retried.
+- The Windows installer upgrades over a running `ig.exe`, such as the daemon, an MCP server, or a TUI session. It moves the running binary aside, restores it if the copy fails or is interrupted, and removes set-aside copies after a later successful install.
 - Rust `use super::...` and `self::...` context dependencies follow the module tree instead of the file's directory, so `super::Config` in `src/a/b.rs` resolves to `src/a/mod.rs` rather than `src/lib.rs`. Indented declarations such as `use super::helper` inside an inline `mod tests` are skipped because their module scope is not visible to the dependency scanner. Files without a conventional parent module file, such as modules loaded through `#[path]`, get no `self::`/`super::` edges instead of guessed ones.
 - Context tasks treat prose such as "e.g.", "i.e." and version numbers as text instead of explicit symbols that discard matching evidence.
 - Context items keep correct line numbers when leading blank lines are trimmed, and over-budget previews keep the top of a chunk when no task term matches.
