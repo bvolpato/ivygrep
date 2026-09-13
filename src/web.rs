@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use crate::daemon::DaemonState;
 use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
 };
-use crate::workspace::{Workspace, list_workspaces};
+use crate::workspace::{Workspace, list_workspace_metadata};
 
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_CONCURRENT_HTTP_CONNECTIONS: usize = 128;
@@ -976,7 +976,14 @@ async fn while_sse_client_connected<F: std::future::Future>(
 }
 
 fn tracked_roots() -> Result<Vec<PathBuf>> {
-    list_workspaces().map(|workspaces| workspaces.into_iter().map(|ws| ws.root).collect())
+    // Registry read only: `list_workspaces` also sizes and counts every index
+    // (SQLite dbstat, directory walks, vector stores), which path checks never
+    // use. Keep its id order and de-duplication.
+    let roots = list_workspace_metadata()?
+        .into_iter()
+        .map(|(_, metadata)| (metadata.id, metadata.root))
+        .collect::<BTreeMap<_, _>>();
+    Ok(roots.into_values().collect())
 }
 
 fn resolve_tracked_path(

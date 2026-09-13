@@ -68,12 +68,35 @@ where
     start.elapsed() / repetitions
 }
 
-/// 50K pseudo-random 256-d F16 vectors in a store built for `tier`. The two
-/// tiers differ only in HNSW graph parameters: the hash tier uses the sparse
-/// first-results graph and the neural tier uses USearch defaults.
+/// SplitMix64 step: deterministic fixture data without an RNG dependency.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Unit-length vector with components drawn uniformly from [-1, 1).
+fn pseudo_random_unit_vector(state: &mut u64) -> Vec<f32> {
+    let mut vector = (0..EMBEDDING_DIMENSIONS)
+        .map(|_| (splitmix64(state) >> 40) as f32 / (1u64 << 23) as f32 - 1.0)
+        .collect::<Vec<f32>>();
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    for value in &mut vector {
+        *value /= norm;
+    }
+    vector
+}
+
+/// 50K distinct seeded pseudo-random 256-d F16 unit vectors in a store built
+/// for `tier`. The two tiers differ only in HNSW graph parameters: the hash
+/// tier uses the sparse first-results graph and the neural tier uses USearch
+/// defaults.
 fn setup_ann_fixture(tier: VectorTier) -> (tempfile::TempDir, PathBuf, Vec<f32>) {
     let ann_dir = tempfile::tempdir().unwrap();
     let ann_path = ann_dir.path().join("ann.usearch");
+    let mut state = 0x5EED_u64;
     {
         let mut store = VectorStore::open(
             &ann_path,
@@ -83,16 +106,13 @@ fn setup_ann_fixture(tier: VectorTier) -> (tempfile::TempDir, PathBuf, Vec<f32>)
         )
         .unwrap();
         for i in 0..50_000u64 {
-            let vector = (0..EMBEDDING_DIMENSIONS)
-                .map(|dimension| (((i as usize * 31 + dimension * 17) % 97) as f32) / 97.0)
-                .collect();
-            store.upsert(i, vector).unwrap();
+            store
+                .upsert(i, pseudo_random_unit_vector(&mut state))
+                .unwrap();
         }
         store.save().unwrap();
     }
-    let query = (0..EMBEDDING_DIMENSIONS)
-        .map(|dimension| ((dimension * 13 % 97) as f32) / 97.0)
-        .collect();
+    let query = pseudo_random_unit_vector(&mut state);
     (ann_dir, ann_path, query)
 }
 
@@ -297,8 +317,11 @@ fn bench_indexer(c: &mut Criterion) {
     group.bench_function("index_small_workspace", |b| {
         b.iter_batched(
             || setup_workspace(500),
-            |(_staging, _home, workspace, model)| {
+            |(staging, home, workspace, model)| {
                 index_workspace(&workspace, &model).unwrap();
+                // Criterion drops routine outputs after the timer stops, so
+                // returning the fixture keeps temp-dir removal out of samples.
+                (staging, home, workspace, model)
             },
             BatchSize::LargeInput,
         )
@@ -349,10 +372,11 @@ fn bench_bulk_indexer(c: &mut Criterion) {
     group.bench_function("fresh_index_30k_chunks", |b| {
         b.iter_batched(
             || setup_bulk_workspace(300, 100),
-            |(_staging, _home, workspace, model)| {
+            |(staging, home, workspace, model)| {
                 let summary = index_workspace(&workspace, &model).unwrap();
                 assert_eq!(summary.deleted_files, 0);
                 assert!(summary.total_chunks >= 25_000);
+                (staging, home, workspace, model)
             },
             BatchSize::LargeInput,
         )
@@ -448,6 +472,7 @@ fn bench_merkle(c: &mut Criterion) {
             },
             |dir| {
                 MerkleSnapshot::build(dir.path(), false).unwrap();
+                dir
             },
             BatchSize::LargeInput,
         )
@@ -471,6 +496,7 @@ fn bench_merkle(c: &mut Criterion) {
                 let new = MerkleSnapshot::build(dir.path(), false).unwrap();
                 let diff = old.diff(&new);
                 assert!(diff.added_or_modified.is_empty());
+                (dir, old)
             },
             BatchSize::LargeInput,
         )
@@ -741,6 +767,7 @@ fn bench_vector_store(c: &mut Criterion) {
                     store.upsert(key, vec).unwrap();
                 }
                 store.save().unwrap();
+                dir
             },
             BatchSize::LargeInput,
         )
@@ -824,6 +851,7 @@ fn bench_hash_vector_build(c: &mut Criterion) {
                 }
                 assert_eq!(store.size(), HASH_VECTOR_BUILD_COUNT);
                 black_box(store);
+                dir
             },
             BatchSize::LargeInput,
         )
@@ -911,9 +939,11 @@ fn bench_critical_journeys(c: &mut Criterion) {
 
     // ANN search at scale: 50K pseudo-random vectors (vs the 1K micro-bench),
     // enough to exercise usearch HNSW behaviour rather than a trivial set.
-    // The guarded `vector_search_in_50k*` benches measure the sparse hash-tier
-    // graph, which is the graph every historical baseline was built with.
-    // `neural_vector_search_in_50k_hot` measures the default-parameter graph
+    // The guarded `*_distinct_hot` benches use 50K distinct seeded vectors; the
+    // earlier `*_hot` names measured a fixture with only 97 distinct values, so
+    // their history is not comparable. `vector_search_in_50k_distinct_hot`
+    // measures the sparse hash-tier graph and
+    // `neural_vector_search_in_50k_distinct_hot` the default-parameter graph
     // used by neural stores.
     let ann_fixture = OnceCell::new();
     group.bench_function("vector_search_in_50k", |b| {
@@ -938,7 +968,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("vector_search_in_50k_hot", |b| {
+    group.bench_function("vector_search_in_50k_distinct_hot", |b| {
         let (_ann_dir, ann_path, query) =
             ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
         let store = VectorStore::open_readonly(
@@ -959,7 +989,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     });
 
     let neural_ann_fixture = OnceCell::new();
-    group.bench_function("neural_vector_search_in_50k_hot", |b| {
+    group.bench_function("neural_vector_search_in_50k_distinct_hot", |b| {
         let (_ann_dir, ann_path, query) =
             neural_ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Neural));
         let store = VectorStore::open_readonly(
@@ -980,7 +1010,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     });
 
     let exact_keys = (0..50_000u64).collect::<Vec<_>>();
-    group.bench_function("exact_filtered_vector_top_50_in_50k_hot", |b| {
+    group.bench_function("exact_filtered_vector_top_50_in_50k_distinct_hot", |b| {
         let (_ann_dir, ann_path, query) =
             ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
         let store = VectorStore::open_readonly(

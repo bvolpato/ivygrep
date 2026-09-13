@@ -8,6 +8,16 @@ All notable changes to ivygrep are documented in this file.
 
 - **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
 
+### Performance
+
+- Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
+- Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
+
+### Testing
+
+- Criterion benchmarks return their fixtures so temporary-directory cleanup stays outside timed samples. The ANN fixture uses 50,000 distinct seeded vectors instead of 97 repeated values, and its guarded benches are renamed `*_distinct_hot` because earlier results are not comparable. The benchmark guard records the head measurement and passes when the baseline ref has no such bench.
+- Million-chunk query phases use disjoint query sets, so CLI warm and concurrent latency no longer replay cached daemon answers. Paired comparisons fail when peak indexing RSS or disk use exceeds 1.25 times the baseline.
+
 ### Changed
 
 - Query expansion no longer maps phrases to identifiers from ivygrep's own source or the Linux kernel relevance fixture (`cpu_permits`, `vector_store`, `daemon_request`, `daemon_response`, `indexable`, `doctor`, `block_io`, `workqueue`). Two phrase aliases that tokenization could never match are removed. Self-repository relevance gate floors are lowered to match. Many remaining phrase aliases still come from the same fixture-fitting history and are candidates for corpus-derived expansion.

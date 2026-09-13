@@ -707,6 +707,85 @@ class MillionBenchmarkTest(unittest.TestCase):
             any("index size ratio" in failure for failure in result["failures"])
         )
 
+    def test_comparison_rejects_peak_resource_regressions(self):
+        for metric, label, override in (
+            ("peak_rss_bytes", "peak index RSS", "maximum_peak_rss_ratio"),
+            ("peak_disk_bytes", "peak index disk", "maximum_peak_disk_ratio"),
+        ):
+            with self.subTest(metric=metric):
+                baseline, current = artifact([100.0] * 40), artifact([100.0] * 40)
+                current["index"]["metrics"][metric] = (
+                    baseline["index"]["metrics"][metric] * 1.3
+                )
+                arguments = {
+                    "significant_regression_ratio": 1.15,
+                    "required_warm_ratio": None,
+                    "required_index_ratio": None,
+                    "maximum_quality_loss": 0.0,
+                }
+
+                result = comparator.compare(baseline, current, **arguments)
+                self.assertFalse(result["passed"])
+                self.assertEqual(
+                    [failure for failure in result["failures"] if label in failure],
+                    [f"{label} ratio 1.300 exceeds allowed 1.250"],
+                )
+
+                relaxed = comparator.compare(
+                    baseline, current, **arguments, **{override: 1.5}
+                )
+                self.assertTrue(relaxed["passed"])
+
+    def test_distinct_query_phases_do_not_resend_earlier_queries(self):
+        measured = {"elapsed_ms": 1.0, "hit_count": 1, "paths": ["source.rs"]}
+        daemon_queries = []
+        cli_warm_queries = []
+        concurrent_queries = []
+
+        def daemon_query(query, type_filter=None):
+            if type_filter is None:
+                daemon_queries.append(query)
+            return measured
+
+        def cli_query(_binary, _corpus, query, env, **_kwargs):
+            if env.get("IVYGREP_NO_AUTOSPAWN") != "1":
+                cli_warm_queries.append(query)
+            return measured
+
+        def concurrent_query(_home, _corpus, query, **_kwargs):
+            concurrent_queries.append(query)
+            return measured
+
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.query.side_effect = daemon_query
+        with (
+            mock.patch.object(benchmark, "run_query", side_effect=cli_query),
+            mock.patch.object(
+                benchmark, "run_daemon_query", side_effect=concurrent_query
+            ),
+            mock.patch.object(benchmark, "DaemonClient", return_value=client),
+            mock.patch.object(benchmark, "start_daemon", return_value=(None, None, None)),
+            mock.patch.object(benchmark, "stop_daemon"),
+            mock.patch.object(benchmark, "profile_query_phases", return_value={}) as profile,
+        ):
+            result = benchmark.query_suite(
+                Path("ig"), Path("corpus"), {"IVYGREP_HOME": "home"}, 3, 1_000, 10,
+            )
+
+        distinct_cases = benchmark.query_cases(3, 1_000, 10)
+        distinct_queries = [query for query, _ in distinct_cases]
+        self.assertEqual(daemon_queries[1:4], distinct_queries)
+        self.assertEqual(profile.call_args.args[3], distinct_cases)
+        self.assertEqual(result["cli_warm_distinct"]["samples"], 3)
+        self.assertEqual(result["concurrent"]["samples"], 3)
+        self.assertEqual(len(set(cli_warm_queries)), 3)
+        self.assertEqual(len(set(concurrent_queries)), 3)
+        self.assertFalse(set(daemon_queries) & set(cli_warm_queries))
+        self.assertFalse(
+            (set(daemon_queries) | set(cli_warm_queries)) & set(concurrent_queries)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
