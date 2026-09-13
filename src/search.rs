@@ -759,7 +759,7 @@ pub fn literal_search_with_context(
         return Ok(vec![]);
     }
 
-    let query_lower = query.to_ascii_lowercase();
+    let query_lower = fold_literal_case(query);
     let max_hits = options.bounded_limit().unwrap_or(500);
     let context = options.bounded_context();
     let runs = substring_candidate_runs(query);
@@ -785,6 +785,21 @@ pub fn literal_search_with_context(
     }
     tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
     Ok(hits)
+}
+
+/// Case-insensitive literal matching folds each character independently.
+/// `str::to_lowercase` applies context rules such as Greek final sigma, so a
+/// word-final `Σ` in a query would not match the same letter inside a longer word.
+fn fold_literal_case(text: &str) -> String {
+    if text.is_ascii() {
+        text.to_ascii_lowercase()
+    } else {
+        // Unicode simple case folding also maps word-final sigma to sigma.
+        text.chars()
+            .flat_map(char::to_lowercase)
+            .map(|character| if character == 'ς' { 'σ' } else { character })
+            .collect()
+    }
 }
 
 fn literal_search_walk(
@@ -859,12 +874,17 @@ fn literal_search_paths(
         let Ok(content) = crate::workspace_file::read_to_string(root, path) else {
             return Vec::new();
         };
+        // Lossy decoding keeps text with stray invalid bytes. Like indexing, a NUL
+        // within the sniffed prefix marks the file as binary.
+        if content.as_bytes()[..content.len().min(crate::chunking::TEXT_SNIFF_BYTES)].contains(&0) {
+            return Vec::new();
+        }
         let lines = content.lines().collect::<Vec<_>>();
         lines
             .iter()
             .enumerate()
             .filter(|(_, line)| {
-                !options.is_cancelled() && line.to_ascii_lowercase().contains(query_lower)
+                !options.is_cancelled() && fold_literal_case(line).contains(query_lower)
             })
             // File order and snippet bounds are monotonic in source order.
             // Later matches cannot enter the final bounded result set.
@@ -5601,6 +5621,27 @@ mod tests {
         }
     }
 
+    struct CountingTestEmbeddingModel384(std::sync::atomic::AtomicUsize);
+
+    impl EmbeddingModel for CountingTestEmbeddingModel384 {
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TestEmbeddingModel384.embed(text)
+        }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some("general")
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            TestEmbeddingModel384.model_identity()
+        }
+    }
+
     fn assert_hybrid_search_scope_filter(scope_dir: &str, out_of_scope_dirs: &[&str]) {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -6001,6 +6042,26 @@ mod tests {
                 .any(|hit| hit.sources.iter().any(|source| source == "neural")),
             "forced neural routing must execute neural retrieval"
         );
+
+        let counting_neural_model =
+            CountingTestEmbeddingModel384(std::sync::atomic::AtomicUsize::new(0));
+        hybrid_search(
+            &workspace,
+            "认证用户",
+            Some(&counting_neural_model),
+            &SearchOptions {
+                force_neural: true,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            counting_neural_model
+                .0
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0,
+            "forced neural routing must execute for non-ASCII queries"
+        );
     }
 
     #[test]
@@ -6310,6 +6371,49 @@ mod tests {
             literal_search(&workspace, "calculate_sales_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_sales_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_matches_invalid_utf8_files_and_unicode_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("latin1.py"),
+            b"caf\xe9 = \"rotate_latin1_secret\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("unicode.rs"),
+            "const CAFÉ_MARKER: u8 = 1;\n// ΛΟΓΟΣΤΗΣ\n",
+        )
+        .unwrap();
+        // Binary files stay excluded even though live reads decode lossily. The
+        // Greek queries have no ASCII trigram, so they walk every file.
+        let mut blob = "ΛΟΓΟΣΤΗΣ\n".as_bytes().to_vec();
+        blob.extend_from_slice(b"\0\x01\x02\n");
+        std::fs::write(tmp.path().join("blob.bin"), blob).unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = literal_search(
+            &workspace,
+            "rotate_latin1_secret",
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("latin1.py"));
+        assert!(hits[0].preview.contains("rotate_latin1_secret"));
+
+        for query in ["café_marker", "ΛΟΓΟΣ", "λογοσ", "λογος"] {
+            let hits = literal_search(&workspace, query, &SearchOptions::default()).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].file_path, PathBuf::from("unicode.rs"), "{query}");
+        }
     }
 
     #[test]
@@ -7214,6 +7318,43 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_finds_queries_without_ascii_terms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        std::fs::write(
+            tmp.path().join("notes/zh.md"),
+            "# 设计\n错误处理流程需要重试。\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("notes/ru.md"),
+            "Повторная попытка при ошибке.\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn other() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        for (query, expected) in [
+            ("错误处理", "notes/zh.md"),
+            ("повторная попытка", "notes/ru.md"),
+        ] {
+            let hits =
+                hybrid_search(&workspace, query, Some(&model), &SearchOptions::default()).unwrap();
+            assert_eq!(
+                hits.first().map(|hit| hit.file_path.as_path()),
+                Some(Path::new(expected)),
+                "{query}: {hits:?}"
+            );
+        }
     }
 
     #[test]

@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::sinks::UTF8;
-use grep_searcher::{Searcher, SearcherBuilder};
+// Lossy decoding keeps matches on lines with invalid UTF-8; UTF8 aborts the file.
+use grep_searcher::sinks::Lossy;
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder};
 use rayon::prelude::*;
 use regex_syntax::hir::{Hir, HirKind};
 use tantivy::TantivyDocument;
@@ -26,6 +26,7 @@ use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REGEX_COVERAGE_CACHE_ENTRIES: usize = 32;
 const MAX_REGEX_UNINDEXED_FILES: usize = 4_096;
+const REGEX_PARALLEL_BATCH_FILES: usize = 256;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct RegexCoverageKey {
@@ -35,9 +36,23 @@ struct RegexCoverageKey {
     skip_gitignore: bool,
 }
 
-fn regex_coverage_cache() -> &'static Mutex<HashMap<RegexCoverageKey, Arc<Vec<PathBuf>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<RegexCoverageKey, Arc<Vec<PathBuf>>>>> = OnceLock::new();
+/// `None` records that a generation has too many unindexed files to enumerate,
+/// so later queries skip the walk instead of repeating it.
+type RegexCoverage = Option<Arc<Vec<PathBuf>>>;
+
+fn regex_coverage_cache() -> &'static Mutex<HashMap<RegexCoverageKey, RegexCoverage>> {
+    static CACHE: OnceLock<Mutex<HashMap<RegexCoverageKey, RegexCoverage>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_regex_coverage(key: RegexCoverageKey, coverage: RegexCoverage) -> RegexCoverage {
+    if let Ok(mut cache) = regex_coverage_cache().lock() {
+        if cache.len() >= MAX_REGEX_COVERAGE_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, coverage.clone());
+    }
+    coverage
 }
 
 /// Index-backed regex search.
@@ -171,25 +186,7 @@ fn index_prefilter_files(
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
     let required_runs = required_literal_runs(pattern)?;
-    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
-    if use_overlay && workspace.worktree_overlay_is_stale().ok()? {
-        return None;
-    }
-    let overlay_sqlite = use_overlay
-        .then(|| open_sqlite_readonly(&workspace.overlay_sqlite_path()).ok())
-        .flatten();
-    if use_overlay && overlay_sqlite.is_none() {
-        return None;
-    }
-    let mut shadowed_paths = HashSet::new();
-    if let Some(sqlite) = &overlay_sqlite {
-        for query in [
-            "SELECT DISTINCT file_path FROM chunks",
-            "SELECT file_path FROM tombstones",
-        ] {
-            collect_sqlite_paths(sqlite, query, &mut shadowed_paths)?;
-        }
-    }
+    let (use_overlay, shadowed_paths) = overlay_shadowed_paths(workspace)?;
     let tiers = if use_overlay {
         let base = workspace.base_index_dir.as_ref()?;
         vec![
@@ -247,7 +244,54 @@ fn index_prefilter_files(
         }
     }
 
-    let uncovered = uncovered_regex_paths(workspace, use_overlay, &shadowed_paths, options)?;
+    candidate_files.extend(unindexed_matching_paths(
+        workspace,
+        use_overlay,
+        &shadowed_paths,
+        scope_filter,
+        path_matcher,
+        options,
+    )?);
+
+    let mut paths: Vec<PathBuf> = candidate_files.into_iter().collect();
+    paths.sort();
+    Some(paths)
+}
+
+/// Overlay chunks and tombstones hide the same base paths from index scans.
+fn overlay_shadowed_paths(workspace: &Workspace) -> Option<(bool, HashSet<String>)> {
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    if use_overlay && workspace.worktree_overlay_is_stale().ok()? {
+        return None;
+    }
+    let overlay_sqlite = use_overlay
+        .then(|| open_sqlite_readonly(&workspace.overlay_sqlite_path()).ok())
+        .flatten();
+    if use_overlay && overlay_sqlite.is_none() {
+        return None;
+    }
+    let mut shadowed_paths = HashSet::new();
+    if let Some(sqlite) = &overlay_sqlite {
+        for query in [
+            "SELECT DISTINCT file_path FROM chunks",
+            "SELECT file_path FROM tombstones",
+        ] {
+            collect_sqlite_paths(sqlite, query, &mut shadowed_paths)?;
+        }
+    }
+    Some((use_overlay, shadowed_paths))
+}
+
+fn unindexed_matching_paths(
+    workspace: &Workspace,
+    use_overlay: bool,
+    shadowed_paths: &HashSet<String>,
+    scope_filter: Option<&WorkspaceScope>,
+    path_matcher: &PathGlobMatcher,
+    options: &SearchOptions,
+) -> Option<Vec<PathBuf>> {
+    let uncovered = uncovered_regex_paths(workspace, use_overlay, shadowed_paths, options)?;
+    let mut paths = Vec::new();
     for rel in uncovered.iter() {
         if options.is_cancelled() {
             return Some(Vec::new());
@@ -259,12 +303,9 @@ fn index_prefilter_files(
             && (type_match != PathTypeFilterMatch::ValidateText
                 || unknown_file_is_indexable_text(&workspace.root, rel))
         {
-            candidate_files.insert(rel.clone());
+            paths.push(rel.clone());
         }
     }
-
-    let mut paths: Vec<PathBuf> = candidate_files.into_iter().collect();
-    paths.sort();
     Some(paths)
 }
 
@@ -305,8 +346,8 @@ fn uncovered_regex_paths(
         base_generation,
         skip_gitignore: options.skip_gitignore,
     };
-    if let Some(paths) = regex_coverage_cache().lock().ok()?.get(&cache_key) {
-        return Some(Arc::clone(paths));
+    if let Some(coverage) = regex_coverage_cache().lock().ok()?.get(&cache_key) {
+        return coverage.clone();
     }
 
     let sqlite_path = if use_overlay {
@@ -351,18 +392,12 @@ fn uncovered_regex_paths(
         if !indexed_paths.contains(&index_path_string(relative)) {
             uncovered.push(relative.to_path_buf());
             if uncovered.len() > MAX_REGEX_UNINDEXED_FILES {
-                return None;
+                return remember_regex_coverage(cache_key, None);
             }
         }
     }
     uncovered.sort();
-    let uncovered = Arc::new(uncovered);
-    let mut cache = regex_coverage_cache().lock().ok()?;
-    if cache.len() >= MAX_REGEX_COVERAGE_CACHE_ENTRIES {
-        cache.clear();
-    }
-    cache.insert(cache_key, Arc::clone(&uncovered));
-    Some(uncovered)
+    remember_regex_coverage(cache_key, Some(Arc::new(uncovered)))
 }
 
 fn constrain_query_to_scope(
@@ -391,6 +426,15 @@ fn constrain_query_to_scope(
     ])))
 }
 
+/// Lossy decoding keeps lines with invalid UTF-8, so binary files need an
+/// explicit filter: like grep, stop searching a file once a NUL byte is read.
+fn text_searcher() -> Searcher {
+    SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .build()
+}
+
 /// Parallel regex search over a known set of file paths.
 fn regex_search_parallel(
     workspace: &Workspace,
@@ -399,30 +443,32 @@ fn regex_search_parallel(
     max_hits: usize,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let hit_count = AtomicUsize::new(0);
-    let done = AtomicBool::new(false);
-    let results = Mutex::new(Vec::new());
-
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(true)
         .build(pattern)?;
-
-    file_paths.par_iter().for_each(|rel_path| {
-        if done.load(Ordering::Relaxed) || options.is_cancelled() {
-            return;
+    let merge_hits = |mut left: Vec<SearchHit>, right: Vec<SearchHit>| {
+        left.extend(right);
+        left.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then(a.start_line.cmp(&b.start_line))
+        });
+        left.truncate(max_hits);
+        left
+    };
+    let search_file = |rel_path: &PathBuf| {
+        if options.is_cancelled() {
+            return Vec::new();
         }
-
         let Ok(file) = crate::workspace_file::open(&workspace.root, rel_path) else {
-            return;
+            return Vec::new();
         };
-
-        let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
-
+        let mut searcher = text_searcher();
         let mut local_hits = Vec::new();
         let _ = searcher.search_file(
             &matcher,
             &file,
-            UTF8(|line_num, line| {
+            Lossy(|line_num, line| {
                 if options.is_cancelled() {
                     return Ok(false);
                 }
@@ -438,40 +484,50 @@ fn regex_search_parallel(
                     neural_requested: false,
                     neural_executed: false,
                 });
-                Ok(local_hits.len() < max_hits
-                    && !done.load(Ordering::Relaxed)
-                    && !options.is_cancelled())
+                Ok(local_hits.len() < max_hits && !options.is_cancelled())
             }),
         );
+        local_hits
+    };
 
-        if !options.is_cancelled() && !local_hits.is_empty() {
-            let n = local_hits.len();
-            let mut guard = results.lock().unwrap();
-            guard.extend(local_hits);
-            let previous = hit_count
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                    Some(count.saturating_add(n))
-                })
-                .unwrap_or_else(|count| count);
-            let total = previous.saturating_add(n);
-            if total >= max_hits {
-                done.store(true, Ordering::Relaxed);
-            }
+    if max_hits == usize::MAX {
+        // Unbounded requests read every candidate; sort once instead of per merge.
+        let mut hits = file_paths
+            .par_iter()
+            .flat_map_iter(search_file)
+            .collect::<Vec<_>>();
+        if options.is_cancelled() {
+            return Ok(Vec::new());
         }
-    });
+        hits.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then(a.start_line.cmp(&b.start_line))
+        });
+        return Ok(hits);
+    }
 
+    // Candidate paths are sorted. Finishing each batch before the next keeps a
+    // limited result equal to the first matches in path order, while a full
+    // result set can still stop before reading later batches.
+    let mut hits = Vec::new();
+    for batch in file_paths.chunks(REGEX_PARALLEL_BATCH_FILES) {
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
+        let batch_hits = batch
+            .par_iter()
+            .map(search_file)
+            .fold(Vec::new, merge_hits)
+            .reduce(Vec::new, merge_hits);
+        hits = merge_hits(hits, batch_hits);
+        if hits.len() >= max_hits {
+            break;
+        }
+    }
     if options.is_cancelled() {
         return Ok(Vec::new());
     }
-    let mut hits = results.into_inner().unwrap();
-    // Parallel collection order is nondeterministic; sort by (path, line) so a
-    // limited result set is stable across runs rather than an arbitrary subset.
-    hits.sort_by(|a, b| {
-        a.file_path
-            .cmp(&b.file_path)
-            .then(a.start_line.cmp(&b.start_line))
-    });
-    hits.truncate(max_hits);
     Ok(hits)
 }
 
@@ -487,11 +543,13 @@ fn regex_search_walk(
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(true)
         .build(pattern)?;
-    let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
+    let mut searcher = text_searcher();
 
     let mut hits = Vec::new();
 
-    let walk = crate::walker::source_walker(&workspace.root, options.skip_gitignore);
+    let mut walk = crate::walker::source_walker(&workspace.root, options.skip_gitignore);
+    // Sorted traversal makes a limited result the first matches in path order.
+    walk.sort_by_file_name(|left, right| left.cmp(right));
 
     'walk: for entry in walk.build() {
         if options.is_cancelled() {
@@ -530,7 +588,7 @@ fn regex_search_walk(
         searcher.search_file(
             &matcher,
             &file,
-            UTF8(|line_num, line| {
+            Lossy(|line_num, line| {
                 if options.is_cancelled() {
                     return Ok(false);
                 }
@@ -687,16 +745,17 @@ fn expand_regex_context_with_paths(
         {
             continue;
         }
-        let mut content = String::new();
+        let mut bytes = Vec::new();
         let Ok(bytes_read) = file
             .take(MAX_CONTEXT_FILE_BYTES.saturating_add(1))
-            .read_to_string(&mut content)
+            .read_to_end(&mut bytes)
         else {
             continue;
         };
         if bytes_read as u64 > MAX_CONTEXT_FILE_BYTES {
             continue;
         }
+        let content = crate::workspace_file::lossy_string(bytes);
         let lines = content.lines().collect::<Vec<_>>();
         if lines.is_empty() {
             continue;
@@ -719,6 +778,7 @@ fn expand_regex_context_with_paths(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
 
     use serial_test::serial;
 
@@ -793,6 +853,42 @@ mod tests {
 
         let hits = regex_search_with_options(&workspace, "cancelled_match", &options).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn regex_search_matches_lines_with_invalid_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("latin1.py"),
+            b"# header\ncaf\xe9 = \"rotate_latin1_secret\"\n# footer\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("blob.bin"),
+            b"rotate_latin1_secret\0\x01\x02\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+
+        for indexed in [false, true] {
+            if indexed {
+                index_workspace(&workspace, &HashEmbeddingModel::new(EMBEDDING_DIMENSIONS))
+                    .unwrap();
+            }
+            let options = SearchOptions {
+                context: 1,
+                ..SearchOptions::default()
+            };
+            let hits =
+                regex_search_with_options(&workspace, "rotate_latin1_secre.", &options).unwrap();
+            assert_eq!(hits.len(), 1, "indexed={indexed}");
+            assert_eq!(hits[0].start_line, 1, "indexed={indexed}");
+            assert_eq!(hits[0].end_line, 3, "indexed={indexed}");
+            assert!(hits[0].preview.contains("# footer"), "indexed={indexed}");
+        }
     }
 
     #[test]
@@ -886,29 +982,42 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
 
-        for i in 0..20 {
+        for i in 0..600 {
             std::fs::write(
-                tmp.path().join(format!("match_{i}.rs")),
+                tmp.path().join(format!("match_{i:03}.rs")),
                 format!("pub fn applyFilter_{i}() -> bool {{ true }}\n"),
             )
             .unwrap();
         }
+        let expected = ["match_000.rs", "match_001.rs", "match_002.rs"]
+            .map(PathBuf::from)
+            .to_vec();
 
         let workspace = Workspace::resolve(tmp.path()).unwrap();
-        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-        index_workspace(&workspace, &model).unwrap();
-
-        let hits = test_regex_search(
-            &workspace,
-            r"applyFilter_\d+",
-            Some(3),
-            None,
-            &[],
-            &[],
-            false,
-        )
-        .unwrap();
-        assert_eq!(hits.len(), 3);
+        // Walk fallback first, then index-backed parallel verification.
+        for indexed in [false, true] {
+            if indexed {
+                index_workspace(&workspace, &HashEmbeddingModel::new(EMBEDDING_DIMENSIONS))
+                    .unwrap();
+            }
+            for _ in 0..10 {
+                let hits = test_regex_search(
+                    &workspace,
+                    r"applyFilter_\d+",
+                    Some(3),
+                    None,
+                    &[],
+                    &[],
+                    false,
+                )
+                .unwrap();
+                let paths = hits
+                    .into_iter()
+                    .map(|hit| hit.file_path)
+                    .collect::<Vec<_>>();
+                assert_eq!(paths, expected, "indexed={indexed}");
+            }
+        }
     }
 
     #[test]
