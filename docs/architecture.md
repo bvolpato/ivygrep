@@ -540,7 +540,7 @@ Every index can use lightweight hash vectors. Neural-enabled builds also support
 pinned model-backed profiles:
 
 - default 256-dimensional static retrieval profile
-- Model2Vec PotionCode profile
+- Model2Vec PotionCode profiles (`potion-code` v1, `potion-code-v2`)
 - optional 384-dimensional Candle transformer profiles
 - platform acceleration through Accelerate, Metal, or CUDA builds
 
