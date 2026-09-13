@@ -759,7 +759,8 @@ pub fn literal_search_with_context(
         return Ok(vec![]);
     }
 
-    let query_lower = query.to_ascii_lowercase();
+    // Match regex search: case-insensitive for all Unicode letters, not only ASCII.
+    let query_lower = query.to_lowercase();
     let max_hits = options.bounded_limit().unwrap_or(500);
     let context = options.bounded_context();
     let runs = substring_candidate_runs(query);
@@ -864,7 +865,7 @@ fn literal_search_paths(
             .iter()
             .enumerate()
             .filter(|(_, line)| {
-                !options.is_cancelled() && line.to_ascii_lowercase().contains(query_lower)
+                !options.is_cancelled() && line.to_lowercase().contains(query_lower)
             })
             // File order and snippet bounds are monotonic in source order.
             // Later matches cannot enter the final bounded result set.
@@ -962,6 +963,16 @@ fn substring_candidate_files(
             }
             paths.insert(path);
         }
+    }
+    // Regex search also scans files the lexical index skipped. Unknown coverage
+    // keeps the indexed candidates rather than falling back to a full walk.
+    if let Some(unindexed) =
+        crate::regex_search::unindexed_literal_candidates(workspace, path_matcher, options)
+    {
+        paths.extend(unindexed);
+    }
+    if options.is_cancelled() {
+        return Ok(Some(Vec::new()));
     }
     let mut paths = paths
         .into_iter()
@@ -6314,6 +6325,42 @@ mod tests {
 
     #[test]
     #[serial]
+    fn literal_search_matches_invalid_utf8_files_and_unicode_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("latin1.py"),
+            b"caf\xe9 = \"rotate_latin1_secret\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("unicode.rs"),
+            "const CAFÉ_MARKER: u8 = 1;\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = literal_search(
+            &workspace,
+            "rotate_latin1_secret",
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("latin1.py"));
+        assert!(hits[0].preview.contains("rotate_latin1_secret"));
+
+        let hits = literal_search(&workspace, "café_marker", &SearchOptions::default()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("unicode.rs"));
+    }
+
+    #[test]
+    #[serial]
     fn literal_search_discards_results_when_pre_cancelled() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -7214,6 +7261,43 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_finds_queries_without_ascii_terms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        std::fs::write(
+            tmp.path().join("notes/zh.md"),
+            "# 设计\n错误处理流程需要重试。\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("notes/ru.md"),
+            "Повторная попытка при ошибке.\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn other() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        for (query, expected) in [
+            ("错误处理", "notes/zh.md"),
+            ("повторная попытка", "notes/ru.md"),
+        ] {
+            let hits =
+                hybrid_search(&workspace, query, Some(&model), &SearchOptions::default()).unwrap();
+            assert_eq!(
+                hits.first().map(|hit| hit.file_path.as_path()),
+                Some(Path::new(expected)),
+                "{query}: {hits:?}"
+            );
+        }
     }
 
     #[test]

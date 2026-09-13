@@ -151,9 +151,9 @@ impl FileContentCache {
         }
 
         // Disk reads and line indexing stay outside the shared cache lock.
-        let mut content = String::new();
-        file.read_to_string(&mut content).ok()?;
-        let content = Arc::<str>::from(content);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        let content = Arc::<str>::from(crate::workspace_file::lossy_string(bytes));
         let lines = line_spans(&content).into();
         let cached = CachedFileContent {
             stamp,

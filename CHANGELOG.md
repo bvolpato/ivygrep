@@ -8,6 +8,13 @@ All notable changes to ivygrep are documented in this file.
 
 - **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
 
+### Fixed
+
+- Literal and regex searches match files containing invalid UTF-8, as indexing already did, and regex context expansion and previews decode those files lossily instead of dropping them.
+- Literal search folds case for all Unicode letters, matching regex search, and also scans files the lexical index skips: minified bundles, files over the indexing size limit, and unknown text types.
+- Regex searches with a limit return the first matches in path order on every run instead of a thread-scheduling-dependent subset.
+- Hybrid queries without ASCII letters or digits, such as CJK or Cyrillic text, use exact substring matching instead of returning no results.
+
 ## [1.2.14] - 2026-09-10
 
 ### Fixed

@@ -18,6 +18,16 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     if query_text.is_empty() {
         return Ok(Vec::new());
     }
+    // Lexical, path, and hash signals come from ASCII code tokens. A query with
+    // no ASCII letter or digit (CJK, Cyrillic, symbols) has none of them, and
+    // semantic-only hits need that support, so exact substring matching is the
+    // only pass that can find it.
+    if !query_text
+        .chars()
+        .any(|character| character.is_ascii_alphanumeric())
+    {
+        return literal_search_with_context(ctx, workspace, query_text, options);
+    }
 
     let t0 = std::time::Instant::now();
     let bounded_limit = options.bounded_limit();

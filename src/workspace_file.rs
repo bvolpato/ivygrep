@@ -48,10 +48,14 @@ pub(crate) fn open(root: &Path, path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Invalid UTF-8 is replaced, matching how indexing decodes source files.
 pub(crate) fn read_to_string(root: &Path, path: &Path) -> io::Result<String> {
-    let mut content = String::new();
-    open(root, path)?.read_to_string(&mut content)?;
-    Ok(content)
+    Ok(lossy_string(read(root, path)?))
+}
+
+pub(crate) fn lossy_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 pub(crate) fn read(root: &Path, path: &Path) -> io::Result<Vec<u8>> {
