@@ -340,6 +340,21 @@ partial result set. They preserve path/span ordering without materializing every
 matching snippet; source-file reads and explicit unbounded output retain their
 existing memory costs.
 
+Literal and regex searches also verify files the indexer walked but stored
+without chunks, such as minified bundles. Candidates are Merkle snapshot paths
+from the last completed publication that have no effective chunks (overlay
+chunks plus untombstoned base chunks), so ignore and exclude decisions are the
+indexer's own rather than a second walk's. Coverage is cached per publication
+(index and base generations plus the snapshot file identity) and skipped while a
+publication marker exists. Literal search drops empty files and files with a NUL
+in the sniffed prefix once per publication. Regex search also walks once per
+publication for files the snapshot never recorded: files over the 16 MiB
+indexing limit, files created since publication, and ignored files when a query
+skips ignore rules the index applied. Each query rechecks those walked files
+against live ignore rules, so a new exclude hides them even when reindexing has
+nothing to publish. Above 4,096 unindexed files, literal keeps indexed
+candidates and regex walks the workspace.
+
 Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,
 filtering, grouping, and output types where appropriate.
