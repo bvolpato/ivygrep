@@ -529,7 +529,7 @@ fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<Strin
     let mut go_import_block = false;
     let mut javascript_static_declaration = false;
     let mut php_import_declaration: Option<String> = None;
-    let mut rust_grouped_import: Option<(String, usize)> = None;
+    let mut rust_grouped_import: Option<(String, usize, bool)> = None;
     let mut rust_module_path: Option<String> = None;
     let mut scala_grouped_import: Option<(String, usize)> = None;
     let mut starlark_load = false;
@@ -540,6 +540,7 @@ fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<Strin
         }
         match language {
             "rust" => {
+                let indented = raw_line.starts_with(char::is_whitespace);
                 let mut line = line;
                 if line.starts_with("#[path") {
                     rust_module_path = first_quoted_value(line);
@@ -552,7 +553,7 @@ fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<Strin
                     }
                 }
                 let line = strip_rust_visibility(line);
-                if let Some((grouped, depth)) = rust_grouped_import.as_mut() {
+                if let Some((grouped, depth, _)) = rust_grouped_import.as_mut() {
                     let value = line
                         .split("//")
                         .next()
@@ -564,8 +565,8 @@ fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<Strin
                     *depth += value.matches('{').count();
                     *depth = depth.saturating_sub(value.matches('}').count());
                     if *depth == 0 {
-                        let (grouped, _) = rust_grouped_import.take().unwrap();
-                        specs.extend(expand_grouped_spec(&grouped));
+                        let (grouped, _, indented) = rust_grouped_import.take().unwrap();
+                        specs.extend(rust_use_specs(&grouped, indented));
                     }
                     continue;
                 }
@@ -592,9 +593,9 @@ fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<Strin
                         .count()
                         .saturating_sub(value.matches('}').count());
                     if depth > 0 {
-                        rust_grouped_import = Some((value.to_string(), depth));
+                        rust_grouped_import = Some((value.to_string(), depth, indented));
                     } else {
-                        specs.extend(expand_grouped_spec(value));
+                        specs.extend(rust_use_specs(value, indented));
                     }
                 } else if !line.starts_with("#[") {
                     rust_module_path = None;
@@ -834,6 +835,19 @@ fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<Strin
         .filter(|spec| !spec.trim().is_empty())
         .take(128)
         .collect()
+}
+
+/// Expands a Rust `use` tree. The line scanner cannot see inline module scope:
+/// in `mod tests { use super::helper; }`, `super::` names the file's own
+/// module. Top-level declarations start at column 0, so `self::`/`super::`
+/// paths from indented declarations are dropped instead of resolving against
+/// the wrong module (function-scoped `use super::...` loses its edge).
+fn rust_use_specs(value: &str, indented: bool) -> Vec<String> {
+    let mut specs = expand_grouped_spec(value);
+    if indented {
+        specs.retain(|spec| !spec.starts_with("self::") && !spec.starts_with("super::"));
+    }
+    specs
 }
 
 fn strip_rust_visibility(line: &str) -> &str {
@@ -1265,6 +1279,15 @@ fn resolve_local_dependency(
     {
         normalized = normalized.replace('.', "/");
     }
+    if language == "rust" && (normalized.starts_with("self/") || normalized.starts_with("super/")) {
+        return resolve_rust_module_relative(
+            root,
+            snapshot,
+            source_path,
+            &normalized,
+            local_rust_crate,
+        );
+    }
     let mut package_relative = false;
     if language == "rust"
         && let Some(crate_context) = local_rust_crate
@@ -1319,14 +1342,6 @@ fn resolve_local_dependency(
         .or_else(|| normalized.strip_prefix("~/"))
         .unwrap_or(&normalized)
         .to_string();
-    let mut super_prefix = String::new();
-    while let Some(rest) = normalized.strip_prefix("super/") {
-        super_prefix.push_str("../");
-        normalized = rest.to_string();
-    }
-    if !super_prefix.is_empty() {
-        normalized = format!("{super_prefix}{normalized}");
-    }
     normalized = normalized.trim_start_matches("./").to_string();
 
     let mut targets = vec![PathBuf::from(&normalized)];
@@ -1982,6 +1997,64 @@ fn rust_module_declaration_base(source_path: &Path) -> PathBuf {
         Some("lib" | "main" | "mod" | "build") | None => parent.to_path_buf(),
         Some(_) if parent.as_os_str().is_empty() || crate_root_directory => parent.to_path_buf(),
         Some(stem) => parent.join(stem),
+    }
+}
+
+/// `self::` and `super::` follow the module tree, not the directory tree:
+/// `src/a/b.rs` is `crate::a::b`, so `super::Config` lives in `src/a.rs` or
+/// `src/a/mod.rs`.
+fn resolve_rust_module_relative(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    source_path: &Path,
+    spec: &str,
+    local_rust_crate: Option<&RustCrateContext>,
+) -> Option<PathBuf> {
+    let crate_root = local_rust_crate
+        .map(|context| context.crate_root.clone())
+        .unwrap_or_else(|| rust_default_crate_root(root, snapshot, source_path));
+    let crate_directory = crate_root.parent().unwrap_or_else(|| Path::new(""));
+    let module_file = |module: &Path| {
+        [module.with_extension("rs"), module.join("mod.rs")]
+            .iter()
+            .find_map(|candidate| existing_workspace_file(root, snapshot, candidate))
+    };
+    // Directory holding the children of the module named by the spec prefix.
+    let mut module_directory = if crate_root == source_path {
+        crate_directory.to_path_buf()
+    } else {
+        rust_module_declaration_base(source_path)
+    };
+    // A `#[path]` module's parent is the declaring module, which is not
+    // visible from this file. Resolve only when the conventional parent module
+    // file exists; a `#[path]` target placed beside one is indistinguishable
+    // and still resolves by directory.
+    if module_directory != crate_directory {
+        let parent_directory = module_directory.parent().unwrap_or_else(|| Path::new(""));
+        if parent_directory == crate_directory {
+            existing_workspace_file(root, snapshot, &crate_root)?;
+        } else {
+            module_file(parent_directory)?;
+        }
+    }
+    let mut module_path = spec.strip_prefix("self/").unwrap_or(spec);
+    while let Some(rest) = module_path.strip_prefix("super/") {
+        if module_directory == crate_directory || !module_directory.pop() {
+            return None;
+        }
+        module_path = rest;
+    }
+    let mut item = Path::new(module_path);
+    while !item.as_os_str().is_empty() {
+        if let Some(relative) = module_file(&module_directory.join(item)) {
+            return Some(relative);
+        }
+        item = item.parent().unwrap_or_else(|| Path::new(""));
+    }
+    if module_directory == crate_directory {
+        existing_workspace_file(root, snapshot, &crate_root)
+    } else {
+        module_file(&module_directory)
     }
 }
 
@@ -2663,13 +2736,15 @@ fn recent_cochange_edges(workspace: &Workspace, seed_paths: &[PathBuf]) -> Vec<R
     if !workspace.root.join(".git").exists() {
         return Vec::new();
     }
-    const COMMIT_MARKER: &str = "__IVYGREP_COMMIT__";
     let Ok(log) = Command::new("git")
         .args([
             "log",
+            "-z",
+            // `log.showSignature` would print verification lines to stdout.
+            "--no-show-signature",
             &format!("--max-count={MAX_COCHANGE_COMMITS}"),
             "--no-merges",
-            "--format=format:__IVYGREP_COMMIT__",
+            &format!("--format=format:{COCHANGE_COMMIT_MARKER}"),
             "--name-only",
             "--no-renames",
             "HEAD",
@@ -2685,27 +2760,16 @@ fn recent_cochange_edges(workspace: &Workspace, seed_paths: &[PathBuf]) -> Vec<R
 
     let seeds = seed_paths.iter().cloned().collect::<BTreeSet<_>>();
     let mut counts = HashMap::<(PathBuf, PathBuf), usize>::new();
-    let mut commit_paths = BTreeSet::new();
-    let record_commit = |paths: &BTreeSet<PathBuf>, counts: &mut HashMap<_, _>| {
+    for paths in cochange_commit_paths(&log.stdout) {
         let commit_seeds = paths.intersection(&seeds).cloned().collect::<Vec<_>>();
         for seed in commit_seeds {
-            for path in paths {
+            for path in &paths {
                 if path != &seed && workspace.root.join(path).is_file() {
                     *counts.entry((seed.clone(), path.clone())).or_default() += 1;
                 }
             }
         }
-    };
-    for line in String::from_utf8_lossy(&log.stdout).lines() {
-        let line = line.trim();
-        if line == COMMIT_MARKER {
-            record_commit(&commit_paths, &mut counts);
-            commit_paths.clear();
-        } else if !line.is_empty() {
-            commit_paths.insert(PathBuf::from(line));
-        }
     }
-    record_commit(&commit_paths, &mut counts);
 
     let mut related = counts.into_iter().collect::<Vec<_>>();
     related.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
@@ -2719,6 +2783,40 @@ fn recent_cochange_edges(workspace: &Workspace, seed_paths: &[PathBuf]) -> Vec<R
             cochange_count: count,
         })
         .collect()
+}
+
+const COCHANGE_COMMIT_MARKER: &str = "__IVYGREP_COMMIT__";
+
+/// Splits `git log -z --name-only` output into the paths of each commit. `-z`
+/// emits paths verbatim; line output C-quotes non-ASCII names. Each commit
+/// record starts with the marker line before its first path; signature lines
+/// printed before the marker (`log.showSignature`) are ignored.
+fn cochange_commit_paths(stdout: &[u8]) -> Vec<BTreeSet<PathBuf>> {
+    let mut commits = Vec::new();
+    let mut paths = BTreeSet::new();
+    for record in stdout.split(|byte| *byte == 0) {
+        let record = String::from_utf8_lossy(record);
+        let marker_end = record
+            .match_indices(COCHANGE_COMMIT_MARKER)
+            .find(|(index, _)| *index == 0 || record[..*index].ends_with('\n'))
+            .map(|(index, marker)| index + marker.len());
+        let path = match marker_end {
+            Some(end) => {
+                if !paths.is_empty() {
+                    commits.push(std::mem::take(&mut paths));
+                }
+                record[end..].trim_start_matches(['\r', '\n'])
+            }
+            None => &record[..],
+        };
+        if !path.is_empty() {
+            paths.insert(PathBuf::from(path));
+        }
+    }
+    if !paths.is_empty() {
+        commits.push(paths);
+    }
+    commits
 }
 
 pub(crate) fn persist_file_edge(
@@ -4563,6 +4661,123 @@ const char *example = "\
     }
 
     #[test]
+    fn rust_self_and_super_imports_follow_module_tree() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            ("src/lib.rs", "pub mod a;\npub mod root;\n"),
+            ("src/root.rs", "pub struct Root;\n"),
+            (
+                "src/a/mod.rs",
+                "pub mod b;\npub mod sibling;\npub struct Config;\n",
+            ),
+            ("src/a/sibling.rs", "pub struct Sibling;\n"),
+            ("src/a/b/child.rs", "pub struct Child;\n"),
+            ("src/a/child.rs", "pub struct WrongChild;\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        let dependencies = |source: &str, content: &str| {
+            extract_file_edges(root.path(), None, Path::new(source), content)
+                .into_iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path)
+                .collect::<BTreeSet<_>>()
+        };
+
+        assert_eq!(
+            dependencies(
+                "src/a/b.rs",
+                "use super::Config;\nuse super::sibling::Sibling;\nuse self::child::Child;\n",
+            ),
+            BTreeSet::from([
+                PathBuf::from("src/a/b/child.rs"),
+                PathBuf::from("src/a/mod.rs"),
+                PathBuf::from("src/a/sibling.rs"),
+            ])
+        );
+        assert_eq!(
+            dependencies(
+                "src/a/mod.rs",
+                "use super::root::Root;\nuse super::Missing;\nuse super::super::Invalid;\n",
+            ),
+            BTreeSet::from([PathBuf::from("src/lib.rs"), PathBuf::from("src/root.rs")])
+        );
+    }
+
+    #[test]
+    fn rust_indented_relative_imports_do_not_resolve() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            ("src/lib.rs", "pub mod a;\npub mod foo;\n"),
+            ("src/foo.rs", "pub fn helper() {}\n"),
+            ("src/a/mod.rs", "pub mod b;\npub struct Config;\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        let dependencies = |source: &str, content: &str| {
+            extract_file_edges(root.path(), None, Path::new(source), content)
+                .into_iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path)
+                .collect::<BTreeSet<_>>()
+        };
+
+        // `super::` inside the inline `mod tests` names `src/foo.rs` itself.
+        assert_eq!(
+            dependencies(
+                "src/foo.rs",
+                "pub fn helper() {}\n\n#[cfg(test)]\nmod tests {\n    use super::helper;\n    \
+                 use self::support::Fixture;\n    use super::{\n        helper as h,\n        \
+                 Other,\n    };\n}\n",
+            ),
+            BTreeSet::new()
+        );
+        assert_eq!(
+            dependencies(
+                "src/a/b.rs",
+                "use super::Config;\n\n#[cfg(test)]\nmod tests {\n    use super::super::Config;\n}\n",
+            ),
+            BTreeSet::from([PathBuf::from("src/a/mod.rs")])
+        );
+    }
+
+    #[test]
+    fn rust_path_attribute_modules_skip_relative_imports() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            (
+                "src/lib.rs",
+                "#[path = \"alternate/child.rs\"]\nmod child;\nmod sibling;\n",
+            ),
+            ("src/sibling.rs", "pub struct Sibling;\n"),
+            ("src/alternate/child.rs", "use super::sibling::Sibling;\n"),
+            ("src/alternate/sibling.rs", "pub struct WrongSibling;\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+
+        // `super` is the declaring `src/lib.rs`, which the child cannot see;
+        // `src/alternate/sibling.rs` would be an invented edge.
+        let dependencies = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/alternate/child.rs"),
+            "use super::sibling::Sibling;\n",
+        )
+        .into_iter()
+        .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+        .map(|edge| edge.target_path)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(dependencies, BTreeSet::new());
+    }
+
+    #[test]
     fn go_module_imports_resolve_arbitrary_package_files() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("internal/auth")).unwrap();
@@ -4708,6 +4923,63 @@ const char *example = "\
                 && edge.target_path == Path::new("tests/auth.rs")
                 && edge.cochange_count == 1
         }));
+    }
+
+    #[test]
+    fn cochange_edges_keep_non_ascii_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/auth.rs"), "pub fn auth() {}\n").unwrap();
+        fs::write(root.path().join("src/café.rs"), "pub fn cafe() {}\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=ivygrep test",
+                        "-c",
+                        "user.email=ivygrep@example.invalid",
+                        "-c",
+                        "commit.gpgsign=false",
+                    ])
+                    .args(args)
+                    .current_dir(root.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "fixture"]);
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let edges = recent_cochange_edges(&workspace, &[PathBuf::from("src/auth.rs")]);
+        assert!(edges.iter().any(|edge| {
+            edge.source_path == Path::new("src/auth.rs")
+                && edge.target_path == Path::new("src/café.rs")
+        }));
+    }
+
+    #[test]
+    fn cochange_log_ignores_signature_lines_before_commit_marker() {
+        // `log.showSignature=true` prints verification lines before each
+        // signed commit's marker, even with `-z`.
+        let stdout = "gpg: Signature made Sat Sep 12 10:00:00 2026 UTC\n\
+                      gpg: Good signature from \"Dev <dev@example.invalid>\"\n\
+                      __IVYGREP_COMMIT__\nsrc/auth.rs\0src/café.rs\0\0\
+                      Good \"git\" signature for dev@example.invalid with ED25519 key SHA256:abc\n\
+                      __IVYGREP_COMMIT__\nsrc/session.rs\0\0\
+                      __IVYGREP_COMMIT__\0\
+                      __IVYGREP_COMMIT__\nREADME.md\0src/auth.rs\0";
+        assert_eq!(
+            cochange_commit_paths(stdout.as_bytes()),
+            [
+                BTreeSet::from([PathBuf::from("src/auth.rs"), PathBuf::from("src/café.rs")]),
+                BTreeSet::from([PathBuf::from("src/session.rs")]),
+                BTreeSet::from([PathBuf::from("README.md"), PathBuf::from("src/auth.rs")]),
+            ]
+        );
     }
 
     #[test]
