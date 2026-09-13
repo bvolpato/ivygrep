@@ -22,6 +22,10 @@ const MIN_CAPACITY: usize = 1_024;
 const MAX_CAPACITY_GROWTH: usize = 262_144;
 const MAX_CAPACITY_GROWTH_BYTES: usize = 128 * 1024 * 1024;
 const PARALLEL_SCORE_MIN_KEYS: usize = 5_000;
+const PARALLEL_INSERT_MIN_STORE_SIZE: usize = 1_024;
+// Concurrent HNSW inserts lose ANN recall as concurrency grows. Four keeps
+// 50K-vector neural recall@10 within 0.5 points of serial; eight does not.
+const MAX_PARALLEL_INSERT_THREADS: usize = 4;
 const BACKUP_EXTENSION: &str = "usearch.bak";
 
 type DotAndNormSquared = fn(&[f32], &[f32]) -> (f32, f32);
@@ -420,6 +424,50 @@ impl VectorStore {
         self.validate_vector(&vector)?;
         self.ensure_capacity_for_insert()?;
         self.index.add(key, &vector)?;
+        Ok(())
+    }
+
+    /// Add vectors without checking for duplicates, inserting concurrently on
+    /// the current rayon pool. Keys must be unique and absent from the store.
+    ///
+    /// Concurrent inserts do not reproduce the serial graph, and recall drops
+    /// as concurrency grows, so at most `MAX_PARALLEL_INSERT_THREADS` inserts
+    /// run at once. Small stores keep serial inserts so fixtures and tiny
+    /// workspaces build identical files.
+    pub fn add_batch_unchecked(&mut self, entries: Vec<(u64, Vec<f32>)>) -> Result<()> {
+        let lanes = rayon::current_num_threads().min(MAX_PARALLEL_INSERT_THREADS);
+        if lanes <= 1
+            || entries.len() <= 1
+            || self.index.size().saturating_add(entries.len()) < PARALLEL_INSERT_MIN_STORE_SIZE
+        {
+            for (key, vector) in entries {
+                self.add_unchecked(key, vector)?;
+            }
+            return Ok(());
+        }
+
+        for (_, vector) in &entries {
+            self.validate_vector(vector)?;
+        }
+        // Native reserve must not race with inserts, and each concurrent
+        // insert needs its own native thread context.
+        while let Some(target) = self.next_capacity(entries.len()) {
+            self.index.reserve(target)?;
+        }
+        self.index
+            .reserve_capacity_and_threads(self.index.capacity(), lanes)?;
+        let index = &self.index;
+        // Each lane inserts sequentially, bounding concurrency to `lanes`.
+        let inserted = entries
+            .par_chunks(entries.len().div_ceil(lanes))
+            .try_for_each(|lane| {
+                lane.iter()
+                    .try_for_each(|(key, vector)| index.add(*key, vector))
+            });
+        // Restore USearch's default thread contexts. A narrower insert ring
+        // would otherwise cap later concurrent operations on this store.
+        self.index.reserve(self.index.capacity())?;
+        inserted?;
         Ok(())
     }
 
@@ -1238,6 +1286,48 @@ mod tests {
         store.reserve_additional(requested).unwrap();
 
         assert_eq!(store.index.capacity(), requested);
+    }
+
+    #[test]
+    fn parallel_batch_insert_manages_native_thread_contexts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 8, ScalarKind::F16, VectorTier::Hash).unwrap();
+        let entries = (0..4 * PARALLEL_INSERT_MIN_STORE_SIZE as u64)
+            .map(|key| {
+                let vector = (0..8u64)
+                    .map(|dimension| ((key + 1) * (dimension + 3) % 17) as f32 - 8.5)
+                    .collect::<Vec<_>>();
+                (key, vector)
+            })
+            .collect::<Vec<_>>();
+        let (wide_batch, narrow_batch) = entries.split_at(3 * PARALLEL_INSERT_MIN_STORE_SIZE);
+        let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+        let pool = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+        };
+
+        // A wide pool must stay within native thread contexts.
+        pool(2 * cpus)
+            .install(|| store.add_batch_unchecked(wide_batch.to_vec()))
+            .unwrap();
+        // A narrower insert pool must not cap later concurrent searches.
+        pool(2)
+            .install(|| store.add_batch_unchecked(narrow_batch.to_vec()))
+            .unwrap();
+        pool(cpus).install(|| {
+            entries.par_iter().for_each(|(key, vector)| {
+                assert!(!store.search(vector, 1).is_empty(), "key {key}");
+            });
+        });
+
+        assert_eq!(store.size(), entries.len());
+        for (key, vector) in &entries {
+            assert!(store.score(*key, vector).unwrap() > 0.99, "key {key}");
+        }
     }
 
     #[test]

@@ -2509,9 +2509,8 @@ fn enhance_workspace_hash_with_snapshot(
             .map(|(_, text)| text.as_str())
             .collect::<Vec<_>>();
         let embeddings = hash_model.embed_batch(&texts);
-        for ((key, _), embedding) in batch.iter().zip(embeddings) {
-            store.add_unchecked(*key, embedding)?;
-        }
+        let entries = batch.iter().map(|(key, _)| *key).zip(embeddings).collect();
+        indexing_pool().install(|| store.add_batch_unchecked(entries))?;
         *count += batch.len();
         batch.clear();
         Ok(())
@@ -2750,12 +2749,14 @@ fn enhance_workspace_neural_with_snapshot(
 
         let embeddings = neural_model.embed_batch(&texts);
 
+        let mut entries = Vec::with_capacity(batch.len());
         for ((key, _), embedding) in batch.iter().zip(embeddings) {
             if embedding.iter().all(|value| value.abs() <= f32::EPSILON) {
                 anyhow::bail!("neural embedding produced a zero vector for key {key}");
             }
-            v_index.add_unchecked(*key, embedding)?;
+            entries.push((*key, embedding));
         }
+        indexing_pool().install(|| v_index.add_batch_unchecked(entries))?;
         *count += batch.len();
         batch.clear();
         Ok(())
