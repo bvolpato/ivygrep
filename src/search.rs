@@ -4604,19 +4604,9 @@ impl ChunkBoostContext {
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase());
 
-        let mut offset = 0usize;
-        let first_line_range = text_lower.split_inclusive('\n').find_map(|line| {
-            let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
-            let line_without_newline = line_without_newline
-                .strip_suffix('\r')
-                .unwrap_or(line_without_newline);
-            let trimmed = line_without_newline.trim();
-            let range =
-                (!trimmed.is_empty() && !trimmed.starts_with("//") && !trimmed.starts_with('#'))
-                    .then_some(offset..offset.saturating_add(line_without_newline.len()));
-            offset = offset.saturating_add(line.len());
-            range
-        });
+        // ASCII lowercasing keeps byte offsets, so the signature range of the
+        // original text indexes `text_lower` too.
+        let first_line_range = crate::text::first_code_line_range(&chunk.text);
 
         let (text_compact, path_compact) = if include_compact {
             (
@@ -9174,6 +9164,17 @@ export function registerCommands(p: Plugin) {
         );
         let bctx = ChunkBoostContext::new(&chunk);
         assert_eq!(bctx.first_line(), "pub fn handle_error() {}");
+
+        let decorated = make_test_chunk(
+            "b",
+            "app/users.py",
+            "// app/users.py\n\n@router.get(\n    \"/users/{id}\",\n)\ndef get_user():\n    return 1",
+            "Function",
+        );
+        assert_eq!(
+            ChunkBoostContext::new(&decorated).first_line(),
+            "def get_user():"
+        );
     }
 
     #[test]

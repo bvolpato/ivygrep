@@ -757,7 +757,9 @@ fn focus_hit_on_symbol(
     context_lines: usize,
     prefer_last: bool,
 ) -> SearchHit {
-    strip_path_header(&mut hit);
+    // Definition and caller previews arrive without the stored chunk header,
+    // and reference previews are single live lines. Stripping again would
+    // drop a real `// <path>` first line.
     let lines = hit.preview.lines().collect::<Vec<_>>();
     let symbol = symbol.to_ascii_lowercase();
     let matches = lines
@@ -784,13 +786,6 @@ fn focus_hit_on_symbol(
         .saturating_add(end.saturating_sub(start.saturating_add(1)));
     hit.preview = lines[start..end].join("\n");
     hit
-}
-
-fn strip_path_header(hit: &mut SearchHit) {
-    let preview = crate::chunking::strip_chunk_header(&hit.preview, &hit.file_path);
-    if preview.len() != hit.preview.len() {
-        hit.preview = preview.to_string();
-    }
 }
 
 fn add_candidate(
@@ -2720,6 +2715,30 @@ mod tests {
             focused.preview,
             "    prepare();\n    build_context_bundle();\n    finish();"
         );
+    }
+
+    #[test]
+    fn symbol_focus_keeps_a_real_path_comment_first_line() {
+        // The file itself starts with `// <its own path>` and a blank line.
+        let path = Path::new("src/a.rs");
+        let source = "// src/a.rs\n\nfn run() {\n    build_context_bundle();\n}";
+        let stored = format!("// src/a.rs\n\n{source}");
+        let hit = SearchHit {
+            file_path: path.to_path_buf(),
+            start_line: 1,
+            end_line: 5,
+            // Symbol lookups strip the stored header once.
+            preview: crate::chunking::strip_chunk_header(&stored, path).to_string(),
+            reason: String::new(),
+            score: 1.0,
+            sources: vec!["symbol".to_string()],
+            neural_requested: false,
+            neural_executed: false,
+        };
+        let focused = focus_hit_on_symbol(hit, "build_context_bundle", 10, false);
+        assert_eq!(focused.start_line, 1);
+        assert_eq!(focused.end_line, 5);
+        assert_eq!(focused.preview, source);
     }
 
     #[test]

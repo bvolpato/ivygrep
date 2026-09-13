@@ -465,8 +465,12 @@ fn irregular_singular(token: &str) -> Option<&'static str> {
 pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
     let mut offset = 0;
     let mut in_block_comment = false;
+    // Brackets still open from a multi-line annotation such as `@router.get(`.
+    let mut open_brackets = 0usize;
 
     for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
         let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
         let line_without_newline = line_without_newline
             .strip_suffix('\r')
@@ -477,22 +481,40 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
             if trimmed.contains("*/") {
                 in_block_comment = false;
             }
-            offset += line.len();
             continue;
         }
 
-        if trimmed.starts_with("/*") {
-            if !trimmed.contains("*/") {
+        let mut rest = trimmed;
+        if open_brackets > 0 {
+            match close_open_brackets(trimmed, open_brackets) {
+                Ok(end) => {
+                    open_brackets = 0;
+                    rest = trimmed[end..].trim_start();
+                }
+                Err(still_open) => {
+                    open_brackets = still_open;
+                    continue;
+                }
+            }
+        }
+
+        if rest.starts_with("/*") {
+            if !rest.contains("*/") {
                 in_block_comment = true;
             }
-            offset += line.len();
             continue;
         }
 
         // Annotations and attributes that share a line with the declaration
         // (`@Override public void run() {`) are stripped rather than hiding
-        // the declaration behind them.
-        let code = strip_leading_annotations(trimmed);
+        // the declaration behind them. Unclosed ones continue on later lines.
+        let code = match strip_annotation_prefix(rest) {
+            Ok(code) => code,
+            Err(still_open) => {
+                open_brackets = still_open;
+                continue;
+            }
+        };
         if code.is_empty()
             || code.starts_with("//")
             || code.starts_with('#')
@@ -501,14 +523,15 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
             || code.starts_with("*/")
             || code.starts_with('[') && code.ends_with(']')
         {
-            offset += line.len();
             continue;
         }
 
         let leading_bytes = line_without_newline.len() - line_without_newline.trim_start().len()
             + (trimmed.len() - code.len());
         let trailing_bytes = line_without_newline.len() - line_without_newline.trim_end().len();
-        return Some(offset + leading_bytes..offset + line_without_newline.len() - trailing_bytes);
+        return Some(
+            line_start + leading_bytes..line_start + line_without_newline.len() - trailing_bytes,
+        );
     }
 
     None
@@ -517,7 +540,13 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
 /// Strips leading annotation / decorator / attribute tokens (`@Name`,
 /// `@Name(...)`, `#[...]`) from a trimmed line and returns the remaining
 /// declaration text. A line that only holds annotations becomes empty.
-pub fn strip_leading_annotations(mut line: &str) -> &str {
+pub fn strip_leading_annotations(line: &str) -> &str {
+    strip_annotation_prefix(line).unwrap_or_default()
+}
+
+/// Like [`strip_leading_annotations`], but an annotation left unclosed at the
+/// end of the line reports how many brackets remain open.
+fn strip_annotation_prefix(mut line: &str) -> Result<&str, usize> {
     loop {
         if let Some(rest) = line.strip_prefix('@') {
             let identifier_end = rest
@@ -526,42 +555,55 @@ pub fn strip_leading_annotations(mut line: &str) -> &str {
                 })
                 .unwrap_or(rest.len());
             if identifier_end == 0 {
-                return line;
+                return Ok(line);
             }
             let mut rest = &rest[identifier_end..];
             if rest.starts_with('(') {
-                match matching_close_offset(rest, b'(', b')') {
-                    Some(close) => rest = &rest[close + 1..],
-                    None => return "",
-                }
+                rest = &rest[close_open_brackets(rest, 0)?..];
             }
             line = rest.trim_start();
             continue;
         }
-        if line.starts_with("#[") {
-            match matching_close_offset(line, b'[', b']') {
-                Some(close) => line = line[close + 1..].trim_start(),
-                None => return "",
-            }
+        if let Some(rest) = line.strip_prefix('#')
+            && rest.starts_with('[')
+        {
+            line = rest[close_open_brackets(rest, 0)?..].trim_start();
             continue;
         }
-        return line;
+        return Ok(line);
     }
 }
 
-fn matching_close_offset(text: &str, open: u8, close: u8) -> Option<usize> {
-    let mut depth = 0usize;
+/// Scans `text` with `open` brackets already unclosed. Returns the byte offset
+/// just past the bracket that closes them all, or the count still open at the
+/// end. `()`, `[]`, and `{}` share one depth, and quoted strings are skipped.
+fn close_open_brackets(text: &str, mut open: usize) -> Result<usize, usize> {
+    let mut quote = None;
+    let mut escaped = false;
     for (offset, byte) in text.bytes().enumerate() {
-        if byte == open {
-            depth += 1;
-        } else if byte == close {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(offset);
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
             }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => quote = Some(byte),
+            b'(' | b'[' | b'{' => open += 1,
+            b')' | b']' | b'}' => {
+                open = open.saturating_sub(1);
+                if open == 0 {
+                    return Ok(offset + 1);
+                }
+            }
+            _ => {}
         }
     }
-    None
+    Err(open)
 }
 
 #[cfg(test)]
@@ -668,6 +710,40 @@ mod tests {
         let range = first_code_line_range(text).unwrap();
 
         assert_eq!(&text[range], "public void RegisterHandler() {}");
+    }
+
+    #[test]
+    fn first_code_line_skips_multiline_annotations() {
+        for (text, expected) in [
+            (
+                "// app/users.py\n\n@router.get(\n    \"/users/{id}\",\n    response_model=User,\n)\ndef get_user():\n",
+                "def get_user():",
+            ),
+            (
+                "@pytest.mark.parametrize(\n    \"value\",\n    [\"(\", \"]\"],  # brackets in strings\n)\n@property\nasync def check(value):\n",
+                "async def check(value):",
+            ),
+            (
+                "@RequestMapping(\n    value = \"/users\",\n    method = { GET, POST }\n)\npublic List<User> list() {\n",
+                "public List<User> list() {",
+            ),
+            (
+                "@SuppressWarnings({\n    \"unchecked\"\n}) @Override public void run() {\n",
+                "public void run() {",
+            ),
+            (
+                "#[cfg_attr(\n    feature = \"serde\",\n    derive(Serialize)\n)]\npub fn encode() {}\n",
+                "pub fn encode() {}",
+            ),
+            ("@app.route(\"/x(\")\ndef handler():\n", "def handler():"),
+            (
+                "[Obsolete(\"use Run\")]\npublic void Start() {}\n",
+                "public void Start() {}",
+            ),
+        ] {
+            let range = first_code_line_range(text).unwrap();
+            assert_eq!(&text[range], expected, "{text}");
+        }
     }
 
     fn collect_tokens(text: &str) -> Vec<String> {

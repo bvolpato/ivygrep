@@ -989,7 +989,8 @@ fn try_tree_sitter_chunk_source_with_timeout(
         ranges = coalesce_inline_definition_ranges(ranges);
     } else {
         let mut unique_ranges = HashSet::with_capacity(ranges.len());
-        ranges.retain(|(start, end, kind, _)| unique_ranges.insert((*start, *end, kind.clone())));
+        ranges
+            .retain(|(start, end, kind, _, _)| unique_ranges.insert((*start, *end, kind.clone())));
     }
 
     // Sort by start line; keep overlapping structural chunks (impl+fn).
@@ -1000,9 +1001,13 @@ fn try_tree_sitter_chunk_source_with_timeout(
     // Track which 1-indexed lines are covered by AST chunks (start..=end)
     let mut covered = vec![false; lines.len() + 1]; // index 0 unused
 
-    for (range_index, (start, end, kind, definitions)) in ranges.iter().enumerate() {
+    for (range_index, (start, end, kind, definitions, definition_start)) in
+        ranges.iter().enumerate()
+    {
         let mut start = *start;
-        let definition_start = start;
+        // Decorators can start the chunk; continuation headers still name
+        // the definition line itself.
+        let definition_start = *definition_start;
         let end = *end;
         if start == 0 || start > lines.len() {
             continue;
@@ -1045,13 +1050,13 @@ fn try_tree_sitter_chunk_source_with_timeout(
             ranges
                 .iter()
                 .enumerate()
-                .filter(|(index, (nested_start, nested_end, _, _))| {
+                .filter(|(index, (nested_start, nested_end, _, _, _))| {
                     *index != range_index
                         && *nested_start > start
                         && *nested_start <= safe_end
                         && *nested_end <= safe_end
                 })
-                .map(|(_, (nested_start, nested_end, _, _))| {
+                .map(|(_, (nested_start, nested_end, _, _, _))| {
                     (
                         leading_doc_start(*nested_start, language, lines).max(start + 1),
                         *nested_start,
@@ -1193,10 +1198,12 @@ fn try_tree_sitter_chunk_source_with_timeout(
 /// must drop all of it so the first line matches `start_line`.
 pub(crate) fn strip_chunk_header<'a>(text: &'a str, rel_path: &Path) -> &'a str {
     let path = rel_path.to_string_lossy();
+    // Headers use native separators; paths read back from the index use `/`.
     let Some(rest) = text
         .strip_prefix("// ")
-        .and_then(|rest| rest.strip_prefix(path.as_ref()))
-        .and_then(|rest| rest.strip_prefix('\n'))
+        .and_then(|rest| rest.split_once('\n'))
+        .filter(|(header_path, _)| same_path_ignoring_separators(header_path, &path))
+        .map(|(_, rest)| rest)
     else {
         return text;
     };
@@ -1210,6 +1217,13 @@ pub(crate) fn strip_chunk_header<'a>(text: &'a str, rel_path: &Path) -> &'a str 
         _ => rest,
     };
     rest.strip_prefix('\n').unwrap_or(text)
+}
+
+fn same_path_ignoring_separators(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left.bytes().zip(right.bytes()).all(|(left, right)| {
+            left == right || matches!((left, right), (b'/' | b'\\', b'/' | b'\\'))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1400,7 +1414,9 @@ enum ParsedName {
     Unknown,
 }
 
-type CapturedRange = (usize, usize, ChunkKind, Option<Vec<ChunkDefinition>>);
+/// Chunk start line (including Python decorators), end line, kind, parsed
+/// definitions, and the definition node's own start line.
+type CapturedRange = (usize, usize, ChunkKind, Option<Vec<ChunkDefinition>>, usize);
 
 fn objective_cpp_definition_ranges(
     rel_path: &Path,
@@ -1655,19 +1671,24 @@ fn captured_definition_ranges(
         {
             owners.push((node.end_byte(), owner));
         }
-        // Python decorators, including multi-line calls, belong to the definition.
-        let start_row = node
-            .parent()
-            .filter(|parent| language == "python" && parent.kind() == "decorated_definition")
-            .map_or(node.start_position().row, |parent| {
-                parent.start_position().row
-            });
+        let definition_row = node.start_position().row;
+        // Python decorators, including multi-line calls, belong to the
+        // definition's chunk. Check the language first: `Node::parent`
+        // searches down from the root.
+        let start_row = if language == "python" {
+            node.parent()
+                .filter(|parent| parent.kind() == "decorated_definition")
+                .map_or(definition_row, |parent| parent.start_position().row)
+        } else {
+            definition_row
+        };
         // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
         ranges.push((
             start_row + 1,
             node.end_position().row + 1,
             kind,
             definitions,
+            definition_row + 1,
         ));
     }
     ranges
@@ -1792,6 +1813,7 @@ fn parsed_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> Pa
             .map(text)
             .unwrap_or(ParsedName::Unknown),
         // `export const Button = () => ...` binds a function to a module name.
+        // One declaration can bind several names; only function values count.
         "lexical_declaration" if matches!(language, "javascript" | "typescript") => {
             let mut cursor = node.walk();
             let names = node
@@ -2041,7 +2063,8 @@ fn tree_sitter_query(
         "rust" => cached_query!(
             RUST_QUERY,
             tree_sitter_rust::LANGUAGE,
-            "(function_item) @fn (macro_definition) @fn (impl_item) @class (trait_item) @class (inner_attribute_item) @doc_include (attribute_item) @doc_include"
+            // `macro_rules!` inside a function body stays in that function's chunk.
+            "(function_item) @fn (source_file (macro_definition) @fn) (declaration_list (macro_definition) @fn) (impl_item) @class (trait_item) @class (inner_attribute_item) @doc_include (attribute_item) @doc_include"
         ),
         "python" => cached_query!(
             PYTHON_QUERY,
@@ -2958,12 +2981,40 @@ mod tests {
                 "{path}"
             );
         }
+        for path in ["web/multi.js", "web/multi.ts", "web/multi.tsx"] {
+            assert_eq!(
+                parsed_definitions(
+                    path,
+                    "const a = 1, b = () => {};\nexport const c = () => 1, d = function () {\n  return 2;\n};\n",
+                ),
+                pairs(&[("b", None), ("c", None), ("d", None)]),
+                "{path}"
+            );
+        }
         assert_eq!(
             parsed_definitions(
                 "src/macros.rs",
                 "macro_rules! zebra_macro {\n    () => {};\n}\n"
             ),
             pairs(&[("zebra_macro", None)])
+        );
+    }
+
+    #[test]
+    fn rust_macros_inside_function_bodies_stay_in_their_function() {
+        let source = "fn outer() {\n    macro_rules! inner {\n        () => {};\n    }\n    inner!();\n}\n\nmod scoped {\n    macro_rules! module_macro {\n        () => {};\n    }\n}\n";
+        let chunks = chunk_source(Path::new("src/macros.rs"), source);
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.start_line <= 2 && chunk.end_line >= 2)
+                .count(),
+            1,
+            "{chunks:?}"
+        );
+        assert_eq!(
+            parsed_definitions("src/macros.rs", source),
+            pairs(&[("outer", None), ("module_macro", None)])
         );
     }
 
@@ -2987,18 +3038,47 @@ mod tests {
     fn python_multiline_decorators_stay_with_their_definition() {
         let source = "import router\n\n\n@router.get(\n    \"/users/{id}\",\n    response_model=User,\n)\ndef get_user():\n    return 1\n\n\n@dataclass(\n    frozen=True,\n)\nclass Point:\n    x: int\n";
         let chunks = chunk_source(Path::new("app/users.py"), source);
+        // `extract_signature` stores this range for definition chunks.
+        let signature = |chunk: &Chunk| {
+            crate::text::first_code_line_range(&chunk.text)
+                .map(|range| chunk.text[range].to_string())
+        };
         let function = chunks
             .iter()
             .find(|chunk| chunk.text.contains("def get_user"))
             .expect("function chunk");
         assert_eq!(function.start_line, 4, "{chunks:?}");
         assert!(function.text.contains("response_model=User"));
+        assert_eq!(signature(function).as_deref(), Some("def get_user():"));
         let class = chunks
             .iter()
             .find(|chunk| chunk.text.contains("class Point"))
             .expect("class chunk");
         assert_eq!(class.start_line, 12, "{chunks:?}");
         assert!(class.text.contains("frozen=True"));
+        assert_eq!(signature(class).as_deref(), Some("class Point:"));
+
+        let body = (0..200)
+            .map(|index| format!("    value_{index} = {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!("@app.route(\n    \"/x\",\n)\ndef handler():\n{body}\n");
+        let chunks = chunk_source(Path::new("app/big.py"), &source);
+        assert!(
+            chunks.len() > 1,
+            "expected continuation windows: {chunks:?}"
+        );
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(signature(&chunks[0]).as_deref(), Some("def handler():"));
+        for chunk in &chunks[1..] {
+            assert_eq!(
+                chunk.text.lines().nth(1),
+                Some("// continuation of def handler():"),
+                "{}-{}",
+                chunk.start_line,
+                chunk.end_line
+            );
+        }
     }
 
     #[test]
@@ -3025,6 +3105,22 @@ mod tests {
         assert_eq!(
             strip_chunk_header("// other.rs\n\nfn a() {}", path),
             "// other.rs\n\nfn a() {}"
+        );
+        // Windows headers use `\`, while indexed paths use `/`.
+        assert_eq!(
+            strip_chunk_header("// src\\big.rs\n\nfn a() {}", path),
+            "fn a() {}"
+        );
+        assert_eq!(
+            strip_chunk_header(
+                "// src\\big.rs\n// continuation of pub fn a() {\n\n    b();",
+                path
+            ),
+            "    b();"
+        );
+        assert_eq!(
+            strip_chunk_header("// src/big.rs\n\nfn a() {}", Path::new("src\\big.rs")),
+            "fn a() {}"
         );
         assert_eq!(strip_chunk_header("fn a() {}", path), "fn a() {}");
 
