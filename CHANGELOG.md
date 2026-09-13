@@ -8,6 +8,10 @@ All notable changes to ivygrep are documented in this file.
 
 - **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
 
+### Changed
+
+- Query expansion no longer maps phrases to identifiers from ivygrep's own source or the Linux kernel relevance fixture (`cpu_permits`, `vector_store`, `daemon_request`, `daemon_response`, `indexable`, `doctor`, `block_io`, `workqueue`). Two phrase aliases that tokenization could never match are removed. Self-repository relevance gate floors are lowered to match. Many remaining phrase aliases still come from the same fixture-fitting history and are candidates for corpus-derived expansion.
+
 ### Security
 
 - The Web UI requires the session token on loopback listeners too. Other local users could previously read indexed files, list directories, search, and launch the editor through `127.0.0.1`. Open the URL printed by `ig --web`; bare `http://127.0.0.1:4747/` returns 401. The printed URL contains the token, so keep terminal output and logs that capture it private.
