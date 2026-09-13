@@ -662,7 +662,17 @@ def query_suite(
     chunks_per_file: int,
     force_neural: bool = False,
 ) -> dict:
-    cases = query_cases(samples, total_chunks, chunks_per_file)
+    # Phases that send distinct queries get disjoint cases: the daemon result
+    # cache would otherwise replay `warm_distinct` answers into the CLI and
+    # concurrent phases.
+    cli_warm_samples = min(20, samples)
+    concurrent_samples = min(64, samples)
+    cases = query_cases(
+        samples + cli_warm_samples + concurrent_samples, total_chunks, chunks_per_file
+    )
+    distinct_cases = cases[:samples]
+    cli_warm_cases = cases[samples : samples + cli_warm_samples]
+    concurrent_cases = cases[samples + cli_warm_samples :]
 
     def measure(
         client: DaemonClient,
@@ -686,21 +696,21 @@ def query_suite(
             ),
             "expected_path": expected_path,
         }
-        for query, expected_path in cases[: min(10, samples)]
+        for query, expected_path in distinct_cases[: min(10, samples)]
     ]
     daemon, log, _ = start_daemon(binary, corpus, env, Path(env["IVYGREP_HOME"]))
     try:
         with DaemonClient(Path(env["IVYGREP_HOME"]), corpus, force_neural) as client:
             client.query("warmup generated operation")
-            distinct = [measure(client, case) for case in cases]
-            replay = [measure(client, cases[0]) for _ in range(samples)]
-            filtered = [measure(client, case, "rust") for case in cases]
+            distinct = [measure(client, case) for case in distinct_cases]
+            replay = [measure(client, distinct_cases[0]) for _ in range(samples)]
+            filtered = [measure(client, case, "rust") for case in distinct_cases]
         cli_warm = [
             {
                 **run_query(binary, corpus, query, env, force_neural=force_neural),
                 "expected_path": expected_path,
             }
-            for query, expected_path in cases[: min(20, samples)]
+            for query, expected_path in cli_warm_cases
         ]
 
         started = time.perf_counter()
@@ -719,7 +729,7 @@ def query_suite(
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             concurrent = list(
-                executor.map(concurrent_measure, cases[: min(64, samples)])
+                executor.map(concurrent_measure, concurrent_cases)
             )
         concurrent_wall_ms = (time.perf_counter() - started) * 1000.0
     finally:
@@ -737,7 +747,9 @@ def query_suite(
             "wall_ms": concurrent_wall_ms,
             "queries_per_second": len(concurrent) / (concurrent_wall_ms / 1000.0),
         },
-        "phase_timings": profile_query_phases(binary, corpus, env, cases, force_neural),
+        "phase_timings": profile_query_phases(
+            binary, corpus, env, distinct_cases, force_neural
+        ),
     }
 
 

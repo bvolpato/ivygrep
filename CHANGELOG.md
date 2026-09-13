@@ -7,6 +7,15 @@ All notable changes to ivygrep are documented in this file.
 ### Added
 
 - **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
+### Performance
+
+- Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
+- Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
+
+### Testing
+
+- Criterion benchmarks return their fixtures so temporary-directory cleanup stays outside timed samples, and the ANN fixture uses 50,000 distinct seeded vectors instead of 97 repeated values.
+- Million-chunk query phases use disjoint query sets, so CLI warm and concurrent latency no longer replay cached daemon answers. Paired comparisons fail when peak indexing RSS or disk use exceeds 1.25 times the baseline.
 
 ### Changed
 

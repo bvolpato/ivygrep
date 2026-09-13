@@ -91,6 +91,8 @@ def compare_runs(
     required_index_ratio: float | None,
     maximum_quality_loss: float,
     maximum_index_size_ratio: float = 1.05,
+    maximum_peak_rss_ratio: float = 1.25,
+    maximum_peak_disk_ratio: float = 1.25,
 ) -> dict:
     if not baseline_runs or not current_runs:
         raise ValueError("at least one baseline and current run is required")
@@ -216,6 +218,16 @@ def compare_runs(
             f"index size ratio {index_size_ratio:.3f} exceeds "
             f"allowed {maximum_index_size_ratio:.3f}"
         )
+    peak_rss_ratio = resource_ratio("peak_rss_bytes")
+    peak_disk_ratio = resource_ratio("peak_disk_bytes")
+    for label, observed, maximum in (
+        ("peak index RSS", peak_rss_ratio, maximum_peak_rss_ratio),
+        ("peak index disk", peak_disk_ratio, maximum_peak_disk_ratio),
+    ):
+        if observed is not None and observed > maximum:
+            failures.append(
+                f"{label} ratio {observed:.3f} exceeds allowed {maximum:.3f}"
+            )
 
     return {
         "schema_version": 1,
@@ -227,8 +239,8 @@ def compare_runs(
         "query_path_p95_ratios": query_latency_ratios,
         "index_throughput_ratio": index_ratio,
         "index_size_ratio": index_size_ratio,
-        "peak_disk_ratio": resource_ratio("peak_disk_bytes"),
-        "peak_rss_ratio": resource_ratio("peak_rss_bytes"),
+        "peak_disk_ratio": peak_disk_ratio,
+        "peak_rss_ratio": peak_rss_ratio,
         "expected_recall_at_20_loss": quality_loss,
         "query_path_expected_recall_at_20_losses": query_quality_losses,
         "passed": not failures,
@@ -244,6 +256,8 @@ def compare(
     required_index_ratio: float | None,
     maximum_quality_loss: float,
     maximum_index_size_ratio: float = 1.05,
+    maximum_peak_rss_ratio: float = 1.25,
+    maximum_peak_disk_ratio: float = 1.25,
 ) -> dict:
     return compare_runs(
         [baseline],
@@ -253,6 +267,8 @@ def compare(
         required_index_ratio,
         maximum_quality_loss,
         maximum_index_size_ratio,
+        maximum_peak_rss_ratio,
+        maximum_peak_disk_ratio,
     )
 
 
@@ -266,6 +282,24 @@ def main() -> int:
     parser.add_argument("--require-index-throughput-ratio", type=float)
     parser.add_argument("--maximum-quality-loss", type=float, default=0.0)
     parser.add_argument("--maximum-index-size-ratio", type=float, default=1.05)
+    parser.add_argument(
+        "--maximum-peak-rss-ratio",
+        type=float,
+        default=1.25,
+        help=(
+            "fail when median peak indexing RSS exceeds this multiple of the "
+            "baseline; skipped when either side lacks resource samples"
+        ),
+    )
+    parser.add_argument(
+        "--maximum-peak-disk-ratio",
+        type=float,
+        default=1.25,
+        help=(
+            "fail when median peak index-home disk use exceeds this multiple of "
+            "the baseline; skipped when either side lacks the metric"
+        ),
+    )
     args = parser.parse_args()
 
     result = compare_runs(
@@ -276,6 +310,8 @@ def main() -> int:
         args.require_index_throughput_ratio,
         args.maximum_quality_loss,
         args.maximum_index_size_ratio,
+        args.maximum_peak_rss_ratio,
+        args.maximum_peak_disk_ratio,
     )
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:
