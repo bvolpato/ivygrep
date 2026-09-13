@@ -375,10 +375,11 @@ fn collect_git_changes(
 }
 
 /// Accept commit-ish syntax such as `HEAD~3`, `main^`, and `@{upstream}`.
-/// A leading `-` could be parsed as a Git option; ranges are not a single base.
+/// A leading `-` could be parsed as a Git option and a leading `^` negates the
+/// revision; ranges are not a single base.
 fn validate_git_reference(reference: &str) -> Result<()> {
     if reference.is_empty()
-        || reference.starts_with('-')
+        || reference.starts_with(['-', '^'])
         || reference.contains("..")
         || !reference
             .chars()
@@ -687,7 +688,7 @@ fn insert_task_path(
             .as_bytes()
             .first()
             .is_some_and(u8::is_ascii_alphabetic);
-    let external_path = raw_path.is_absolute() || has_windows_drive;
+    let mut external_path = raw_path.is_absolute() || has_windows_drive;
     let relative = if raw_path.is_absolute() {
         raw_path
             .strip_prefix(root)
@@ -702,12 +703,19 @@ fn insert_task_path(
     let Some(mut relative) = relative else {
         return;
     };
-    if !root.join(&relative).is_file() {
-        // Dependency and toolchain frames only share a file-name suffix with
-        // workspace files.
-        if external_path && is_third_party_path(&relative) {
+    if external_path
+        && !root.join(&relative).is_file()
+        && let Some(remainder) = third_party_remainder(&relative)
+    {
+        // Dependency frames share at most their package-relative path with the
+        // workspace (e.g. a pip-installed app); a bare file name is too weak.
+        if remainder.components().count() < 2 {
             return;
         }
+        relative = remainder;
+        external_path = false;
+    }
+    if !root.join(&relative).is_file() {
         let files = workspace_files.get_or_insert_with(|| {
             crate::walker::source_walker(root, skip_gitignore)
                 .build()
@@ -716,15 +724,11 @@ fn insert_task_path(
                 .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_path_buf))
                 .collect()
         });
-        let input_components = relative.components().count();
         let mut matches = files
             .iter()
             .filter(|candidate| {
                 if external_path {
-                    // A bare file name is too weak to map a deeper external path,
-                    // but container roots such as `/app/index.js` stay mappable.
                     relative.ends_with(candidate.as_path())
-                        && (input_components <= 2 || candidate.components().count() >= 2)
                 } else {
                     candidate.ends_with(&relative)
                 }
@@ -774,27 +778,31 @@ fn normalize_external_path(path: &Path, drop_first_component: bool) -> Option<Pa
         .then(|| PathBuf::from(crate::workspace::index_path_string(&normalized)))
 }
 
-fn is_third_party_path(path: &Path) -> bool {
+/// Returns the package-relative remainder of a dependency-cache path, e.g.
+/// `myapp/views.py` for `.../site-packages/myapp/views.py`. Toolchain sources
+/// under `rustc/` have no mappable remainder.
+fn third_party_remainder(path: &Path) -> Option<PathBuf> {
+    const MARKERS: [&[&str]; 5] = [
+        &["node_modules"],
+        &["site-packages"],
+        &["dist-packages"],
+        &[".cargo", "registry"],
+        &["go", "pkg", "mod"],
+    ];
     let components = path
         .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    components.first() == Some(&"rustc")
-        || components.iter().any(|component| {
-            matches!(
-                *component,
-                "node_modules" | "site-packages" | "dist-packages"
-            )
-        })
-        || components
-            .windows(2)
-            .any(|pair| pair == [".cargo", "registry"])
-        || components
-            .windows(3)
-            .any(|triple| triple == ["go", "pkg", "mod"])
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?;
+    if components.first() == Some(&"rustc") {
+        return Some(PathBuf::new());
+    }
+    // The innermost dependency directory holds the installed package.
+    let package_start = (1..=components.len()).rev().find(|end| {
+        MARKERS
+            .iter()
+            .any(|marker| components[..*end].ends_with(marker))
+    })?;
+    Some(components[package_start..].iter().collect())
 }
 
 #[cfg(test)]
@@ -1013,6 +1021,9 @@ mod tests {
         assert!(validate_git_reference("--output=/tmp/file").is_err());
         assert!(validate_git_reference("main..feature").is_err());
         assert!(validate_git_reference("main feature").is_err());
+        // `rev-parse --verify ^HEAD` prints `^<sha>`, which is not a merge base.
+        assert!(validate_git_reference("^HEAD").is_err());
+        assert!(validate_git_reference("^main").is_err());
         assert!(validate_git_reference("main").is_ok());
         assert!(validate_git_reference("origin/main").is_ok());
         for reference in [
@@ -1051,12 +1062,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("src")).unwrap();
         fs::write(root.path().join("index.js"), "module.exports = {};\n").unwrap();
+        fs::write(root.path().join("server.js"), "module.exports = {};\n").unwrap();
         fs::write(root.path().join("src/lib.rs"), "pub mod auth;\n").unwrap();
         fs::write(root.path().join("src/auth.rs"), "fn auth() {}\n").unwrap();
         for frame in [
             "at handle (/app/node_modules/express/lib/router/index.js:284:15)",
             "at /home/u/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.0/src/lib.rs:7:1",
-            "at /opt/tools/lib/index.js:3:1",
+            "at /rustc/90b35a6239c3d8bdabc530a6a0816f7ff89a0aaf/library/core/src/lib.rs:7:1",
         ] {
             assert_eq!(
                 referenced_task_paths(root.path(), frame, false),
@@ -1073,21 +1085,82 @@ mod tests {
         );
         // Frames such as `/app/index.js` are absolute only on Unix hosts.
         #[cfg(unix)]
+        for (frame, file_path, line) in [
+            ("at main (/app/index.js:5:1)", "index.js", 5),
+            // AWS Lambda and Docker WORKDIR roots share only the file name.
+            ("at main (/var/task/index.js:5:1)", "index.js", 5),
+            ("at listener (/usr/src/app/server.js:10:5)", "server.js", 10),
+            ("panic at /home/u/repo/src/auth.rs:42", "src/auth.rs", 42),
+        ] {
+            assert_eq!(
+                referenced_task_paths(root.path(), frame, false),
+                [ContextInputPath {
+                    file_path: PathBuf::from(file_path),
+                    line: Some(line),
+                }],
+                "{frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_trace_frames_map_by_package_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            "index.js",
+            "lib/router/index.js",
+            "myapp/views.py",
+            "src/lib.rs",
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "\n").unwrap();
+        }
+        let views = [ContextInputPath {
+            file_path: PathBuf::from("myapp/views.py"),
+            line: Some(12),
+        }];
+        // Drive-letter frames are external on every host.
+        assert_eq!(
+            referenced_task_paths(
+                root.path(),
+                r#"File "C:\Python311\Lib\site-packages\myapp\views.py", line 12"#,
+                false,
+            ),
+            views
+        );
+        for frame in [
+            // The package remainder must be a whole-component workspace suffix.
+            r"at handle (C:\app\node_modules\express\lib\router\index.js:284:15)",
+            // A bare file name under a package directory is too weak.
+            r"at C:\app\node_modules\index.js:1:1",
+        ] {
+            assert_eq!(
+                referenced_task_paths(root.path(), frame, false),
+                [],
+                "{frame}"
+            );
+        }
+        #[cfg(unix)]
         {
             assert_eq!(
-                referenced_task_paths(root.path(), "at main (/app/index.js:5:1)", false),
-                [ContextInputPath {
-                    file_path: PathBuf::from("index.js"),
-                    line: Some(5),
-                }]
+                referenced_task_paths(
+                    root.path(),
+                    r#"File "/usr/local/lib/python3.11/site-packages/myapp/views.py", line 12"#,
+                    false,
+                ),
+                views
             );
-            assert_eq!(
-                referenced_task_paths(root.path(), "panic at /home/u/repo/src/auth.rs:42", false),
-                [ContextInputPath {
-                    file_path: PathBuf::from("src/auth.rs"),
-                    line: Some(42),
-                }]
-            );
+            for frame in [
+                "at handle (/app/node_modules/express/lib/router/index.js:284:15)",
+                "at /usr/lib/node_modules/index.js:1:1",
+            ] {
+                assert_eq!(
+                    referenced_task_paths(root.path(), frame, false),
+                    [],
+                    "{frame}"
+                );
+            }
         }
     }
 }
