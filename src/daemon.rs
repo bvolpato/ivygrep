@@ -1802,11 +1802,12 @@ impl DaemonState {
             // lease before opening stores.
             let mut resolved_after_wait = Vec::with_capacity(workspaces.len());
             for workspace in &workspaces {
-                resolved_after_wait.push(self.resolve_workspace(&workspace.root).map_err(
-                    |error| DaemonResponse::Error {
-                        message: error.to_string(),
-                    },
-                )?);
+                resolved_after_wait.push(
+                    self.resolve_workspace_revalidated(&workspace.root)
+                        .map_err(|error| DaemonResponse::Error {
+                            message: error.to_string(),
+                        })?,
+                );
             }
             let identity_changed =
                 workspaces
@@ -2032,10 +2033,18 @@ impl DaemonState {
     }
 
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
+        self.resolve_workspace_cached(path, true)
+    }
+
+    fn resolve_workspace_revalidated(&self, path: &Path) -> Result<Workspace> {
+        self.resolve_workspace_cached(path, false)
+    }
+
+    fn resolve_workspace_cached(&self, path: &Path, accept_fresh: bool) -> Result<Workspace> {
         if path.is_absolute()
             && let Some(cached) = self.resolved_workspaces.lock().get_mut(path)
         {
-            if cached.checked_at.elapsed() < WORKSPACE_RESOLUTION_FRESHNESS {
+            if accept_fresh && cached.checked_at.elapsed() < WORKSPACE_RESOLUTION_FRESHNESS {
                 return Ok(cached.workspace.clone());
             }
             if cached.signature.matches_cached_main_checkout(path)
@@ -6831,49 +6840,63 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_main_to_linked_after_index() {
-        assert_replaced_workspace_searches_current_base(false, true, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(false, true, false, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_main_to_linked_without_index() {
-        assert_replaced_workspace_searches_current_base(false, false, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(false, false, false, false, false, true)
+            .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_rechecks_fresh_cache_after_lease() {
+        assert_replaced_workspace_searches_current_base(false, false, false, false, false, false)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_different_base_after_index() {
-        assert_replaced_workspace_searches_current_base(true, true, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(true, true, false, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_different_base_without_index() {
-        assert_replaced_workspace_searches_current_base(true, false, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(true, false, false, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_tracks_retargeted_gitfile() {
-        assert_replaced_workspace_searches_current_base(true, false, true, false, false).await;
+        assert_replaced_workspace_searches_current_base(true, false, true, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_main_after_index() {
-        assert_replaced_workspace_searches_current_base(true, true, false, true, false).await;
+        assert_replaced_workspace_searches_current_base(true, true, false, true, false, true).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_main_without_index() {
-        assert_replaced_workspace_searches_current_base(true, false, false, true, false).await;
+        assert_replaced_workspace_searches_current_base(true, false, false, true, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_reconciliation_waits_for_existing_readers() {
-        assert_replaced_workspace_searches_current_base(false, false, false, false, true).await;
+        assert_replaced_workspace_searches_current_base(false, false, false, false, true, true)
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7049,6 +7072,7 @@ mod tests {
         retarget_gitfile: bool,
         replace_with_main: bool,
         hold_existing_reader: bool,
+        expire_resolution_cache: bool,
     ) {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -7116,7 +7140,9 @@ mod tests {
                 );
             }
         }
-        expire_workspace_resolution(&state, &original.root);
+        if expire_resolution_cache {
+            expire_workspace_resolution(&state, &original.root);
+        }
         if explicit_index {
             let response = handle_request(state.clone(), index_request_for(&original, false)).await;
             assert!(
