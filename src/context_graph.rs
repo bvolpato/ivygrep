@@ -4822,7 +4822,9 @@ const char *example = "\
 
     #[test]
     fn rust_mod_rs_self_imports_resolve_without_parent_module_file() {
-        let root = tempfile::tempdir().unwrap();
+        // Workspace reads refuse symlinked path components, and macOS temp
+        // directories live under the `/var` symlink.
+        let root = canonical_tempdir();
         for (path, content) in [
             (
                 "Cargo.toml",
