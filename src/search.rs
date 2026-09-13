@@ -759,8 +759,7 @@ pub fn literal_search_with_context(
         return Ok(vec![]);
     }
 
-    // Match regex search: case-insensitive for all Unicode letters, not only ASCII.
-    let query_lower = query.to_lowercase();
+    let query_lower = fold_literal_case(query);
     let max_hits = options.bounded_limit().unwrap_or(500);
     let context = options.bounded_context();
     let runs = substring_candidate_runs(query);
@@ -786,6 +785,17 @@ pub fn literal_search_with_context(
     }
     tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
     Ok(hits)
+}
+
+/// Case-insensitive literal matching folds each character independently.
+/// `str::to_lowercase` applies context rules such as Greek final sigma, so a
+/// word-final `Σ` in a query would not match the same letter inside a longer word.
+fn fold_literal_case(text: &str) -> String {
+    if text.is_ascii() {
+        text.to_ascii_lowercase()
+    } else {
+        text.chars().flat_map(char::to_lowercase).collect()
+    }
 }
 
 fn literal_search_walk(
@@ -860,12 +870,16 @@ fn literal_search_paths(
         let Ok(content) = crate::workspace_file::read_to_string(root, path) else {
             return Vec::new();
         };
+        // Lossy decoding keeps text with stray invalid bytes; NUL still marks binary.
+        if content.contains('\0') {
+            return Vec::new();
+        }
         let lines = content.lines().collect::<Vec<_>>();
         lines
             .iter()
             .enumerate()
             .filter(|(_, line)| {
-                !options.is_cancelled() && line.to_lowercase().contains(query_lower)
+                !options.is_cancelled() && fold_literal_case(line).contains(query_lower)
             })
             // File order and snippet bounds are monotonic in source order.
             // Later matches cannot enter the final bounded result set.
@@ -6326,7 +6340,13 @@ mod tests {
         .unwrap();
         std::fs::write(
             tmp.path().join("unicode.rs"),
-            "const CAFÉ_MARKER: u8 = 1;\n",
+            "const CAFÉ_MARKER: u8 = 1;\n// ΛΟΓΟΣΤΗΣ\n",
+        )
+        .unwrap();
+        // Binary files stay excluded even though live reads decode lossily.
+        std::fs::write(
+            tmp.path().join("blob.bin"),
+            b"rotate_latin1_secret\0\x01\x02\n",
         )
         .unwrap();
 
@@ -6344,9 +6364,11 @@ mod tests {
         assert_eq!(hits[0].file_path, PathBuf::from("latin1.py"));
         assert!(hits[0].preview.contains("rotate_latin1_secret"));
 
-        let hits = literal_search(&workspace, "café_marker", &SearchOptions::default()).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].file_path, PathBuf::from("unicode.rs"));
+        for query in ["café_marker", "ΛΟΓΟΣ", "λογοσ"] {
+            let hits = literal_search(&workspace, query, &SearchOptions::default()).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].file_path, PathBuf::from("unicode.rs"), "{query}");
+        }
     }
 
     #[test]

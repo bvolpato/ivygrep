@@ -8,7 +8,7 @@ use anyhow::Result;
 use grep_regex::RegexMatcherBuilder;
 // Lossy decoding keeps matches on lines with invalid UTF-8; UTF8 aborts the file.
 use grep_searcher::sinks::Lossy;
-use grep_searcher::{Searcher, SearcherBuilder};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder};
 use rayon::prelude::*;
 use regex_syntax::hir::{Hir, HirKind};
 use tantivy::TantivyDocument;
@@ -427,6 +427,15 @@ fn constrain_query_to_scope(
 }
 
 /// Parallel regex search over a known set of file paths.
+/// Lossy decoding keeps lines with invalid UTF-8, so binary files need an
+/// explicit filter: stop at the first NUL like grep, before any hit is emitted.
+fn text_searcher() -> Searcher {
+    SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .build()
+}
+
 fn regex_search_parallel(
     workspace: &Workspace,
     pattern: &str,
@@ -454,7 +463,7 @@ fn regex_search_parallel(
         let Ok(file) = crate::workspace_file::open(&workspace.root, rel_path) else {
             return Vec::new();
         };
-        let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
+        let mut searcher = text_searcher();
         let mut local_hits = Vec::new();
         let _ = searcher.search_file(
             &matcher,
@@ -480,6 +489,23 @@ fn regex_search_parallel(
         );
         local_hits
     };
+
+    if max_hits == usize::MAX {
+        // Unbounded requests read every candidate; sort once instead of per merge.
+        let mut hits = file_paths
+            .par_iter()
+            .flat_map_iter(search_file)
+            .collect::<Vec<_>>();
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
+        hits.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then(a.start_line.cmp(&b.start_line))
+        });
+        return Ok(hits);
+    }
 
     // Candidate paths are sorted. Finishing each batch before the next keeps a
     // limited result equal to the first matches in path order, while a full
@@ -517,7 +543,7 @@ fn regex_search_walk(
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(true)
         .build(pattern)?;
-    let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
+    let mut searcher = text_searcher();
 
     let mut hits = Vec::new();
 
@@ -838,6 +864,11 @@ mod tests {
         std::fs::write(
             tmp.path().join("latin1.py"),
             b"# header\ncaf\xe9 = \"rotate_latin1_secret\"\n# footer\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("blob.bin"),
+            b"rotate_latin1_secret\0\x01\x02\n",
         )
         .unwrap();
         let workspace = Workspace::resolve(tmp.path()).unwrap();
