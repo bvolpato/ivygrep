@@ -615,7 +615,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | --- | --- |
 | `IVYGREP_HOME` | Data directory for indexes. Default `~/.local/share/ivygrep` on every OS, or `$XDG_DATA_HOME/ivygrep` when `XDG_DATA_HOME` is set. Empty values are ignored. |
 | `IVYGREP_MODEL_PROFILE` | Neural profile: `static-retrieval-v1` (default, 256 dimensions, CPU), the opt-in Model2Vec profiles `potion-code-16m-v1` and `potion-code-16m-v2` (also `potion-code-v2`), or transformer profiles `general`, `code`, and `code-hq` (384 dimensions). CUDA and Metal builds accelerate only transformer profiles. Unknown values use the default. Vectors from another profile are not reused. |
-| `IVYGREP_CUDA_LIBRARY_PATH` | Library search path `ig hardware` checks for CUDA runtime libraries, in place of `LD_LIBRARY_PATH`, before falling back to `ldconfig`. Empty values are ignored. |
+| `IVYGREP_CUDA_LIBRARY_PATH` | Library search path `ig hardware` checks for CUDA runtime libraries, in place of `LD_LIBRARY_PATH`, before falling back to `ldconfig`. `install.sh` instead treats it as an exclusive colon-separated search path, without checking `ldconfig` or standard CUDA directories; an incomplete override can select the portable build. Empty values are ignored. |
 | `IVYGREP_AGENT_HOME` | Home directory `ig agent install` and `ig agent doctor` use to find client configuration files. Default: the user's home directory. |
 | `IVYGREP_RERANKER` | `learned` (default; also `auto`) or `deterministic` (also `disabled`, `off`). Unknown values report an error in status and use `learned`. |
 | `IVYGREP_SEARCH_DEADLINE_SECS` | Server-side daemon search deadline. Default `60`; `0` disables it. Hits gathered before the deadline return with a warning. |
@@ -633,7 +633,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_NO_BROWSER` | Set to stop `ig --web` from opening a browser. |
 
 Installers also read `IVYGREP_INSTALL_DIR` and `IVYGREP_VERSION`; `install.sh`
-additionally reads `IVYGREP_ACCELERATOR`.
+additionally reads `IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
 
 ## Module ownership
 
