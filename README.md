@@ -235,6 +235,9 @@ ig --add . --force   # rebuild current workspace index from scratch
 ig hardware          # inspect detected hardware and matching build
 ```
 
+If `ig --web` opens a page that cannot load its redirect file, as snap-packaged
+browsers on Ubuntu do for files under hidden directories, open the URL it prints.
+
 Upgrade through the channel you installed from: `brew upgrade ivygrep`,
 `winget upgrade --id BrunoVolpato.ivygrep --exact`, or rerun the installer. The
 next command restarts a daemon from an older build; index format changes rebuild
