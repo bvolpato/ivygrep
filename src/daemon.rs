@@ -50,6 +50,18 @@ const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_DAEMON_REQUEST_BYTES: usize = 1024 * 1024;
+/// Client connections the daemon serves at once. Heavy work already waits for
+/// CPU permits, but each open connection keeps a task and socket buffers alive
+/// (about 14 KiB idle), so leaked connections would otherwise grow the daemon.
+const MAX_DAEMON_CONNECTIONS: usize = 512;
+/// Connections past the cap that may wait for a slot or get a busy reply.
+/// Anything beyond that is closed at once instead of queueing more tasks.
+const MAX_WAITING_DAEMON_CONNECTIONS: usize = 64;
+/// How long a connection past the cap waits for a slot before it is refused.
+/// Well under the 5 s the quickest client requests wait for a reply.
+const DAEMON_CONNECTION_WAIT: Duration = Duration::from_secs(2);
+/// Bound on reading the request of a connection that is being refused.
+const REFUSED_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
 const MAX_NEURAL_QUERY_CACHE_ENTRIES: usize = 128;
 /// Cap on cached workspace/dimension keys. Idle contexts additionally share a
@@ -589,6 +601,9 @@ fn read_optional_resolution_file(path: &Path) -> Option<Option<Vec<u8>>> {
 #[derive(Clone)]
 struct CachedWorkspace {
     workspace: Workspace,
+    /// Main checkout root of a linked worktree, recorded at resolution so
+    /// lease acquisition does not run `git worktree list` per request.
+    main_worktree_root: Option<PathBuf>,
     signature: WorkspaceResolutionSignature,
     checked_at: std::time::Instant,
 }
@@ -1534,6 +1549,29 @@ impl DaemonState {
             .expect("uncancelled workspace mutation acquisition")
     }
 
+    /// Main checkout root of a linked worktree. Reuses the root recorded when
+    /// `resolve_workspace` cached this same identity, revalidated through the
+    /// same signature, instead of running `git worktree list`. Anything else
+    /// asks Git.
+    fn main_worktree_root(&self, workspace: &Workspace) -> Option<PathBuf> {
+        if let Some(cached) = self.resolved_workspaces.lock().get_mut(&workspace.root)
+            && cached.workspace.id == workspace.id
+            && cached.workspace.repo_id == workspace.repo_id
+            && cached.workspace.base_index_dir == workspace.base_index_dir
+        {
+            if cached.checked_at.elapsed() < WORKSPACE_RESOLUTION_FRESHNESS {
+                return cached.main_worktree_root.clone();
+            }
+            if WorkspaceResolutionSignature::read(&workspace.root).as_ref()
+                == Some(&cached.signature)
+            {
+                cached.checked_at = std::time::Instant::now();
+                return cached.main_worktree_root.clone();
+            }
+        }
+        workspace.main_worktree_root()
+    }
+
     fn acquire_workspace_leases(
         &self,
         workspaces: &[Workspace],
@@ -1543,7 +1581,6 @@ impl DaemonState {
         cancellation: Option<&AtomicBool>,
     ) -> Option<Vec<WorkspaceModeLease>> {
         let mut requirements = HashMap::new();
-        // `main_worktree_root` runs `git worktree list`; resolve each base once.
         let mut base_ids = HashMap::new();
         for workspace in workspaces {
             let workspace_requires_mutation = direct_exclusive
@@ -1555,7 +1592,7 @@ impl DaemonState {
                 .and_modify(|exclusive| *exclusive |= workspace_requires_mutation)
                 .or_insert(workspace_requires_mutation);
             if workspace.is_worktree()
-                && let Some(main_root) = workspace.main_worktree_root()
+                && let Some(main_root) = self.main_worktree_root(workspace)
                 && let Ok(base_workspace) = Workspace::resolve(&main_root)
             {
                 let base_requires_mutation = direct_exclusive
@@ -2060,7 +2097,7 @@ impl DaemonState {
             .then(|| WorkspaceResolutionSignature::read(path))
             .flatten();
 
-        let workspace = Workspace::resolve(path)?;
+        let (workspace, main_worktree_root) = Workspace::resolve_with_main_worktree_root(path)?;
         // Preserve the previous identity if resolution raced a Git/root change,
         // so the retry can still detect and reconcile the replacement.
         anyhow::ensure!(
@@ -2089,6 +2126,7 @@ impl DaemonState {
                 path.to_path_buf(),
                 CachedWorkspace {
                     workspace: workspace.clone(),
+                    main_worktree_root,
                     signature,
                     checked_at: std::time::Instant::now(),
                 },
@@ -2676,6 +2714,47 @@ async fn run_daemon_inner() -> Result<()> {
 
     info!("ivygrep daemon listening on {}", socket_path.display());
 
+    serve_daemon_connections(
+        listener,
+        state,
+        ConnectionLimiter::new(
+            MAX_DAEMON_CONNECTIONS,
+            MAX_WAITING_DAEMON_CONNECTIONS,
+            DAEMON_CONNECTION_WAIT,
+        ),
+    )
+    .await
+}
+
+/// Slots for open client connections, plus a smaller pool for connections past
+/// the cap that wait briefly for a slot before they are refused.
+#[derive(Clone)]
+struct ConnectionLimiter {
+    active: Arc<tokio::sync::Semaphore>,
+    waiting: Arc<tokio::sync::Semaphore>,
+    capacity: usize,
+    wait: Duration,
+}
+
+impl ConnectionLimiter {
+    fn new(capacity: usize, waiting: usize, wait: Duration) -> Self {
+        Self {
+            active: Arc::new(tokio::sync::Semaphore::new(capacity)),
+            waiting: Arc::new(tokio::sync::Semaphore::new(waiting)),
+            capacity,
+            wait,
+        }
+    }
+}
+
+/// Accept loop. Accepting never waits on a client: authentication, the wait
+/// for a slot, and any refusal run in the connection's own task, and at most
+/// `capacity` plus the waiting pool of those tasks exist at once.
+async fn serve_daemon_connections(
+    listener: crate::ipc::IpcListener,
+    state: DaemonState,
+    limiter: ConnectionLimiter,
+) -> Result<()> {
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -2688,20 +2767,88 @@ async fn run_daemon_inner() -> Result<()> {
             }
         };
 
-        // The socket exposes cross-workspace search/index/delete; only serve
-        // connections from the daemon's own user.
-        if !crate::ipc::peer_is_owner(&stream) {
-            warn!("rejected daemon connection from a different uid");
-            continue;
-        }
-
         let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, state).await {
-                error!("daemon connection error: {err:#}");
-            }
-        });
+        if let Ok(slot) = limiter.active.clone().try_acquire_owned() {
+            tokio::spawn(serve_daemon_connection(stream, state, slot));
+        } else if let Ok(waiting) = limiter.waiting.clone().try_acquire_owned() {
+            let limiter = limiter.clone();
+            tokio::spawn(async move {
+                let slot =
+                    tokio::time::timeout(limiter.wait, limiter.active.clone().acquire_owned())
+                        .await;
+                match slot {
+                    Ok(Ok(slot)) => {
+                        drop(waiting);
+                        serve_daemon_connection(stream, state, slot).await;
+                    }
+                    _ => {
+                        refuse_daemon_connection(stream, state, limiter.capacity).await;
+                        drop(waiting);
+                    }
+                }
+            });
+        } else {
+            // Far past the cap: close without a reply instead of queueing more
+            // tasks. Clients treat that like an unreachable daemon.
+            drop(stream);
+        }
     }
+}
+
+async fn serve_daemon_connection(
+    stream: crate::ipc::PendingIpcStream,
+    state: DaemonState,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+) {
+    // The socket exposes cross-workspace search/index/delete; only serve
+    // authenticated connections from the daemon's own user.
+    let Some(stream) = crate::ipc::authenticate(stream).await else {
+        warn!("rejected daemon connection that failed authentication");
+        return;
+    };
+    if let Err(err) = handle_connection(stream, state).await {
+        error!("daemon connection error: {err:#}");
+    }
+}
+
+/// Answer a connection past the cap after reading its request, so the reply
+/// follows normal request/response order. `Version` still gets its real
+/// answer: clients restart a daemon whose version probe fails, which would
+/// discard a busy daemon's in-flight work.
+async fn refuse_daemon_connection(
+    stream: crate::ipc::PendingIpcStream,
+    state: DaemonState,
+    capacity: usize,
+) {
+    let Some(stream) = crate::ipc::authenticate(stream).await else {
+        return;
+    };
+    let mut reader = BufReader::new(stream);
+    let response = match tokio::time::timeout(
+        REFUSED_REQUEST_READ_TIMEOUT,
+        read_daemon_request(&mut reader),
+    )
+    .await
+    {
+        Ok(Ok(Some(envelope))) if matches!(envelope.request, DaemonRequest::Version) => {
+            handle_request(state, envelope.request).await
+        }
+        Ok(Ok(Some(_))) => DaemonResponse::Error {
+            message: format!(
+                "ivygrep daemon is busy: {capacity} client connections are open; retry shortly"
+            ),
+        },
+        Ok(Err(response)) => response,
+        Ok(Ok(None)) | Err(_) => return,
+    };
+    let Ok(payload) = serde_json::to_vec(&response) else {
+        return;
+    };
+    let _ = tokio::time::timeout(DAEMON_WRITE_TIMEOUT, async {
+        reader.get_mut().write_all(&payload).await?;
+        reader.get_mut().write_all(b"\n").await
+    })
+    .await;
 }
 
 /// Web searches have no request id, but get the same server-side cancellation
@@ -7970,6 +8117,74 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn daemon_refuses_connections_past_the_limit_with_busy_error() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let (listener, _) = crate::ipc::bind().await.unwrap();
+        let server = tokio::spawn(serve_daemon_connections(
+            listener,
+            test_state(),
+            ConnectionLimiter::new(2, 1, Duration::from_millis(200)),
+        ));
+
+        // Clients that got an answer and stay connected hold both slots.
+        let mut open_clients = Vec::new();
+        for _ in 0..2 {
+            let mut client = BufReader::new(crate::ipc::connect().await.unwrap());
+            let payload =
+                serde_json::to_vec(&DaemonRequestEnvelope::new(DaemonRequest::Version)).unwrap();
+            client.get_mut().write_all(&payload).await.unwrap();
+            client.get_mut().write_all(b"\n").await.unwrap();
+            let mut line = String::new();
+            client.read_line(&mut line).await.unwrap();
+            assert!(line.contains("\"version\""), "{line}");
+            open_clients.push(client);
+        }
+
+        // Past the limit a request gets a busy error after the bounded wait.
+        // Its version probe still succeeds, so the client keeps the daemon
+        // instead of restarting it, which would remove the socket.
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            request::<fn(String, usize, usize)>(
+                &DaemonRequest::Remove {
+                    path: home.path().join("workspace"),
+                },
+                false,
+                None,
+            ),
+        )
+        .await
+        .expect("a refused request must not hang")
+        .unwrap();
+        assert!(
+            matches!(&refused, Some(DaemonResponse::Error { message }) if message.contains("busy")),
+            "{refused:?}"
+        );
+        assert!(
+            crate::ipc::socket_exists(),
+            "a refused client restarted the daemon"
+        );
+
+        // Closing a client frees a slot for the next request.
+        open_clients.truncate(1);
+        let served =
+            request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Status, false, None)
+                .await
+                .unwrap();
+        assert!(
+            matches!(served, Some(DaemonResponse::Status { .. })),
+            "{served:?}"
+        );
+
+        server.abort();
+        crate::ipc::cleanup_socket();
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn non_status_request_restarts_outdated_daemon_before_dispatch() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -7990,6 +8205,7 @@ mod tests {
             ];
             while request_types.len() < responses.len() {
                 let (stream, _) = listener.accept().await.unwrap();
+                let stream = crate::ipc::authenticate(stream).await.unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
                 reader.read_line(&mut line).await.unwrap();
@@ -8042,6 +8258,7 @@ mod tests {
             ];
             while request_types.len() < responses.len() {
                 let (stream, _) = listener.accept().await.unwrap();
+                let stream = crate::ipc::authenticate(stream).await.unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
                 reader.read_line(&mut line).await.unwrap();

@@ -10,7 +10,7 @@ use crate::indexer::{
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
-use crate::search::{SearchContext, SearchOptions};
+use crate::search::{SearchContext, SearchOptions, ShadowedBasePaths, query_sqlite_at};
 use crate::text::{code_line_ranges, first_code_line_range};
 use crate::workspace::{Workspace, WorkspaceScope};
 
@@ -195,6 +195,33 @@ pub(crate) fn search_symbols_in_current_index(
     mode: SymbolSearchMode,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    search_symbols_in_index(workspace, None, name, mode, options)
+}
+
+/// Definitions of `name` through a search context the caller already loaded
+/// for this workspace, reusing its open symbol tables.
+pub(crate) fn search_symbol_definitions_with_context(
+    workspace: &Workspace,
+    search_context: &SearchContext,
+    name: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    search_symbols_in_index(
+        workspace,
+        Some(search_context),
+        name,
+        SymbolSearchMode::Definitions,
+        options,
+    )
+}
+
+fn search_symbols_in_index(
+    workspace: &Workspace,
+    search_context: Option<&SearchContext>,
+    name: &str,
+    mode: SymbolSearchMode,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let candidate_name = canonical_symbol(name);
     let normalized = normalize_symbol(candidate_name);
     if normalized.is_empty() {
@@ -214,30 +241,40 @@ pub(crate) fn search_symbols_in_current_index(
     } else {
         workspace.sqlite_path()
     };
-    let mut hits = query_workspace_db(
-        &open_sqlite_readonly(&primary_sqlite)?,
-        &query,
-        &query_normalized,
-        options,
-        &path_matcher,
-        None,
-    )?;
-
-    if let Some(base_dir) = &workspace.base_index_dir {
-        let shadowed_paths = load_path_set(&workspace.overlay_sqlite_path(), "tombstones")?
-            .into_iter()
-            .chain(load_chunk_paths(&workspace.overlay_sqlite_path())?)
-            .collect::<HashSet<_>>();
-        let base = open_sqlite_readonly(&base_dir.join("metadata.sqlite3"))?;
-        // Either store can contain the best owner or exact-case match. Keep
-        // each store's best visible `limit` hits, then rank and limit globally.
-        hits.extend(query_workspace_db(
-            &base,
+    let mut hits = query_sqlite_at(search_context, &primary_sqlite, |primary| {
+        query_workspace_db(
+            primary,
             &query,
             &query_normalized,
             options,
             &path_matcher,
-            Some(&shadowed_paths),
+            None,
+        )
+    })?;
+
+    if let Some(base_dir) = &workspace.base_index_dir {
+        let overlay = workspace.overlay_sqlite_path();
+        let shadowed_paths = ShadowedBasePaths::from_context_or(search_context, &overlay, || {
+            Ok(load_path_set(&overlay, "tombstones")?
+                .into_iter()
+                .chain(load_chunk_paths(&overlay)?)
+                .collect())
+        })?;
+        // Either store can contain the best owner or exact-case match. Keep
+        // each store's best visible `limit` hits, then rank and limit globally.
+        hits.extend(query_sqlite_at(
+            search_context,
+            &base_dir.join("metadata.sqlite3"),
+            |base| {
+                query_workspace_db(
+                    base,
+                    &query,
+                    &query_normalized,
+                    options,
+                    &path_matcher,
+                    Some(&shadowed_paths),
+                )
+            },
         )?);
     }
 
@@ -495,7 +532,7 @@ fn query_workspace_db(
     normalized: &str,
     options: &SearchOptions,
     path_matcher: &PathGlobMatcher,
-    shadowed_paths: Option<&HashSet<String>>,
+    shadowed_paths: Option<&ShadowedBasePaths<'_>>,
 ) -> Result<Vec<(u8, SearchHit)>> {
     if options.limit == Some(0) {
         return Ok(Vec::new());
@@ -628,8 +665,13 @@ struct RelationshipDefinitions {
 
 /// Languages that define the requested symbol, gathered from the overlay and
 /// base symbol tables. Owner-qualified lookups use the best owner tier that
-/// exists. Empty when the symbol has no known definition.
-fn relationship_definitions(workspace: &Workspace, name: &str) -> Result<RelationshipDefinitions> {
+/// exists. Empty when the symbol has no known definition. A search context
+/// loaded for `workspace` lends its open connections and overlay path sets.
+fn relationship_definitions(
+    workspace: &Workspace,
+    search_context: Option<&SearchContext>,
+    name: &str,
+) -> Result<RelationshipDefinitions> {
     let query = parse_symbol_query(name);
     let normalized = normalize_symbol(query.name);
     if normalized.is_empty() {
@@ -644,10 +686,13 @@ fn relationship_definitions(workspace: &Workspace, name: &str) -> Result<Relatio
     // replaced the defining file, mirroring definition lookup.
     let mut databases = vec![(primary, None)];
     if let Some(base_dir) = &workspace.base_index_dir {
-        let shadowed = load_path_set(&workspace.overlay_sqlite_path(), "tombstones")?
-            .into_iter()
-            .chain(load_chunk_paths(&workspace.overlay_sqlite_path())?)
-            .collect::<HashSet<_>>();
+        let overlay = workspace.overlay_sqlite_path();
+        let shadowed = ShadowedBasePaths::from_context_or(search_context, &overlay, || {
+            Ok(load_path_set(&overlay, "tombstones")?
+                .into_iter()
+                .chain(load_chunk_paths(&overlay)?)
+                .collect())
+        })?;
         databases.push((base_dir.join("metadata.sqlite3"), Some(shadowed)));
     }
 
@@ -656,55 +701,57 @@ fn relationship_definitions(workspace: &Workspace, name: &str) -> Result<Relatio
         if !path.exists() {
             continue;
         }
-        let conn = open_sqlite_readonly(&path)?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT DISTINCT c.language, s.owner, c.file_path,
-                    CASE WHEN c.language = 'go' AND c.kind = 'Function' THEN c.text END
-             FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
-             WHERE s.normalized_name = ?1",
-        )?;
-        let rows = stmt.query_map([&normalized], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<Vec<u8>>>(3)?,
-            ))
+        query_sqlite_at(search_context, &path, |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT DISTINCT c.language, s.owner, c.file_path,
+                        CASE WHEN c.language = 'go' AND c.kind = 'Function' THEN c.text END
+                 FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
+                 WHERE s.normalized_name = ?1",
+            )?;
+            let rows = stmt.query_map([&normalized], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (language, owner, file_path, generic_source) = row?;
+                if shadowed
+                    .as_ref()
+                    .is_some_and(|shadowed| shadowed.contains(&file_path))
+                {
+                    continue;
+                }
+                let tier = owner_tier(query.owner, owner.as_deref());
+                let definitions = &mut tiers[usize::from(tier)];
+                definitions.languages.insert(language.to_ascii_lowercase());
+                if !definitions.go_generic_function
+                    && let Some(raw) = generic_source
+                {
+                    let source = try_decompress_text(raw)?;
+                    definitions.go_generic_function = crate::chunking::parse_source_tree(
+                        std::path::Path::new(&file_path),
+                        &source,
+                        "go",
+                    )
+                    .is_some_and(|tree| {
+                        tree.root_node()
+                            .named_children(&mut tree.walk())
+                            .any(|node| {
+                                node.kind() == "function_declaration"
+                                    && node.child_by_field_name("type_parameters").is_some()
+                                    && node.child_by_field_name("name").is_some_and(|name| {
+                                        name.utf8_text(source.as_bytes())
+                                            .is_ok_and(|name| name.eq_ignore_ascii_case(query.name))
+                                    })
+                            })
+                    });
+                }
+            }
+            Ok(())
         })?;
-        for row in rows {
-            let (language, owner, file_path, generic_source) = row?;
-            if shadowed
-                .as_ref()
-                .is_some_and(|shadowed| shadowed.contains(&file_path))
-            {
-                continue;
-            }
-            let tier = owner_tier(query.owner, owner.as_deref());
-            let definitions = &mut tiers[usize::from(tier)];
-            definitions.languages.insert(language.to_ascii_lowercase());
-            if !definitions.go_generic_function
-                && let Some(raw) = generic_source
-            {
-                let source = try_decompress_text(raw)?;
-                definitions.go_generic_function = crate::chunking::parse_source_tree(
-                    std::path::Path::new(&file_path),
-                    &source,
-                    "go",
-                )
-                .is_some_and(|tree| {
-                    tree.root_node()
-                        .named_children(&mut tree.walk())
-                        .any(|node| {
-                            node.kind() == "function_declaration"
-                                && node.child_by_field_name("type_parameters").is_some()
-                                && node.child_by_field_name("name").is_some_and(|name| {
-                                    name.utf8_text(source.as_bytes())
-                                        .is_ok_and(|name| name.eq_ignore_ascii_case(query.name))
-                                })
-                        })
-                });
-            }
-        }
     }
     Ok(tiers
         .into_iter()
@@ -741,7 +788,7 @@ fn search_call_sites_with_references(
         .as_deref()
         .is_none_or(|language| language.eq_ignore_ascii_case("go"))
     {
-        relationship_definitions(workspace, name)?
+        relationship_definitions(workspace, search_context, name)?
     } else {
         RelationshipDefinitions::default()
     };

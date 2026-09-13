@@ -544,8 +544,14 @@ compatibility with older response readers. Unsupported protocol versions and
 stale daemon build versions fail explicitly.
 
 Unix uses a mode-`0600` local socket plus peer-UID checks. Windows uses a
-loopback TCP endpoint protected by a per-daemon token. Request sizes and active
-connections are bounded.
+loopback TCP endpoint protected by a per-daemon token, read in each
+connection's own task so a stalled client cannot delay other accepts. Requests
+are capped at 1 MiB and open connections at 512. A connection past the cap
+waits up to 2 s for a slot, then gets a busy error in reply to its request.
+CLI, TUI, and MCP searches fall back to local search on that error; index,
+status, and `--web` requests report it. A `Version` probe still gets the real
+version, because clients restart a daemon whose probe fails.
+Beyond 64 waiting connections, new connections are closed without a reply.
 
 ### MCP
 
@@ -592,7 +598,12 @@ home's ACL. A later launch removes redirect files older than two minutes.
 `IVYGREP_NO_BROWSER` skips both the file and the launch. Sandboxed browsers
 that cannot read hidden directories under the home directory, such as
 snap-packaged Firefox and Chromium on Ubuntu, fail to load the redirect file
-under `~/.local/share`; open the printed URL instead.
+under `~/.local/share`; open the printed URL instead. WSL gets no special
+handling: the Linux `file://` URL goes to `xdg-open`. `wslview` and xdg-utils
+1.2.1 convert it with `wslpath` for a Windows browser. An opener that passes
+the URL to a Windows browser unchanged, such as `BROWSER` naming a Windows
+executable, points the browser at a missing `C:` path; open the printed URL
+instead.
 
 A `/?token=...` request answers with a small same-origin page that sets the
 HttpOnly `SameSite=Strict` cookie `ivygrep_session_<port>` and meta-refreshes to

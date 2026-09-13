@@ -12,7 +12,7 @@ use crate::chunking::{
 use crate::indexer::open_sqlite_readonly;
 use crate::merkle::MerkleSnapshot;
 use crate::path_glob::PathGlobMatcher;
-use crate::search::SearchOptions;
+use crate::search::{SearchContext, SearchOptions, ShadowedBasePaths, query_sqlite_at};
 use crate::workspace::{Workspace, index_path_string};
 
 const MAX_EDGES_PER_FILE: usize = 64;
@@ -2457,6 +2457,7 @@ fn markdown_specs(content: &str) -> Vec<String> {
 
 pub(crate) fn expand_context_graph(
     workspace: &Workspace,
+    search_context: &SearchContext,
     seed_paths: &[PathBuf],
     options: &SearchOptions,
 ) -> Result<Vec<GraphExpansion>> {
@@ -2467,7 +2468,7 @@ pub(crate) fn expand_context_graph(
         .iter()
         .map(|path| index_path_string(path))
         .collect::<BTreeSet<_>>();
-    let mut edges = load_persisted_edges(workspace, &seeds)?;
+    let mut edges = load_persisted_edges(workspace, search_context, &seeds)?;
     if edges.len() < MIN_STATIC_EDGES_BEFORE_COCHANGE {
         edges.extend(recent_cochange_edges(workspace, seed_paths));
     }
@@ -2534,6 +2535,7 @@ pub(crate) fn expand_context_graph(
 
 pub(crate) fn expand_context_tests(
     workspace: &Workspace,
+    search_context: &SearchContext,
     seed_paths: &[PathBuf],
     options: &SearchOptions,
 ) -> Result<Vec<GraphExpansion>> {
@@ -2547,7 +2549,7 @@ pub(crate) fn expand_context_tests(
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let expected_language = options.type_filter.as_deref().and_then(resolve_type_alias);
     let mut related = BTreeMap::<PathBuf, GraphExpansion>::new();
-    for edge in load_persisted_edges(workspace, &seeds)? {
+    for edge in load_persisted_edges(workspace, search_context, &seeds)? {
         let Some(expansion) = context_test_expansion(edge, &seeds) else {
             continue;
         };
@@ -2610,8 +2612,10 @@ struct RankedEdge {
 
 fn load_persisted_edges(
     workspace: &Workspace,
+    search_context: &SearchContext,
     seeds: &BTreeSet<String>,
 ) -> Result<Vec<RankedEdge>> {
+    let search_context = Some(search_context);
     let mut edges = Vec::new();
     let primary_path = if workspace.has_overlay() {
         workspace.overlay_sqlite_path()
@@ -2619,14 +2623,20 @@ fn load_persisted_edges(
         workspace.sqlite_path()
     };
     if primary_path.is_file() {
-        edges.extend(query_edges(&open_sqlite_readonly(&primary_path)?, seeds)?);
+        edges.extend(query_sqlite_at(search_context, &primary_path, |conn| {
+            query_edges(conn, seeds)
+        })?);
     }
     if let Some(base_dir) = &workspace.base_index_dir {
-        let shadowed = overlay_shadowed_paths(workspace);
+        let shadowed = ShadowedBasePaths::from_context_or(
+            search_context,
+            &workspace.overlay_sqlite_path(),
+            || Ok(overlay_shadowed_paths(workspace)),
+        )?;
         let base_path = base_dir.join("metadata.sqlite3");
         if base_path.is_file() {
             edges.extend(
-                query_edges(&open_sqlite_readonly(&base_path)?, seeds)?
+                query_sqlite_at(search_context, &base_path, |conn| query_edges(conn, seeds))?
                     .into_iter()
                     .filter(|edge| !shadowed.contains(&index_path_string(&edge.source_path))),
             );

@@ -216,6 +216,10 @@ use crate::indexer::TantivyFields;
 pub struct SearchContext {
     pub sqlite: Connection,
     pub base_sqlite: Option<Connection>,
+    /// Database files behind `sqlite` and `base_sqlite`, so lookups that
+    /// would open one of them can reuse the connection.
+    sqlite_path: PathBuf,
+    base_sqlite_path: Option<PathBuf>,
 
     pub indexes: Vec<tantivy::Index>,
     pub searchers: Vec<tantivy::Searcher>,
@@ -428,6 +432,8 @@ impl SearchContext {
             Ok(Self {
                 sqlite: overlay_sqlite,
                 base_sqlite: Some(base_sqlite),
+                sqlite_path: workspace.overlay_sqlite_path(),
+                base_sqlite_path: Some(base_dir.join("metadata.sqlite3")),
                 indexes: vec![overlay_idx, base_idx],
                 searchers: vec![overlay_searcher, base_searcher],
                 fields,
@@ -481,6 +487,8 @@ impl SearchContext {
             Ok(Self {
                 sqlite,
                 base_sqlite: None,
+                sqlite_path: workspace.sqlite_path(),
+                base_sqlite_path: None,
                 indexes: vec![idx],
                 searchers: vec![searcher],
                 fields,
@@ -507,6 +515,17 @@ impl SearchContext {
         searcher_idx == 1
             && (self.tombstones.contains(file_lossy.as_ref())
                 || self.overlay_files.contains(file_lossy.as_ref()))
+    }
+
+    /// This context's connection to the SQLite database at `path`, if it
+    /// opened that database.
+    fn sqlite_for_path(&self, path: &std::path::Path) -> Option<&Connection> {
+        if self.sqlite_path == path {
+            return Some(&self.sqlite);
+        }
+        self.base_sqlite
+            .as_ref()
+            .filter(|_| self.base_sqlite_path.as_deref() == Some(path))
     }
 
     pub fn fetch_chunk_by_vector_key(&self, vector_key: u64) -> Result<Option<IndexedChunk>> {
@@ -641,6 +660,50 @@ impl SearchContext {
             path,
             self.file_contents_epoch,
         )
+    }
+}
+
+/// Run `query` on `search_context`'s connection to `path` when it has one,
+/// otherwise on a new read-only connection.
+pub(crate) fn query_sqlite_at<T>(
+    search_context: Option<&SearchContext>,
+    path: &Path,
+    query: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    match search_context.and_then(|context| context.sqlite_for_path(path)) {
+        Some(connection) => query(connection),
+        None => query(&open_sqlite_readonly(path)?),
+    }
+}
+
+/// Files whose base index rows a linked worktree hides: overlay tombstones and
+/// files the overlay indexed again.
+pub(crate) enum ShadowedBasePaths<'a> {
+    Loaded(HashSet<String>),
+    /// A context loaded from the overlay already holds both sets.
+    Context(&'a SearchContext),
+}
+
+impl<'a> ShadowedBasePaths<'a> {
+    /// The context's sets when it loaded `overlay_path`; otherwise `load()`.
+    pub(crate) fn from_context_or(
+        search_context: Option<&'a SearchContext>,
+        overlay_path: &Path,
+        load: impl FnOnce() -> Result<HashSet<String>>,
+    ) -> Result<Self> {
+        match search_context.filter(|context| context.sqlite_path == overlay_path) {
+            Some(context) => Ok(Self::Context(context)),
+            None => load().map(Self::Loaded),
+        }
+    }
+
+    pub(crate) fn contains(&self, path: &str) -> bool {
+        match self {
+            Self::Loaded(paths) => paths.contains(path),
+            Self::Context(context) => {
+                context.tombstones.contains(path) || context.overlay_files.contains(path)
+            }
+        }
     }
 }
 

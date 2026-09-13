@@ -237,6 +237,8 @@ ig hardware          # inspect detected hardware and matching build
 
 If `ig --web` opens a page that cannot load its redirect file, as snap-packaged
 browsers on Ubuntu do for files under hidden directories, open the URL it prints.
+Under WSL, a Windows browser can load the redirect file only through an opener
+that translates Linux paths, such as `wslview`; otherwise open the printed URL.
 
 Upgrade through the channel you installed from: `brew upgrade ivygrep`,
 `winget upgrade --id BrunoVolpato.ivygrep --exact`, or rerun the installer. The
