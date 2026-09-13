@@ -163,18 +163,32 @@ fn session_cookie(port: u16, url: &str) -> String {
     );
     let bootstrap = http_request(port, "GET", target, &[]);
     assert_eq!(
-        bootstrap.status, 303,
+        bootstrap.status, 200,
         "bootstrap response: {}",
         bootstrap.body
     );
-    bootstrap
+    assert!(!refresh_target(&bootstrap.body).contains("token="));
+    let cookie = bootstrap
         .headers
         .get("set-cookie")
         .expect("bootstrap must establish an auth cookie")
         .split(';')
         .next()
         .unwrap()
-        .to_string()
+        .to_string();
+    assert!(
+        cookie.starts_with(&format!("ivygrep_session_{port}=")),
+        "session cookie must be scoped to the listener port: {cookie}"
+    );
+    cookie
+}
+
+/// Target of the bootstrap page's same-origin meta refresh.
+fn refresh_target(body: &str) -> String {
+    body.split_once("http-equiv=\"refresh\" content=\"0;url=")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(target, _)| target.replace("&amp;", "&"))
+        .unwrap_or_else(|| panic!("bootstrap page must refresh to the app: {body}"))
 }
 
 fn run_web_until_ready(home: &Path, repo: &Path, query: &str) -> String {
@@ -658,7 +672,7 @@ fn non_loopback_web_uses_token_cookie_and_rejects_unauthorized_api_calls() {
 
     let bootstrap = http_request(port, "GET", target, &[]);
     assert_eq!(
-        bootstrap.status, 303,
+        bootstrap.status, 200,
         "bootstrap response: {}",
         bootstrap.body
     );
@@ -669,13 +683,19 @@ fn non_loopback_web_uses_token_cookie_and_rejects_unauthorized_api_calls() {
     assert!(cookie_header.contains("HttpOnly"));
     assert!(cookie_header.contains("SameSite=Strict"));
     let cookie = cookie_header.split(';').next().unwrap().to_string();
-    let location = bootstrap
-        .headers
-        .get("location")
-        .expect("bootstrap must strip token through a redirect");
+    assert!(
+        cookie.starts_with(&format!("ivygrep_session_{port}=")),
+        "{cookie}"
+    );
+    assert!(
+        !bootstrap.headers.contains_key("location"),
+        "a redirect in a cross-site chain drops the SameSite=Strict cookie"
+    );
+    let location = refresh_target(&bootstrap.body);
     assert!(!location.contains("token="));
+    assert!(location.starts_with('/'), "refresh must stay same-origin");
 
-    let html = http_request(port, "GET", location, &[("Cookie", &cookie)]);
+    let html = http_request(port, "GET", &location, &[("Cookie", &cookie)]);
     assert_eq!(html.status, 200);
     assert!(html.body.contains("name=\"ivygrep-boot\""));
     assert!(!html.body.contains(token), "token leaked into HTML source");

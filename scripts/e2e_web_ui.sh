@@ -115,8 +115,45 @@ web_url=$(sed -n 's/^ivygrep web listening at //p' "$out_dir/web.txt" | tail -n 
   cat "$out_dir/web.txt" >&2
   fail "web server did not report a URL"
 }
+token=$(printf '%s\n' "$web_url" | sed -n 's/.*[?&]token=\([^&]*\).*/\1/p')
+[ -n "$token" ] || fail "printed URL has no session token: $web_url"
+
+# Launch the browser the way `ig --web` does, with a recording opener in place
+# of xdg-open/open. The session token must stay out of process arguments.
+opener_bin="$tmp_root/opener-bin"
+opener_log="$out_dir/opener-argv.txt"
+mkdir -p "$opener_bin"
+cat > "$opener_bin/xdg-open" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$IVYGREP_E2E_OPENER_LOG.tmp"
+mv "$IVYGREP_E2E_OPENER_LOG.tmp" "$IVYGREP_E2E_OPENER_LOG"
+EOF
+chmod +x "$opener_bin/xdg-open"
+cp "$opener_bin/xdg-open" "$opener_bin/open"
+(
+  unset IVYGREP_NO_BROWSER
+  PATH="$opener_bin:$PATH" IVYGREP_E2E_OPENER_LOG="$opener_log" \
+    "$ig_bin" --web --host 127.0.0.1 --port 0 "semantic browser marker" "$project" >"$out_dir/web-browser.txt"
+)
+attempt=1
+while [ ! -f "$opener_log" ] && [ "$attempt" -le 100 ]; do
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+[ -f "$opener_log" ] || fail "ig --web did not run the browser opener"
+if grep -F -e "$token" "$opener_log" >/dev/null; then
+  fail "browser opener arguments contain the session token"
+fi
+argument_count=$(wc -l <"$opener_log" | tr -d ' ')
+[ "$argument_count" = 1 ] || fail "browser opener expected one argument, got: $(cat "$opener_log")"
+redirect_url=$(cat "$opener_log")
+case "$redirect_url" in
+  file:///*.html) ;;
+  *) fail "browser opener did not receive a redirect file URL: $redirect_url" ;;
+esac
 
 IVYGREP_WEB_URL="$web_url" \
+IVYGREP_REDIRECT_URL="$redirect_url" \
   pnpm -C "$root/web" exec playwright test e2e/web-ui.pw.ts --config=playwright.config.ts
 
 echo "Web UI browser procedure passed"

@@ -1,12 +1,28 @@
 import { test, expect } from "@playwright/test";
 
 // `ig --web` prints a URL carrying the session token, loopback included.
-// Visiting `/?token=...` sets the session cookie and redirects to `/`.
+// Visiting `/?token=...` sets the session cookie and forwards to `/`.
 function sessionEntryPath(): string {
   const printed = process.env.IVYGREP_WEB_URL;
   const token = printed ? new URL(printed).searchParams.get("token") : null;
   return token ? `/?token=${encodeURIComponent(token)}` : "/";
 }
+
+test("opens through the launcher redirect file and calls the API with the session cookie", async ({ page }) => {
+  // scripts/e2e_web_ui.sh runs `ig --web` with a recording opener and passes on
+  // the one argument it received: the owner-only redirect file, not the token URL.
+  const redirectUrl = process.env.IVYGREP_REDIRECT_URL;
+  test.skip(!redirectUrl, "IVYGREP_REDIRECT_URL is set by scripts/e2e_web_ui.sh");
+  const printed = new URL(process.env.IVYGREP_WEB_URL ?? "");
+
+  // file:// page -> cross-site /?token=... -> token-free / on the server origin.
+  await page.goto(redirectUrl!);
+  await page.waitForURL((url) => url.origin === printed.origin && url.pathname === "/" && !url.searchParams.has("token"));
+
+  await expect(page.locator("#workspaces .workspace").filter({ hasText: "project" })).toBeVisible();
+  const status = await page.evaluate(async () => (await fetch("/api/status")).status);
+  expect(status).toBe(200);
+});
 
 test("searches an indexed workspace and opens the result in the viewer", async ({ page }) => {
   await page.goto(sessionEntryPath());

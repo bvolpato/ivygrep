@@ -23,7 +23,6 @@ const MAX_CONCURRENT_HTTP_CONNECTIONS: usize = 128;
 const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_SEARCH_LIMIT: usize = 50;
-const WEB_AUTH_COOKIE: &str = "ivygrep_web_token";
 const SECURITY_HEADERS: &str = concat!(
     "Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'\r\n",
     "Cross-Origin-Opener-Policy: same-origin\r\n",
@@ -66,6 +65,32 @@ fn web_auth_token() -> &'static str {
             )
         })
         .as_str()
+}
+
+/// Authentication settings for one listener.
+#[derive(Clone)]
+struct WebAuth {
+    token: &'static str,
+    cookie_name: Arc<str>,
+    /// Bound to a non-loopback address, so Host checks accept literal IPs.
+    exposed: bool,
+}
+
+impl WebAuth {
+    fn for_listener(local_addr: SocketAddr) -> Self {
+        Self {
+            token: web_auth_token(),
+            cookie_name: web_auth_cookie_name(local_addr.port()).into(),
+            exposed: !local_addr.ip().is_loopback(),
+        }
+    }
+}
+
+/// Session cookie name for the listener on `port`. Browsers send a host's
+/// cookies to every port, so a fixed name would let ivygrep daemons on
+/// different ports overwrite each other's session.
+fn web_auth_cookie_name(port: u16) -> String {
+    format!("ivygrep_session_{port}")
 }
 
 pub(crate) fn bind_addr(host: &str, port: u16) -> Result<SocketAddr> {
@@ -113,17 +138,17 @@ pub(crate) async fn serve(
     state: DaemonState,
     config: WebConfig,
 ) -> Result<()> {
-    let exposed = !listener.local_addr()?.ip().is_loopback();
-    let auth_token = web_auth_token();
+    let auth = WebAuth::for_listener(listener.local_addr()?);
     let connections = Arc::new(Semaphore::new(MAX_CONCURRENT_HTTP_CONNECTIONS));
     loop {
         let permit = connections.clone().acquire_owned().await?;
         let (stream, _) = listener.accept().await?;
         let state = state.clone();
         let config = config.clone();
+        let auth = auth.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(err) = handle_connection(stream, state, config, auth_token, exposed).await {
+            if let Err(err) = handle_connection(stream, state, config, auth).await {
                 tracing::warn!("web request failed: {err:#}");
             }
         });
@@ -134,8 +159,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     state: DaemonState,
     config: WebConfig,
-    auth_token: &'static str,
-    exposed: bool,
+    auth: WebAuth,
 ) -> Result<()> {
     let request =
         match read_http_request_with_timeout(&mut stream, HTTP_HEADER_READ_TIMEOUT).await? {
@@ -151,7 +175,7 @@ async fn handle_connection(
             }
         };
     let (path, params) = parse_target(&request.target)?;
-    if !valid_host(&request, exposed) {
+    if !valid_host(&request, auth.exposed) {
         return write_json(
             &mut stream,
             "403 Forbidden",
@@ -165,12 +189,12 @@ async fn handle_connection(
             return method_not_allowed(&mut stream, "GET").await;
         }
         if let Some(presented) = param(&params, "token") {
-            if !tokens_match(presented, auth_token) {
+            if !tokens_match(presented, auth.token) {
                 return unauthorized(&mut stream).await;
             }
-            return establish_web_session(&mut stream, &path, &params, auth_token).await;
+            return establish_web_session(&mut stream, &path, &params, &auth).await;
         }
-        if !request_has_auth(&request, auth_token) {
+        if !request_has_auth(&request, &auth) {
             return unauthorized(&mut stream).await;
         }
         return write_html(&mut stream, &render_app_html(&config)).await;
@@ -191,7 +215,7 @@ async fn handle_connection(
             )
             .await;
         }
-        if !request_has_auth(&request, auth_token) {
+        if !request_has_auth(&request, &auth) {
             return unauthorized(&mut stream).await;
         }
     }
@@ -408,18 +432,18 @@ fn valid_api_origin(request: &HttpRequest) -> bool {
     origin_authority.eq_ignore_ascii_case(authority)
 }
 
-fn request_has_auth(request: &HttpRequest, expected: &str) -> bool {
+fn request_has_auth(request: &HttpRequest, auth: &WebAuth) -> bool {
     let bearer_matches = request
         .headers
         .get("authorization")
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| tokens_match(value.trim(), expected));
+        .is_some_and(|value| tokens_match(value.trim(), auth.token));
     bearer_matches
         || request
             .headers
             .get("cookie")
-            .and_then(|cookies| cookie_value(cookies, WEB_AUTH_COOKIE))
-            .is_some_and(|value| tokens_match(value, expected))
+            .and_then(|cookies| cookie_value(cookies, &auth.cookie_name))
+            .is_some_and(|value| tokens_match(value, auth.token))
 }
 
 fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
@@ -454,26 +478,43 @@ fn parse_target(target: &str) -> Result<(String, HashMap<String, Vec<String>>)> 
     Ok((path.to_string(), params))
 }
 
+/// Exchange the printed `?token=` URL for the session cookie.
+///
+/// Answers with a page instead of a redirect. The launcher opens the token URL
+/// from a `file://` redirect page, so that navigation is cross-site, and the
+/// browser does not send a just-set `SameSite=Strict` cookie on a redirect in
+/// that chain. The page's own refresh is a same-origin navigation that carries
+/// it, and its target drops the token from the address bar.
 async fn establish_web_session(
     stream: &mut TcpStream,
     path: &str,
     params: &HashMap<String, Vec<String>>,
-    token: &str,
+    auth: &WebAuth,
 ) -> Result<()> {
     let location = target_without_param(path, params, "token");
-    let cookie = format!("{WEB_AUTH_COOKIE}={token}; HttpOnly; Path=/; SameSite=Strict");
+    let cookie = format!(
+        "{}={}; HttpOnly; Path=/; SameSite=Strict",
+        auth.cookie_name, auth.token
+    );
     write_response_with_headers(
         stream,
-        "303 See Other",
-        "text/plain; charset=utf-8",
-        b"",
+        "200 OK",
+        "text/html; charset=utf-8",
+        session_bootstrap_html(&location).as_bytes(),
         &[
             ("Cache-Control", "no-store"),
-            ("Location", location.as_str()),
             ("Set-Cookie", cookie.as_str()),
         ],
     )
     .await
+}
+
+/// Meta refresh to `location` with no script, so the CSP needs no exception.
+fn session_bootstrap_html(location: &str) -> String {
+    let location = escape_html_attribute(location);
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"0;url={location}\">\n<title>ivygrep web</title>\n</head>\n<body>\n<p><a href=\"{location}\">Continue to ivygrep web</a></p>\n</body>\n</html>\n"
+    )
 }
 
 fn target_without_param(
@@ -689,6 +730,11 @@ async fn build_context_pack(
     let model = state
         .prepare_context_model(&workspace, skip_gitignore)
         .await?;
+    // The builder runs on the blocking pool, which dropping this future (the
+    // browser disconnected) cannot stop. The guard sets the token its retrieval
+    // searches check, so abandoned work ends early.
+    let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _cancel_on_drop = CancelOnDrop(cancel_token.clone());
     let options = crate::search::SearchOptions {
         limit: None,
         context: 12,
@@ -702,7 +748,7 @@ async fn build_context_pack(
         skip_gitignore,
         force_neural: false,
         progress_tx: None,
-        cancel_token: None,
+        cancel_token: Some(cancel_token),
     };
     let query = query.to_string();
     let since = param(params, "since")
@@ -723,6 +769,15 @@ async fn build_context_pack(
     })
     .await
     .context("context task failed")?
+}
+
+/// Sets a search cancel token when dropped.
+struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 async fn write_search_stream(
@@ -1148,7 +1203,7 @@ fn render_app_html(config: &WebConfig) -> String {
     )
 }
 
-fn escape_html_attribute(value: &str) -> String {
+pub(crate) fn escape_html_attribute(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1262,19 +1317,14 @@ mod tests {
             initial_query: None,
             initial_path: None,
         };
-        let handler = tokio::spawn(handle_connection(
-            server,
-            state,
-            config,
-            web_auth_token(),
-            false,
-        ));
+        let auth = WebAuth::for_listener(addr);
+        let cookie = format!("{}={}", auth.cookie_name, auth.token);
+        let handler = tokio::spawn(handle_connection(server, state, config, auth));
         let workspace = percent_encode(&root.path().display().to_string());
         client
             .write_all(
                 format!(
-                    "GET /api/search?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {WEB_AUTH_COOKIE}={}\r\n\r\n",
-                    web_auth_token()
+                    "GET /api/search?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {cookie}\r\n\r\n"
                 )
                 .as_bytes(),
             )
@@ -1317,19 +1367,14 @@ mod tests {
             initial_query: None,
             initial_path: None,
         };
-        let handler = tokio::spawn(handle_connection(
-            server,
-            state,
-            config,
-            web_auth_token(),
-            false,
-        ));
+        let auth = WebAuth::for_listener(addr);
+        let cookie = format!("{}={}", auth.cookie_name, auth.token);
+        let handler = tokio::spawn(handle_connection(server, state, config, auth));
         let workspace = percent_encode(&root.path().display().to_string());
         client
             .write_all(
                 format!(
-                    "GET /api/search/stream?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {WEB_AUTH_COOKIE}={}\r\n\r\n",
-                    web_auth_token()
+                    "GET /api/search/stream?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {cookie}\r\n\r\n"
                 )
                 .as_bytes(),
             )
@@ -1363,26 +1408,50 @@ mod tests {
         }
     }
 
+    fn request_with_header(name: &str, value: String) -> HttpRequest {
+        HttpRequest {
+            method: "GET".to_string(),
+            target: "/api/status".to_string(),
+            headers: HashMap::from([(name.to_string(), value)]),
+        }
+    }
+
     #[test]
     fn auth_accepts_cookie_or_bearer_and_rejects_other_values() {
-        let expected = "0123456789abcdef";
-        let cookie_request = HttpRequest {
-            method: "GET".to_string(),
-            target: "/api/status".to_string(),
-            headers: HashMap::from([(
-                "cookie".to_string(),
-                format!("other=1; {WEB_AUTH_COOKIE}={expected}"),
-            )]),
-        };
-        assert!(request_has_auth(&cookie_request, expected));
+        let auth = WebAuth::for_listener("127.0.0.1:4747".parse().unwrap());
+        let token = auth.token;
+        assert!(request_has_auth(
+            &request_with_header("cookie", format!("other=1; ivygrep_session_4747={token}")),
+            &auth
+        ));
+        assert!(request_has_auth(
+            &request_with_header("authorization", format!("Bearer {token}")),
+            &auth
+        ));
+        assert!(!request_has_auth(
+            &request_with_header("authorization", "Bearer different-token".to_string()),
+            &auth
+        ));
+    }
 
-        let bearer_request = HttpRequest {
-            method: "GET".to_string(),
-            target: "/api/status".to_string(),
-            headers: HashMap::from([("authorization".to_string(), format!("Bearer {expected}"))]),
-        };
-        assert!(request_has_auth(&bearer_request, expected));
-        assert!(!request_has_auth(&bearer_request, "different-token"));
+    #[test]
+    fn session_cookie_is_scoped_to_the_listener_port() {
+        let auth = WebAuth::for_listener("127.0.0.1:4747".parse().unwrap());
+        let token = auth.token;
+        assert_eq!(&*auth.cookie_name, "ivygrep_session_4747");
+        // Another daemon's session on the same host keeps its own cookie, so
+        // both coexist instead of overwriting one fixed name.
+        assert!(request_has_auth(
+            &request_with_header(
+                "cookie",
+                format!("ivygrep_session_4748=other-daemon; ivygrep_session_4747={token}")
+            ),
+            &auth
+        ));
+        assert!(!request_has_auth(
+            &request_with_header("cookie", format!("ivygrep_session_4748={token}")),
+            &auth
+        ));
     }
 
     #[test]

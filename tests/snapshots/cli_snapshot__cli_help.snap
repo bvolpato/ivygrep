@@ -25,7 +25,7 @@ Options:
       --deep                  Perform full cross-store integrity scans (used with --doctor)
       --daemon                Run long-lived indexing, search, MCP, and web services
       --web                   Open the daemon-backed local web UI
-      --host <HOST>           Host for --web. Non-loopback access requires the token in the printed URL [default: 127.0.0.1]
+      --host <HOST>           Host for --web. Every listener requires the session token in the printed URL [default: 127.0.0.1]
       --port <PORT>           Port for --web. Use 0 to let the OS choose a free port [default: 4747]
       --mcp                   Serve Model Context Protocol tools over stdio
       --wait-for-enhancement  Wait for requested vector enhancement and report worker failures

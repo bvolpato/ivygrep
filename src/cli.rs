@@ -104,7 +104,7 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub web: bool,
 
-    /// Host for --web. Non-loopback access requires the token in the printed URL.
+    /// Host for --web. Every listener requires the session token in the printed URL.
     #[arg(long, default_value = "127.0.0.1", requires = "web")]
     pub host: String,
 

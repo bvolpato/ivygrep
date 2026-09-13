@@ -152,17 +152,61 @@ pub fn serve_stdio() -> Result<()> {
             None => break,
         };
 
-        if let Some(response) = handle_payload(&payload) {
-            write_message(&mut writer, &response, mode)?;
+        if let Some(reply) = handle_payload(&payload) {
+            write_message(&mut writer, &reply, mode)?;
         }
     }
 
     Ok(())
 }
 
-/// Handle one framed JSON-RPC payload. `None` means nothing is sent back.
-fn handle_payload(payload: &[u8]) -> Option<JsonRpcResponse> {
-    let request = match parse_request(payload) {
+/// What one framed payload sends back.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum JsonRpcReply {
+    Single(JsonRpcResponse),
+    Batch(Vec<JsonRpcResponse>),
+}
+
+/// Handle one framed JSON-RPC payload: a single message or a batch array,
+/// which MCP 2025-03-26 requires servers to accept. `None` means nothing is
+/// sent back.
+fn handle_payload(payload: &[u8]) -> Option<JsonRpcReply> {
+    let message: Value = match serde_json::from_slice(payload) {
+        Ok(message) => message,
+        Err(err) => {
+            return Some(JsonRpcReply::Single(error_response(
+                Value::Null,
+                -32700,
+                format!("parse error: {err}"),
+            )));
+        }
+    };
+    match message {
+        // An empty batch is one invalid request, answered with a single object.
+        Value::Array(messages) if messages.is_empty() => {
+            Some(JsonRpcReply::Single(error_response(
+                Value::Null,
+                -32600,
+                "invalid request: empty batch".to_string(),
+            )))
+        }
+        // Notifications and client responses get no entry, and a batch with
+        // nothing to answer sends nothing instead of an empty array.
+        Value::Array(messages) => {
+            let responses = messages
+                .into_iter()
+                .filter_map(handle_message)
+                .collect::<Vec<_>>();
+            (!responses.is_empty()).then_some(JsonRpcReply::Batch(responses))
+        }
+        message => handle_message(message).map(JsonRpcReply::Single),
+    }
+}
+
+/// Handle one JSON-RPC message. `None` means nothing is sent back.
+fn handle_message(message: Value) -> Option<JsonRpcResponse> {
+    let request = match parse_request(message) {
         Ok(Some(request)) => request,
         Ok(None) => return None,
         Err(response) => return Some(response),
@@ -185,9 +229,7 @@ fn handle_payload(payload: &[u8]) -> Option<JsonRpcResponse> {
 
 /// Decode one JSON-RPC 2.0 message. `Ok(None)` is a client's response to a
 /// server request, which needs no answer; `Err` carries the error response.
-fn parse_request(payload: &[u8]) -> std::result::Result<Option<JsonRpcRequest>, JsonRpcResponse> {
-    let message: Value = serde_json::from_slice(payload)
-        .map_err(|err| error_response(Value::Null, -32700, format!("parse error: {err}")))?;
+fn parse_request(message: Value) -> std::result::Result<Option<JsonRpcRequest>, JsonRpcResponse> {
     let Value::Object(mut message) = message else {
         return Err(error_response(
             Value::Null,
@@ -1686,9 +1728,10 @@ fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Op
     };
     let (trimmed, _raw) = first_line;
 
-    // Auto-detect framing: if first meaningful line starts with '{', it's bare JSON.
+    // Auto-detect framing: a first meaningful line starting with '{', or '[' for
+    // a batch, is bare JSON.
     if *mode == FramingMode::Unknown {
-        if trimmed.starts_with('{') {
+        if trimmed.starts_with(['{', '[']) {
             *mode = FramingMode::JsonLine;
         } else {
             *mode = FramingMode::ContentLength;
@@ -1737,9 +1780,9 @@ fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Op
     }
 }
 
-fn write_message<W: Write>(
+fn write_message<W: Write, T: Serialize>(
     writer: &mut W,
-    response: &JsonRpcResponse,
+    response: &T,
     mode: FramingMode,
 ) -> Result<()> {
     let payload = serde_json::to_vec(response)?;
@@ -1817,6 +1860,47 @@ mod tests {
         assert!(
             payload_response(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none()
         );
+    }
+
+    #[test]
+    fn jsonrpc_batch_answers_requests_in_one_array() {
+        let response = payload_response(
+            r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":"two","method":"missing/method"},42]"#,
+        )
+        .unwrap();
+        let responses = response.as_array().expect("batch reply must be an array");
+        assert_eq!(responses.len(), 3, "{response}");
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"], json!({}));
+        assert_eq!(responses[1]["id"], "two");
+        assert_eq!(responses[1]["error"]["code"], -32601);
+        assert_eq!(responses[2].get("id"), Some(&Value::Null));
+        assert_eq!(responses[2]["error"]["code"], -32600);
+    }
+
+    #[test]
+    fn jsonrpc_batch_without_requests_sends_nothing_and_empty_batch_is_invalid() {
+        assert!(
+            payload_response(
+                r#"[{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":9,"result":{}}]"#
+            )
+            .is_none()
+        );
+
+        let empty = payload_response("[]").unwrap();
+        assert!(empty.is_object(), "{empty}");
+        assert_eq!(empty["error"]["code"], -32600);
+        assert_eq!(empty.get("id"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn read_message_detects_line_framing_from_a_batch() {
+        let batch = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]\n";
+        let mut reader = std::io::BufReader::new(batch.as_bytes());
+        let mut mode = FramingMode::Unknown;
+        let payload = read_message(&mut reader, &mut mode).unwrap();
+        assert_eq!(payload.as_deref(), Some(batch.trim_end().as_bytes()));
+        assert!(mode == FramingMode::JsonLine);
     }
 
     #[test]

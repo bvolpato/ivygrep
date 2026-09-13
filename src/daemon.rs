@@ -1973,19 +1973,28 @@ impl DaemonState {
         None
     }
 
+    /// Dropping the returned future (the Web client hung up) also stops a lease
+    /// wait already handed to the blocking pool.
     pub(crate) async fn prepare_context_model(
         &self,
         workspace: &Workspace,
         skip_gitignore: bool,
     ) -> Result<Arc<dyn EmbeddingModel>> {
+        let cancellation = SearchCancellation::new(false);
+        let mut cancel_on_drop = CancelSearchOnDrop(Some(cancellation.clone()));
         let search_leases = self
-            .acquire_search_leases(std::slice::from_ref(workspace), skip_gitignore, None)
+            .acquire_search_leases(
+                std::slice::from_ref(workspace),
+                skip_gitignore,
+                Some(&cancellation),
+            )
             .await
             .map_err(|response| match response {
                 DaemonResponse::Error { message } => anyhow::anyhow!(message),
                 response => anyhow::anyhow!("context preparation failed: {response:?}"),
             })?
             .ok_or_else(|| anyhow::anyhow!("context preparation cancelled"))?;
+        cancel_on_drop.disarm();
         let permit = self
             .acquire_cpu_permit()
             .await
@@ -2747,9 +2756,15 @@ impl Drop for CancelSearchOnDrop {
 }
 
 /// Whether the running listener serves a `--web` request for `requested`.
-/// Port 0 accepts whichever port the listener already has.
+/// Loopback addresses are interchangeable: `localhost` often resolves to `::1`
+/// first while the default listener is `127.0.0.1`, and either way only local
+/// clients can connect. Other addresses must match exactly. Port 0 accepts
+/// whichever port the listener already has.
 fn web_bind_matches(requested: SocketAddr, active: SocketAddr) -> bool {
-    requested.ip() == active.ip() && (requested.port() == 0 || requested.port() == active.port())
+    let (requested_ip, active_ip) = (requested.ip().to_canonical(), active.ip().to_canonical());
+    let same_ip =
+        requested_ip == active_ip || (requested_ip.is_loopback() && active_ip.is_loopback());
+    same_ip && (requested.port() == 0 || requested.port() == active.port())
 }
 
 fn start_web_server(state: &DaemonState, web_config: crate::web::WebConfig) -> Result<String> {
@@ -7766,6 +7781,44 @@ mod tests {
             Some("not-a-version"),
             "1.2.14"
         ));
+    }
+
+    #[test]
+    fn web_listener_reuse_treats_loopback_hosts_as_equivalent() {
+        let active: SocketAddr = "127.0.0.1:4747".parse().unwrap();
+        let localhost = crate::web::bind_addr("localhost", 4747).unwrap();
+        assert!(
+            web_bind_matches(localhost, active),
+            "localhost resolved to {localhost}"
+        );
+        for requested in [
+            "127.0.0.1:4747",
+            "127.0.0.1:0",
+            "[::1]:4747",
+            "[::1]:0",
+            "[::ffff:127.0.0.1]:4747",
+        ] {
+            assert!(
+                web_bind_matches(requested.parse().unwrap(), active),
+                "{requested}"
+            );
+        }
+        assert!(web_bind_matches(
+            "127.0.0.1:0".parse().unwrap(),
+            "[::1]:4747".parse().unwrap()
+        ));
+        for requested in [
+            "0.0.0.0:4747",
+            "[::]:4747",
+            "192.0.2.10:4747",
+            "127.0.0.1:4748",
+            "[::1]:4748",
+        ] {
+            assert!(
+                !web_bind_matches(requested.parse().unwrap(), active),
+                "{requested}"
+            );
+        }
     }
 
     #[test]

@@ -118,6 +118,62 @@ fn e2e_mcp_initialize() {
 }
 
 #[test]
+fn e2e_mcp_batch_requests() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin("ig"))
+        .env("IVYGREP_HOME", tmp.path().join("ivygrep_home"))
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .arg("--mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn ig --mcp");
+    let mut stdin = child.stdin.take().expect("Failed to get stdin");
+    let mut reader = BufReader::new(child.stdout.take().expect("Failed to get stdout"));
+    let mut read_response = || -> Value {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .expect("Failed to read from stdout");
+        serde_json::from_str(&line).expect("Invalid JSON returned from stdout")
+    };
+
+    // 2025-03-26 is the MCP revision that requires servers to accept batches.
+    let init_req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "test-client", "version": "1.0.0" }
+        }
+    });
+    writeln!(stdin, "{init_req}").unwrap();
+    assert_eq!(read_response()["result"]["protocolVersion"], "2025-03-26");
+
+    let batch = json!([
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}
+    ]);
+    writeln!(stdin, "{batch}").unwrap();
+    let reply = read_response();
+    let responses = reply
+        .as_array()
+        .unwrap_or_else(|| panic!("batch reply must be an array: {reply}"));
+    let ids = responses
+        .iter()
+        .map(|response| response["id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![json!(2), json!(3)], "{reply}");
+    assert!(responses[1]["result"]["tools"].is_array(), "{reply}");
+
+    drop(stdin);
+    assert!(child.wait().expect("Failed to wait on child").success());
+}
+
+#[test]
 fn e2e_mcp_full_session() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("ivygrep_home");
