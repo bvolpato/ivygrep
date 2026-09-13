@@ -249,12 +249,15 @@ fn spawn_index_batch_producer(
                         let content = String::from_utf8(content_bytes).unwrap_or_else(|error| {
                             String::from_utf8_lossy(&error.into_bytes()).into_owned()
                         });
-                        let mut chunked = chunk_source_with_metadata(rel_path, &content);
-                        let file_graph = crate::context_graph::extract_file_graph(
+                        let mut trees = crate::chunking::SourceTrees::default();
+                        let mut chunked =
+                            chunk_source_with_metadata(rel_path, &content, &mut trees);
+                        let file_graph = crate::context_graph::extract_file_graph_with_trees(
                             &root,
                             current_snapshot.as_deref(),
                             rel_path,
                             &content,
+                            trees,
                         );
                         let (included_chunks, included_paths) = load_rust_doc_includes(
                             &root,

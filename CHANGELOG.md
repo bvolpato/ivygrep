@@ -16,6 +16,7 @@ All notable changes to ivygrep are documented in this file.
 - Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
 - Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
 - Background hash and neural enhancement insert vectors through at most four concurrent lanes instead of one at a time, keeping neural recall@10 within 0.5 points of serial builds. On a 179K-chunk repository, hash enhancement runs 2.0x faster and neural enhancement 2.4x faster. Stores under 1,024 vectors keep serial inserts, and `IVYGREP_INDEX_THREADS=1` restores them everywhere.
+- Indexing reuses the chunker's Tree-sitter parse for Python and Objective-C import scanning instead of parsing each file again. Objective-C++ files also reuse the chunker's C++ parse.
 
 ### Testing
 
