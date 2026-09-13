@@ -137,10 +137,13 @@ try {
             throw $copyError
         }
     } finally {
-        # An interrupt between the rename and the copy skips the catch block.
-        # Put the previous binary back if nothing took its place.
-        if (-not $installed -and $previous -and -not (Test-Path -LiteralPath $target -PathType Leaf)) {
+        # An interrupt can skip the catch block before or during Copy-Item. Until
+        # the copy is confirmed, remove any partial target and restore the old binary.
+        if (-not $installed -and $previous) {
             try {
+                if (Test-Path -LiteralPath $target) {
+                    Remove-Item -LiteralPath $target -Force
+                }
                 Move-Item -LiteralPath $previous -Destination $target
             } catch {
                 Write-Warning "Could not restore the previous ivygrep binary ($($_.Exception.Message)); it remains at $previous"
