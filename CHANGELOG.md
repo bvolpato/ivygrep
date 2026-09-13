@@ -7,6 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ### Added
 
 - **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
+
 ### Performance
 
 - Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
