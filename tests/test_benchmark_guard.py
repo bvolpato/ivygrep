@@ -221,6 +221,26 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
         )
         self.assertEqual(recovered, 0)
 
+    def test_missing_baseline_benchmark_records_head_and_passes(self) -> None:
+        output_path = self.repo / "artifacts" / "renamed.json"
+
+        result, measure = self.run_guard(
+            [11.0, FileNotFoundError("estimates.json")], output_path
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            [call.args[1] for call in measure.call_args_list], ["current", "baseline"]
+        )
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertTrue(payload["baseline_missing"])
+        self.assertIsNone(payload["ratio"])
+        self.assertEqual(payload["current_median_ns"], 11.0)
+
+    def test_missing_head_benchmark_still_fails(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.run_guard([FileNotFoundError("estimates.json")])
+
     def test_writes_machine_readable_result(self) -> None:
         output_path = self.repo / "artifacts" / "guard.json"
 

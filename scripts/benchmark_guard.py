@@ -140,9 +140,45 @@ def main() -> int:
     original_checkout = current_checkout(repo_root)
     current_ref = output(["git", "rev-parse", "HEAD"], repo_root)
 
+    baseline: float | None = None
     try:
         current = measure(repo_root, current_ref, args.bench_target, args.bench_name)
-        baseline = measure(repo_root, args.baseline_ref, args.bench_target, args.bench_name)
+        try:
+            baseline = measure(
+                repo_root, args.baseline_ref, args.bench_target, args.bench_name
+            )
+        except FileNotFoundError:
+            # A new or renamed benchmark has no estimates at the baseline ref.
+            # The head still ran, so a crash or missing bench there still fails.
+            baseline = None
+    finally:
+        if baseline is None:
+            restore_checkout(repo_root, original_checkout)
+
+    if baseline is None:
+        result = {
+            "bench": args.bench_name,
+            "current_ref": current_ref,
+            "baseline_ref": args.baseline_ref,
+            "current_median_ns": current,
+            "baseline_median_ns": None,
+            "baseline_missing": True,
+            "ratio": None,
+            "threshold": args.threshold,
+            "max_median_ms": args.max_median_ms,
+            "confirmation": None,
+        }
+        if args.output is not None:
+            write_result(args.output, result)
+        print(json.dumps(result, indent=2))
+        print(
+            f"{args.bench_name} has no baseline at {args.baseline_ref}; "
+            "recorded the head measurement without a paired comparison",
+            file=sys.stderr,
+        )
+        return 0
+
+    try:
         initial_ratio = ratio(current, baseline)
         confirmation = None
         if max_median_ns is not None:

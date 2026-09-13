@@ -939,9 +939,11 @@ fn bench_critical_journeys(c: &mut Criterion) {
 
     // ANN search at scale: 50K pseudo-random vectors (vs the 1K micro-bench),
     // enough to exercise usearch HNSW behaviour rather than a trivial set.
-    // The guarded `vector_search_in_50k*` benches measure the sparse hash-tier
-    // graph, which is the graph every historical baseline was built with.
-    // `neural_vector_search_in_50k_hot` measures the default-parameter graph
+    // The guarded `*_distinct_hot` benches use 50K distinct seeded vectors; the
+    // earlier `*_hot` names measured a fixture with only 97 distinct values, so
+    // their history is not comparable. `vector_search_in_50k_distinct_hot`
+    // measures the sparse hash-tier graph and
+    // `neural_vector_search_in_50k_distinct_hot` the default-parameter graph
     // used by neural stores.
     let ann_fixture = OnceCell::new();
     group.bench_function("vector_search_in_50k", |b| {
@@ -966,7 +968,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("vector_search_in_50k_hot", |b| {
+    group.bench_function("vector_search_in_50k_distinct_hot", |b| {
         let (_ann_dir, ann_path, query) =
             ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
         let store = VectorStore::open_readonly(
@@ -987,7 +989,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     });
 
     let neural_ann_fixture = OnceCell::new();
-    group.bench_function("neural_vector_search_in_50k_hot", |b| {
+    group.bench_function("neural_vector_search_in_50k_distinct_hot", |b| {
         let (_ann_dir, ann_path, query) =
             neural_ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Neural));
         let store = VectorStore::open_readonly(
@@ -1008,7 +1010,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     });
 
     let exact_keys = (0..50_000u64).collect::<Vec<_>>();
-    group.bench_function("exact_filtered_vector_top_50_in_50k_hot", |b| {
+    group.bench_function("exact_filtered_vector_top_50_in_50k_distinct_hot", |b| {
         let (_ann_dir, ann_path, query) =
             ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
         let store = VectorStore::open_readonly(
