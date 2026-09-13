@@ -208,11 +208,7 @@ async fn handle_connection(
             if request.method != "GET" {
                 return method_not_allowed(&mut stream, "GET").await;
             }
-            // Nobody is left to answer once the client hangs up; dropping the
-            // search cancels it.
-            let Some(value) = unless_client_gone(&stream, run_search(state, &params)).await else {
-                return Ok(());
-            };
+            let value = run_search(state, &params).await;
             write_json(&mut stream, "200 OK", &value).await
         }
         "/api/search/stream" => {
@@ -757,7 +753,7 @@ async fn write_search_stream(
     }
 
     write_sse(stream, "status", &json!({"stage": "searching"})).await?;
-    let Some(value) = unless_client_gone(stream, run_search(state, params)).await else {
+    let Some(value) = while_sse_client_connected(stream, run_search(state, params)).await? else {
         return Ok(());
     };
     write_sse(stream, "results", &value).await?;
@@ -827,7 +823,7 @@ async fn write_all_workspace_search_stream(
     loop {
         // Returning drops the task set, which aborts and cancels the
         // remaining per-workspace searches.
-        let Some(joined) = unless_client_gone(stream, tasks.join_next()).await else {
+        let Some(joined) = while_sse_client_connected(stream, tasks.join_next()).await? else {
             return Ok(());
         };
         let Some(result) = joined else {
@@ -899,26 +895,28 @@ async fn write_sse(stream: &mut TcpStream, event: &str, value: &Value) -> Result
     Ok(())
 }
 
-/// Run `work` until it finishes or the HTTP client hangs up. Dropping `work`
-/// cancels the daemon searches it started.
-async fn unless_client_gone<F: std::future::Future>(
-    stream: &TcpStream,
+/// Run streamed work while heartbeat writes prove that the client can still
+/// receive a response. Dropping `work` cancels the daemon searches it started.
+async fn while_sse_client_connected<F: std::future::Future>(
+    stream: &mut TcpStream,
     work: F,
-) -> Option<F::Output> {
-    tokio::select! {
-        biased;
-        output = work => Some(output),
-        () = client_gone(stream) => None,
-    }
-}
-
-/// Resolves once the client closes the connection. Bytes after the request
-/// headers mean the client is still there, so probing stops.
-async fn client_gone(stream: &TcpStream) {
-    let mut probe = [0u8; 1];
-    match stream.peek(&mut probe).await {
-        Ok(0) | Err(_) => {}
-        Ok(_) => std::future::pending::<()>().await,
+) -> Result<Option<F::Output>> {
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await;
+    tokio::pin!(work);
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut work => return Ok(Some(output)),
+            _ = heartbeat.tick() => {
+                if stream.write_all(b": keep-alive\n\n").await.is_err()
+                    || stream.flush().await.is_err()
+                {
+                    return Ok(None);
+                }
+            }
+        }
     }
 }
 
@@ -1247,7 +1245,63 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn abandoned_web_search_stops_waiting_for_cpu() {
+    async fn half_closed_search_request_still_receives_response() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("source.rs"), "fn needle() {}\n").unwrap();
+        let state = crate::daemon::test_state_with_cpu_permits(1);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let config = WebConfig {
+            host: "127.0.0.1".to_string(),
+            port: addr.port(),
+            initial_query: None,
+            initial_path: None,
+        };
+        let handler = tokio::spawn(handle_connection(
+            server,
+            state,
+            config,
+            web_auth_token(),
+            false,
+        ));
+        let workspace = percent_encode(&root.path().display().to_string());
+        client
+            .write_all(
+                format!(
+                    "GET /api/search?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {WEB_AUTH_COOKIE}={}\r\n\r\n",
+                    web_auth_token()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut response = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.read_to_string(&mut response),
+        )
+        .await
+        .expect("half-closed client did not receive a response")
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.contains("needle"), "{response}");
+        tokio::time::timeout(Duration::from_secs(10), handler)
+            .await
+            .expect("search handler did not finish")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn abandoned_web_search_stream_stops_waiting_for_cpu() {
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         crate::config::ensure_app_dirs().unwrap();
@@ -1274,7 +1328,7 @@ mod tests {
         client
             .write_all(
                 format!(
-                    "GET /api/search?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {WEB_AUTH_COOKIE}={}\r\n\r\n",
+                    "GET /api/search/stream?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {WEB_AUTH_COOKIE}={}\r\n\r\n",
                     web_auth_token()
                 )
                 .as_bytes(),
