@@ -4738,7 +4738,7 @@ impl ChunkBoostContext {
 
         // ASCII lowercasing keeps byte offsets, so the signature range of the
         // original text indexes `text_lower` too.
-        let first_line_range = crate::text::first_code_line_range(&chunk.text);
+        let first_line_range = crate::text::first_code_line_range(&chunk.text, &chunk.language);
 
         let (text_compact, path_compact) = if include_compact {
             (

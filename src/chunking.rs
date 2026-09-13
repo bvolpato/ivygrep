@@ -1465,7 +1465,7 @@ enum ParsedName {
     Unknown,
 }
 
-/// Chunk start line (including Python decorators), end line, kind, parsed
+/// Chunk start line (including decorators), end line, kind, parsed
 /// definitions, and the definition node's own start line.
 type CapturedRange = (usize, usize, ChunkKind, Option<Vec<ChunkDefinition>>, usize);
 
@@ -1697,6 +1697,8 @@ fn captured_definition_ranges(
     });
 
     let mut owners: Vec<(usize, String)> = Vec::new();
+    // First decorator row of each decorated TypeScript method, by start byte.
+    let mut member_decorator_rows = HashMap::new();
     let mut ranges = Vec::with_capacity(captured.len());
     for (node, kind) in captured {
         let start_byte = node.start_byte();
@@ -1720,11 +1722,39 @@ fn captured_definition_ranges(
         {
             owners.push((node.end_byte(), owner));
         }
+        // TypeScript puts member decorators beside `method_definition` in the
+        // class body rather than inside it. Walk each class body once instead
+        // of asking every method for siblings, which searches from the root.
+        if language == "typescript"
+            && matches!(
+                node.kind(),
+                "class_declaration" | "abstract_class_declaration"
+            )
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            let mut decorator_row = None;
+            let mut cursor = body.walk();
+            for child in body.named_children(&mut cursor) {
+                match child.kind() {
+                    "decorator" => {
+                        decorator_row.get_or_insert(child.start_position().row);
+                    }
+                    "comment" => {}
+                    "method_definition" => {
+                        if let Some(row) = decorator_row.take() {
+                            member_decorator_rows.insert(child.start_byte(), row);
+                        }
+                    }
+                    _ => decorator_row = None,
+                }
+            }
+        }
         let definition_row = node.start_position().row;
         // Python decorators, including multi-line calls, belong to the
         // definition's chunk. So do JS/TS decorators before `export class`,
-        // which the grammar attaches to `export_statement`. Check the language
-        // and kind first: `Node::parent` searches down from the root.
+        // which the grammar attaches to `export_statement`, and TypeScript
+        // member decorators. Check the language and kind first:
+        // `Node::parent` searches down from the root.
         let decorated_parent = match language {
             "python" => node
                 .parent()
@@ -1742,8 +1772,13 @@ fn captured_definition_ranges(
             }
             _ => None,
         };
-        let start_row =
-            decorated_parent.map_or(definition_row, |parent| parent.start_position().row);
+        let start_row = match decorated_parent {
+            Some(parent) => parent.start_position().row,
+            None => member_decorator_rows
+                .get(&node.start_byte())
+                .copied()
+                .unwrap_or(definition_row),
+        };
         // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
         ranges.push((
             start_row + 1,
@@ -3102,7 +3137,7 @@ mod tests {
         let chunks = chunk_source(Path::new("app/users.py"), source);
         // `extract_signature` stores this range for definition chunks.
         let signature = |chunk: &Chunk| {
-            crate::text::first_code_line_range(&chunk.text)
+            crate::text::first_code_line_range(&chunk.text, &chunk.language)
                 .map(|range| chunk.text[range].to_string())
         };
         let function = chunks
@@ -3144,10 +3179,65 @@ mod tests {
     }
 
     #[test]
+    fn decorators_on_typescript_members_stay_with_the_member() {
+        let source = "export class UsersController {\n  // Lists users.\n  @Get(\n    ':id',\n  )\n  @UseGuards(AuthGuard)\n  findOne(id) {\n    return id;\n  }\n}\n";
+        let signature = |chunk: &Chunk| {
+            crate::text::first_code_line_range(&chunk.text, &chunk.language)
+                .map(|range| chunk.text[range].to_string())
+        };
+        for path in [
+            "web/users.controller.ts",
+            "web/users.controller.tsx",
+            "web/users.controller.js",
+        ] {
+            let chunks = chunk_source(Path::new(path), source);
+            let method = chunks
+                .iter()
+                .find(|chunk| chunk.kind == ChunkKind::Function)
+                .expect("method chunk");
+            assert_eq!(method.start_line, 3, "{path}: {chunks:?}");
+            assert!(method.text.contains("':id'"), "{path}");
+            assert_eq!(
+                signature(method).as_deref(),
+                Some("findOne(id) {"),
+                "{path}"
+            );
+        }
+
+        let body = (0..200)
+            .map(|index| format!("    value{index}();"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!(
+            "export class Store {{\n  @Action(\n    'load',\n  )\n  load() {{\n{body}\n  }}\n}}\n"
+        );
+        let chunks = chunk_source(Path::new("web/store.ts"), &source);
+        let windows = chunks
+            .iter()
+            .filter(|chunk| chunk.kind == ChunkKind::Function)
+            .collect::<Vec<_>>();
+        assert!(
+            windows.len() > 1,
+            "expected continuation windows: {chunks:?}"
+        );
+        assert_eq!(windows[0].start_line, 2, "{chunks:?}");
+        assert_eq!(signature(windows[0]).as_deref(), Some("load() {"));
+        for chunk in &windows[1..] {
+            assert_eq!(
+                chunk.text.lines().nth(1),
+                Some("// continuation of load() {"),
+                "{}-{}",
+                chunk.start_line,
+                chunk.end_line
+            );
+        }
+    }
+
+    #[test]
     fn decorators_on_exported_classes_stay_with_the_class() {
         let source = "import { Component } from '@angular/core';\n\n@Component({\n  selector: 'app-root',\n})\nexport class AppComponent {\n  title = 'app';\n}\n";
         let signature = |chunk: &Chunk| {
-            crate::text::first_code_line_range(&chunk.text)
+            crate::text::first_code_line_range(&chunk.text, &chunk.language)
                 .map(|range| chunk.text[range].to_string())
         };
         for path in [

@@ -11,7 +11,7 @@ use crate::indexer::{
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::{SearchContext, SearchOptions};
-use crate::text::{first_code_line_range, strip_leading_annotations};
+use crate::text::{code_line_ranges, first_code_line_range};
 use crate::workspace::{Workspace, WorkspaceScope};
 
 const SYMBOL_DEFINITION_LOOKUP_BATCH: usize = 128;
@@ -1602,7 +1602,7 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     }
 
     // Skips comments and annotations, including multi-line ones.
-    let signature = &chunk.text[first_code_line_range(&chunk.text)?];
+    let signature = &chunk.text[first_code_line_range(&chunk.text, &chunk.language)?];
 
     let keywords: &[&str] = match chunk.kind.as_str() {
         "Function" | "function" => &["fn", "def", "func", "function", "fun"],
@@ -1722,22 +1722,11 @@ fn heuristic_definition_names(chunk: &IndexedChunk) -> Vec<String> {
                 "union",
                 "module",
             ];
+            // Skips comments and annotations, including multi-line ones.
             names.extend(
-                chunk
-                    .text
-                    .lines()
-                    .filter_map(|line| {
-                        let signature = strip_leading_annotations(line.trim());
-                        if signature.is_empty()
-                            || signature.starts_with("//")
-                            || signature.starts_with('#')
-                            || signature.starts_with('@')
-                        {
-                            return None;
-                        }
-                        definition_name_from_signature(signature, MODULE_KEYWORDS, false, true)
-                    })
-                    .collect::<Vec<_>>(),
+                code_line_ranges(&chunk.text, &chunk.language).filter_map(|range| {
+                    definition_name_from_signature(&chunk.text[range], MODULE_KEYWORDS, false, true)
+                }),
             );
         }
     } else {
@@ -2288,6 +2277,18 @@ mod tests {
             )),
             None,
             "continuation windows must not register body callees"
+        );
+    }
+
+    #[test]
+    fn module_heuristic_names_skip_multiline_annotation_arguments() {
+        assert_eq!(
+            definition_names(&chunk(
+                "rust",
+                "Module",
+                "// src/cli.rs\n\n#[derive(Parser)]\n#[command(\n    about = \"Search the module index\",\n    long_about = None,\n)]\npub struct Cli {\n    #[arg(\n        long,\n        help = \"Pick one type = kind (see docs\",\n    )]\n    kind: Option<String>,\n}\n\n#[cfg_attr(\n    feature = \"serde\",\n    derive(Serialize)\n)] pub enum Mode { Fast }\n"
+            )),
+            ["Cli", "Mode"]
         );
     }
 

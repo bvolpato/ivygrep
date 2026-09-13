@@ -2048,11 +2048,15 @@ fn resolve_rust_module_relative(
     } else {
         rust_module_declaration_base(source_path)
     };
+    let mut module_path = spec.strip_prefix("self/").unwrap_or(spec);
     // A `#[path]` module's parent is the declaring module, which is not
     // visible from this file. Resolve only when the conventional parent module
     // file exists; a `#[path]` target placed beside one is indistinguishable
-    // and still resolves by directory.
-    if module_directory != crate_directory {
+    // and still resolves by directory. `self::` in a `mod.rs` needs no parent:
+    // its children live beside it however it was declared.
+    let mod_rs_children = !module_path.starts_with("super/")
+        && source_path.file_name().is_some_and(|name| name == "mod.rs");
+    if module_directory != crate_directory && !mod_rs_children {
         let parent_directory = module_directory.parent().unwrap_or_else(|| Path::new(""));
         if parent_directory == crate_directory {
             existing_workspace_file(root, snapshot, &crate_root)?;
@@ -2060,7 +2064,6 @@ fn resolve_rust_module_relative(
             module_file(parent_directory)?;
         }
     }
-    let mut module_path = spec.strip_prefix("self/").unwrap_or(spec);
     while let Some(rest) = module_path.strip_prefix("super/") {
         if module_directory == crate_directory || !module_directory.pop() {
             return None;
@@ -4815,6 +4818,57 @@ const char *example = "\
         .map(|edge| edge.target_path)
         .collect::<BTreeSet<_>>();
         assert_eq!(dependencies, BTreeSet::new());
+    }
+
+    #[test]
+    fn rust_mod_rs_self_imports_resolve_without_parent_module_file() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            (
+                "Cargo.toml",
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+            ),
+            ("src/lib.rs", "pub fn run() {}\n"),
+            ("tests/integration.rs", "mod common;\n"),
+            ("tests/common/mod.rs", "pub mod fixtures;\n"),
+            (
+                "tests/common/fixtures.rs",
+                "pub mod data;\npub struct Fixture;\n",
+            ),
+            ("tests/common/fixtures/data.rs", "pub struct Row;\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        let dependencies = |source: &str, content: &str| {
+            extract_file_edges(root.path(), None, Path::new(source), content)
+                .into_iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path)
+                .collect::<BTreeSet<_>>()
+        };
+
+        // No `tests/common.rs` exists, but a `mod.rs` owns its directory
+        // however it was declared. `super` is whichever test crate declared
+        // `mod common;`, so it stays unresolved.
+        assert_eq!(
+            dependencies(
+                "tests/common/mod.rs",
+                "use self::fixtures::Fixture;\nuse super::run;\n",
+            ),
+            BTreeSet::from([PathBuf::from("tests/common/fixtures.rs")])
+        );
+        assert_eq!(
+            dependencies(
+                "tests/common/fixtures.rs",
+                "use self::data::Row;\nuse super::Shared;\n",
+            ),
+            BTreeSet::from([
+                PathBuf::from("tests/common/fixtures/data.rs"),
+                PathBuf::from("tests/common/mod.rs"),
+            ])
+        );
     }
 
     #[test]
