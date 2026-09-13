@@ -40,6 +40,11 @@ All notable changes to ivygrep are documented in this file.
 - `--file-name-only` prints "No results." to stderr, keeping stdout safe for pipes.
 - MCP responses follow JSON-RPC 2.0 ids: parse errors return `"id": null`, requests without `method` return -32600 with their id, and `"id": null` requests receive a response.
 - `/api/open` reaps launched editor processes instead of leaving one zombie per click.
+- A file whose name is not valid UTF-8 no longer fails indexing for the whole workspace. Such paths are skipped with a warning because index keys are UTF-8 strings.
+- Clean-checkout reuse observes edits inside submodules even when `.gitmodules` sets `ignore = dirty` or `ignore = all`. Checking cleanliness now inspects those submodules, which costs more on repositories with many submodules.
+- Indexing removes staging and promotion-backup directories abandoned by a killed indexer. Backups retained after a failed rollback are kept.
+- Background enhancement tolerates an interrupted trailing append in a vector tombstone journal instead of failing on every later pass.
+- Hash embeddings use a pinned SipHash-1-3 implementation instead of the standard library's unspecified `DefaultHasher`, so a toolchain upgrade cannot silently invalidate stored hash vectors. Current vectors are unchanged.
 
 ## [1.2.14] - 2026-09-10
 

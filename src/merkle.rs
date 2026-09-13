@@ -235,6 +235,7 @@ impl MerkleSnapshot {
                     };
                     if entry.file_type().is_some_and(|ft| ft.is_file())
                         && let Ok(rel) = entry.path().strip_prefix(root_ref)
+                        && rel.to_str().is_some()
                     {
                         paths_ref.lock().unwrap().insert(index_path_string(rel));
                     }
@@ -312,6 +313,12 @@ impl MerkleSnapshot {
                     Ok(r) => r.to_path_buf(),
                     Err(_) => return ignore::WalkState::Continue,
                 };
+                // Index keys are UTF-8 strings. A lossy key cannot be reopened,
+                // so one such file would otherwise fail the whole index build.
+                if rel.to_str().is_none() {
+                    tracing::warn!("skipping non-UTF-8 path {}", path.display());
+                    return ignore::WalkState::Continue;
+                }
 
                 let metadata = match fs::metadata(path) {
                     Ok(m) => m,
@@ -458,6 +465,10 @@ impl MerkleSnapshot {
         validate_workspace_root(root)?;
         let mut updates = BTreeMap::new();
         for rel_path in rel_paths {
+            // Full walks skip non-UTF-8 names; a lossy key could alias a real file.
+            if rel_path.to_str().is_none() {
+                continue;
+            }
             if rel_path.as_os_str().is_empty()
                 || rel_path
                     .file_name()
@@ -1120,6 +1131,51 @@ mod tests {
 
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"\n").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_names_are_skipped_without_failing_snapshot() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("valid.rs"), "fn valid() {}\n").unwrap();
+        let invalid = root.join(std::ffi::OsStr::from_bytes(b"invalid\xff.rs"));
+        if fs::write(&invalid, "fn invalid() {}\n").is_err() {
+            // Some filesystems, such as APFS, reject non-UTF-8 names.
+            return;
+        }
+
+        for snapshot in [
+            MerkleSnapshot::build(root, false).unwrap(),
+            MerkleSnapshot::build_content_based(root, false).unwrap(),
+        ] {
+            assert_eq!(snapshot.files.keys().collect::<Vec<_>>(), vec!["valid.rs"]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_path_does_not_hide_ignored_utf8_collision() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let invalid_name = b"collision\xff.rs";
+        let invalid = root.join(std::ffi::OsStr::from_bytes(invalid_name));
+        if fs::write(&invalid, "fn invalid() {}\n").is_err() {
+            return;
+        }
+
+        let lossy_name = String::from_utf8_lossy(invalid_name).into_owned();
+        fs::write(root.join(&lossy_name), "fn ignored() {}\n").unwrap();
+        fs::write(root.join(".ignore"), format!("{lossy_name}\n")).unwrap();
+
+        for content_based in [false, true] {
+            let snapshot = MerkleSnapshot::build_inner(root, content_based, true).unwrap();
+            assert!(snapshot.files[&lossy_name].ends_with("-1"));
+        }
     }
 
     #[test]

@@ -91,6 +91,27 @@ fn assert_visible(workspace: &Workspace, marker: &str, file: &str) {
 
 #[test]
 #[serial]
+fn indexing_removes_staging_abandoned_by_killed_indexer() {
+    let fixture = RecoveryFixture::new();
+    let workspace = &fixture.workspace;
+    let staging = workspace.index_dir.join(".fresh-index-staging-1-1");
+    let backup = workspace.index_dir.join(".fresh-index-backup-abandoned");
+    let retained = workspace.index_dir.join(".fresh-index-backup-retained");
+    for directory in [&staging, &backup, &retained] {
+        fs::create_dir_all(directory.join("tantivy")).unwrap();
+        fs::write(directory.join("tantivy/x"), "old generation").unwrap();
+    }
+    fs::write(retained.join(staging::RETAINED_BACKUP_MARKER), "").unwrap();
+
+    let summary = index_workspace(workspace, &fixture.model).unwrap();
+    assert_eq!(summary.indexed_files + summary.deleted_files, 0);
+    assert!(!staging.exists());
+    assert!(!backup.exists());
+    assert!(retained.join("tantivy/x").exists());
+}
+
+#[test]
+#[serial]
 fn corrupt_store_recovery_rebuilds_all_sources_and_preserves_settings() {
     for recovery_reason in ["hash", "tantivy", "incomplete"] {
         let fixture = RecoveryFixture::new();

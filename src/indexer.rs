@@ -53,7 +53,7 @@ use resources::{
     EnhancementTier, NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index,
     check_system_constraints, indexing_pool, neural_enhance_batch_size, tantivy_writer_settings,
 };
-use staging::FreshIndexStaging;
+use staging::{FreshIndexStaging, remove_abandoned_staging};
 #[cfg(test)]
 pub(crate) use storage::test_support::fail_tantivy_commits;
 pub use storage::{
@@ -501,6 +501,7 @@ fn index_workspace_with_options(
         .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
     fs2::FileExt::lock_exclusive(&lock_file)
         .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
+    remove_abandoned_staging(workspace);
 
     let preserved_metadata = workspace.read_metadata().ok().flatten();
     let skip_gitignore = preserved_metadata
@@ -3219,7 +3220,19 @@ fn claim_vector_tombstones(
         }
     }
 
-    let keys = fs::read_to_string(processing)?
+    let journal = fs::read(processing)?;
+    // Records are newline-terminated and synced before their SQLite commit.
+    // An interrupted append can leave a truncated key or a zero-filled tail;
+    // its transaction never committed, so the partial record is not needed.
+    let written = journal
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |last| last + 1);
+    let complete = journal[..written]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |last| last + 1);
+    let keys = std::str::from_utf8(&journal[..complete])?
         .lines()
         .map(str::parse::<u64>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -4480,6 +4493,33 @@ mod tests {
         let error = commit_with_vector_tombstones(tx, &mut journals).unwrap_err();
         assert!(error.to_string().contains("FOREIGN KEY constraint failed"));
         assert_eq!(fs::read_to_string(hash_path).unwrap(), "42\n");
+    }
+
+    #[test]
+    fn vector_tombstone_claim_ignores_interrupted_trailing_append() {
+        let dir = tempdir().unwrap();
+        let pending = dir.path().join("hash.tombstones");
+        let processing = dir.path().join("hash.tombstones.processing");
+        // Interrupted appends can leave a truncated key or a zero-filled tail.
+        for tail in [&b"12"[..], b"\0\0\0\0", b"12\0\0"] {
+            let mut journal = b"7\n11\n".to_vec();
+            journal.extend_from_slice(tail);
+            fs::write(&pending, journal).unwrap();
+            let (claimed, keys) = claim_vector_tombstones(&pending, &processing)
+                .unwrap()
+                .unwrap();
+            assert_eq!(claimed, processing);
+            assert_eq!(keys, [7, 11]);
+            // Later passes re-read the same claim until publication removes it.
+            let (_, keys) = claim_vector_tombstones(&pending, &processing)
+                .unwrap()
+                .unwrap();
+            assert_eq!(keys, [7, 11]);
+            fs::remove_file(&processing).unwrap();
+        }
+
+        fs::write(&pending, "7\nnot-a-key\n11\n").unwrap();
+        assert!(claim_vector_tombstones(&pending, &processing).is_err());
     }
 
     #[test]
