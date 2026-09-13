@@ -8,6 +8,12 @@ All notable changes to ivygrep are documented in this file.
 
 - **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
 
+### Security
+
+- The Web UI requires the session token on loopback listeners too. Other local users could previously read indexed files, list directories, search, and launch the editor through `127.0.0.1`. Open the URL printed by `ig --web`; bare `http://127.0.0.1:4747/` returns 401. The printed URL contains the token, so keep terminal output and logs that capture it private.
+- `ig --web` opens the browser through an owner-only HTML redirect file under the ivygrep app home instead of passing the tokenized URL to `xdg-open`, `open`, or `ShellExecuteW`, so the token no longer appears in process arguments other local users can read. On Unix the file is mode 0600 in a 0700 `browser/` directory; a later launch removes files older than two minutes. `IVYGREP_NO_BROWSER=1` skips the launch and the file.
+- The token URL answers with a same-origin page that sets the HttpOnly `SameSite=Strict` cookie and refreshes to the app without the token. A redirect lost the cookie when the URL was opened from a local file, as the launcher's redirect page does. The cookie is named per listener port (`ivygrep_session_<port>`), so daemons on different ports keep separate sessions.
+
 ### Fixed
 
 - Literal and regex searches match files containing invalid UTF-8, as indexing already did, and regex context expansion and previews decode those files lossily instead of dropping them.
@@ -21,6 +27,15 @@ All notable changes to ivygrep are documented in this file.
 - Stack-trace frames from `node_modules`, `site-packages`, `dist-packages`, Cargo registry and Go module cache paths map only by their package-relative path, so `site-packages/myapp/views.py` still maps to `myapp/views.py` while `node_modules/express/lib/router/index.js` no longer maps to a root `index.js`. `rustc` frames are ignored, and container frames such as `/var/task/index.js` still map to workspace root files.
 - Co-change evidence keeps non-ASCII file names and stays accurate for signed commits when `log.showSignature` is enabled. Markdown previews containing code fences render inside a longer fence.
 - `ig context --since` accepts revision syntax such as `HEAD~3`, `main^` and `@{upstream}`, and rejects negated references such as `^main`.
+- Clients restart the daemon only when it is older or speaks a different protocol, so a newer daemon is no longer restarted by older CLI or MCP processes left running after an upgrade.
+- Web hybrid, literal, and regex searches carry a cancellation token and the server-side deadline. Streaming searches stop when a keep-alive write to the browser fails instead of holding CPU permits until completion, while a plain `/api/search` request still answers a client that half-closed after sending it. Web context requests stop waiting for workspace leases or CPU and cut retrieval short when the browser disconnects; the deadline does not apply to them.
+- `ig --web --host/--port` reports the active listener address instead of silently reusing a server bound to a different address or port. Loopback hosts (`localhost`, `127.0.0.1`, `::1`) match a loopback listener.
+- MCP accepts JSON-RPC batches, which protocol 2025-03-26 requires: a batch returns an array of responses without entries for notifications, and an empty batch returns one Invalid Request error.
+- `ig agent install` updates only the command fields of an existing `ig` entry, preserving `env`, `cwd`, timeouts and other settings. Config writes follow symlinks and keep the target's permissions.
+- Windows TUI ignores key release events, so Esc and navigation keys act once per press.
+- `--file-name-only` prints "No results." to stderr, keeping stdout safe for pipes.
+- MCP responses follow JSON-RPC 2.0 ids: parse errors return `"id": null`, requests without `method` return -32600 with their id, and `"id": null` requests receive a response.
+- `/api/open` reaps launched editor processes instead of leaving one zombie per click.
 
 ## [1.2.14] - 2026-09-10
 

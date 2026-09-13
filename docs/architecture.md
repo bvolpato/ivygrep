@@ -460,8 +460,10 @@ recorded in the workspace job ledger and retried with exponential backoff (30 s
 doubling to 15 min). The watcher heartbeat re-creates its ledger record when an
 index rebuild wiped `job.json`, so a running watcher never reads as offline. A
 client that sees `watch_enabled` without `watcher_alive` sends `EnsureWatcher`;
-the daemon answers immediately and registers in the background. Clients only
-restart the daemon on a protocol version mismatch.
+the daemon answers immediately and registers in the background. Clients restart
+the daemon only on a protocol version mismatch or when it reports an older build
+than the client; a newer daemon speaking the same protocol is used as-is, so
+clients left over from before an upgrade do not keep killing it.
 
 Search responses never wait on background enhancement bookkeeping. After the
 hits are computed, the daemon schedules a blocking task that checks whether
@@ -505,7 +507,14 @@ handler races the search against the client stream reaching EOF and cancels
 abandoned work on disconnect; CLI and MCP searches send request IDs and issue
 `CancelSearch` when they time out or drop the request. A per-request deadline
 (`IVYGREP_SEARCH_DEADLINE_SECS`, default 60 s, `0` disables) cancels long
-searches and returns the hits gathered so far with a `warnings` entry.
+searches and returns the hits gathered so far with a `warnings` entry. Web
+hybrid, literal, and regex searches carry the same token and deadline. A plain
+`/api/search` request runs to completion and answers even a client that
+half-closed its write side after sending the request. Event-stream searches
+write a keep-alive comment every second and drop the search, cancelling it,
+when a write fails. Web context requests have no deadline; dropping an
+abandoned context stream ends its lease and CPU waits and sets the cancel token
+its retrieval searches check.
 
 `warnings` on search results is additive and omitted when empty, preserving
 compatibility with older response readers. Unsupported protocol versions and
@@ -518,7 +527,10 @@ connections are bounded.
 ### MCP
 
 MCP uses JSON-RPC 2.0 over stdio and accepts newline-delimited or
-`Content-Length` framing. It exposes:
+`Content-Length` framing. A message may be a JSON-RPC batch, which protocol
+2025-03-26 requires: the reply is one array without entries for notifications,
+nothing when no entry remains, and a single Invalid Request error for an empty
+batch. It exposes:
 
 - `ig_search` for hybrid, literal, regex, symbol, caller, and context-pack work
 - `ig_status` for indexed-workspace and runtime state
@@ -540,10 +552,34 @@ Daemon serves embedded assets and APIs for status, search, streaming search,
 file reads, editor launch, and workspace trees. File operations enforce tracked
 workspace containment.
 
-Loopback is default. Non-loopback mode uses a generated session token, Host and
-authentication checks, Content Security Policy, security headers, and request,
-header, file, and concurrency limits. Transport is still plain HTTP; remote use
-requires a trusted network or encrypted tunnel.
+Loopback is default. Every listener, loopback included, requires a generated
+per-daemon session token: any local user can reach a loopback port. API clients
+may send it as a bearer token. Loopback listeners accept only loopback Host
+names. Content Security Policy, security headers, and request, header, file,
+and concurrency limits apply to every listener. Transport is still plain HTTP;
+remote use requires a trusted network or encrypted tunnel.
+
+`ig --web` prints the tokenized URL to its own stdout. To open a browser it
+writes an HTML redirect page to the app home's `browser/` directory and passes
+only that file to `xdg-open`, `open`, or `ShellExecuteW`, so the token never
+reaches process arguments that other users can read through `/proc` or `ps`.
+On Unix the directory must be owned by the user and is kept at mode `0700`, and
+the file is created with mode `0600`; on Windows the file inherits the app
+home's ACL. A later launch removes redirect files older than two minutes.
+`IVYGREP_NO_BROWSER` skips both the file and the launch.
+
+A `/?token=...` request answers with a small same-origin page that sets the
+HttpOnly `SameSite=Strict` cookie `ivygrep_session_<port>` and meta-refreshes to
+the same URL without the token. A redirect would lose the cookie: opened from
+the `file://` page, the navigation is cross-site, and the browser does not send
+the new `SameSite=Strict` cookie on the redirected request. The refresh is a
+same-origin navigation and needs no inline script under the CSP. The cookie name
+carries the listener port because browsers share a host's cookies across ports;
+other services on the same host still receive the cookie.
+
+A daemon runs one Web listener. `ig --web` reuses it when `--host` and `--port`
+match (port `0` matches any port, and any loopback address matches a loopback
+listener) and otherwise fails naming the active address.
 
 ## Embeddings and build profiles
 

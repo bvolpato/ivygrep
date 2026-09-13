@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -15,13 +15,26 @@ impl LaunchCommand {
         Command::new(&self.program).args(&self.args).status()
     }
 
-    pub(crate) fn spawn_detached(&self) -> std::io::Result<Child> {
-        Command::new(&self.program)
+    /// Start the program without waiting for it and return its pid. A
+    /// background thread reaps the child, so long-lived callers (the daemon's
+    /// `/api/open`) do not leave a zombie process per launch.
+    pub(crate) fn spawn_detached(&self) -> std::io::Result<u32> {
+        let mut child = Command::new(&self.program)
             .args(&self.args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
+            .spawn()?;
+        let pid = child.id();
+        if let Err(error) = std::thread::Builder::new()
+            .name("ig-launch-reaper".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+        {
+            tracing::warn!("could not start a reaper for launched process {pid}: {error}");
+        }
+        Ok(pid)
     }
 }
 
@@ -317,25 +330,43 @@ fn wide_nul(value: &OsStr) -> Result<Vec<u16>> {
     Ok(value)
 }
 
-#[cfg(windows)]
+/// Age after which a later `open_browser` call removes a redirect file. A cold
+/// browser start can take a while to read it, and the file is owner-only.
+const BROWSER_REDIRECT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(120);
+const BROWSER_REDIRECT_PREFIX: &str = "open-";
+
+/// Open the Web UI `url` in the system browser without putting it on a command
+/// line.
+///
+/// The URL carries the session token, and process arguments are visible to
+/// other local users (`/proc/<pid>/cmdline`, `ps`), both the opener's and the
+/// browser's. Like Jupyter, write an owner-only HTML redirect under the ivygrep
+/// app home and pass only that file's location to the opener.
 pub(crate) fn open_browser(url: &str) -> Result<()> {
     if std::env::var_os("IVYGREP_NO_BROWSER").is_some() {
         return Ok(());
     }
+    let redirect = write_browser_redirect(&crate::config::app_home()?.join("browser"), url)?;
+    launch_browser(&redirect)
+}
 
+/// ShellExecuteW hands the redirect path to the `.html` handler, so the
+/// browser's command line carries the file path, not the token.
+#[cfg(windows)]
+fn launch_browser(redirect: &Path) -> Result<()> {
     use std::ptr;
 
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let operation = wide_nul(OsStr::new("open"))?;
-    let url = wide_nul(OsStr::new(url))?;
+    let target = wide_nul(redirect.as_os_str())?;
     // SAFETY: all supplied strings are NUL-terminated and live through the call.
     let result = unsafe {
         ShellExecuteW(
             ptr::null_mut(),
             operation.as_ptr(),
-            url.as_ptr(),
+            target.as_ptr(),
             ptr::null(),
             ptr::null(),
             SW_SHOWNORMAL,
@@ -343,35 +374,156 @@ pub(crate) fn open_browser(url: &str) -> Result<()> {
     };
     if result as isize <= 32 {
         bail!(
-            "Windows could not open browser URL (ShellExecuteW code {})",
+            "Windows could not open the browser (ShellExecuteW code {})",
             result as isize
         );
     }
     Ok(())
 }
 
-#[cfg(not(windows))]
-pub(crate) fn open_browser(url: &str) -> Result<()> {
-    if std::env::var_os("IVYGREP_NO_BROWSER").is_some() {
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    let launch = LaunchCommand {
-        program: OsString::from("open"),
-        args: vec![OsString::from(url)],
-    };
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let launch = LaunchCommand {
-        program: OsString::from("xdg-open"),
-        args: vec![OsString::from(url)],
-    };
-
-    launch
+#[cfg(unix)]
+fn launch_browser(redirect: &Path) -> Result<()> {
+    browser_launch(redirect)
         .spawn_detached()
         .context("failed to launch system browser")?;
     Ok(())
+}
+
+/// `open` (macOS) or `xdg-open` for the redirect file's `file://` URL.
+#[cfg(unix)]
+fn browser_launch(redirect: &Path) -> LaunchCommand {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    LaunchCommand {
+        program: OsString::from(program),
+        args: vec![OsString::from(file_url(redirect))],
+    }
+}
+
+/// `file://` URL for an absolute path, percent-encoding every byte outside the
+/// unreserved set and `/`.
+#[cfg(unix)]
+fn file_url(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut url = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            url.push(char::from(byte));
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
+/// Write an owner-only page under `dir` that forwards the browser to `url`,
+/// removing redirect files left by earlier launches.
+fn write_browser_redirect(dir: &Path, url: &str) -> Result<std::path::PathBuf> {
+    use std::io::Write as _;
+
+    let dir =
+        std::path::absolute(dir).with_context(|| format!("could not resolve {}", dir.display()))?;
+    create_private_dir(&dir)?;
+    remove_stale_browser_redirects(&dir, BROWSER_REDIRECT_MAX_AGE);
+    let path = dir.join(format!(
+        "{BROWSER_REDIRECT_PREFIX}{}.html",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("could not create browser redirect {}", path.display()))?;
+    if let Err(error) = file.write_all(browser_redirect_html(url).as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(error)
+            .with_context(|| format!("could not write browser redirect {}", path.display()));
+    }
+    Ok(path)
+}
+
+/// Create `dir` to hold secrets. On Unix it must end up a mode-0700 directory
+/// owned by the current user, never a symlink or another user's directory.
+/// Windows files inherit the app home's ACL (the user profile by default).
+fn create_private_dir(dir: &Path) -> Result<()> {
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    #[cfg(unix)]
+    let created = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(dir)
+    };
+    #[cfg(not(unix))]
+    let created = std::fs::DirBuilder::new().create(dir);
+    match created {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not create {}", dir.display()));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let metadata = std::fs::symlink_metadata(dir)
+            .with_context(|| format!("could not inspect {}", dir.display()))?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if !metadata.is_dir() || metadata.uid() != euid {
+            bail!(
+                "refusing to write the browser redirect into {}: not a directory owned by the current user",
+                dir.display()
+            );
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("could not restrict {} to mode 0700", dir.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_stale_browser_redirects(dir: &Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with(BROWSER_REDIRECT_PREFIX) && name.ends_with(".html")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Static page forwarding to `url` through a meta refresh, with no script.
+fn browser_redirect_html(url: &str) -> String {
+    let url = crate::web::escape_html_attribute(url);
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"referrer\" content=\"no-referrer\">\n<meta http-equiv=\"refresh\" content=\"0;url={url}\">\n<title>Opening ivygrep web</title>\n</head>\n<body>\n<p><a href=\"{url}\">Open ivygrep web</a></p>\n</body>\n</html>\n"
+    )
 }
 
 #[cfg(test)]
@@ -380,6 +532,91 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_launch_is_reaped_after_exit() {
+        let launch = LaunchCommand {
+            program: OsString::from("true"),
+            args: Vec::new(),
+        };
+        let pid = launch.spawn_detached().unwrap();
+        let proc_entry = format!("/proc/{pid}");
+        let started = std::time::Instant::now();
+        while Path::new(&proc_entry).exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "detached child {pid} was never reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_opener_argv_carries_redirect_file_not_token() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let token = "test-session-token";
+        let url = format!("http://127.0.0.1:4747/?q=auth%20flow&workspace=/repo&token={token}");
+        let redirect = write_browser_redirect(&home.path().join("browser"), &url).unwrap();
+        let launch = browser_launch(&redirect);
+
+        let argv = std::iter::once(&launch.program)
+            .chain(&launch.args)
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            argv.iter().all(|argument| !argument.contains(token)),
+            "opener argv exposes the session token: {argv:?}"
+        );
+        assert_eq!(launch.args, vec![OsString::from(file_url(&redirect))]);
+
+        let html = std::fs::read_to_string(&redirect).unwrap();
+        assert!(
+            html.contains(&format!(
+                "content=\"0;url=http://127.0.0.1:4747/?q=auth%20flow&amp;workspace=/repo&amp;token={token}\""
+            )),
+            "{html}"
+        );
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&redirect), 0o600);
+        assert_eq!(mode(redirect.parent().unwrap()), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirect_file_url_percent_encodes_path_bytes() {
+        assert_eq!(
+            file_url(Path::new("/home/me/Ivy Grep/open-1.html")),
+            "file:///home/me/Ivy%20Grep/open-1.html"
+        );
+    }
+
+    #[test]
+    fn earlier_browser_redirects_are_removed_after_grace_period() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("browser");
+        let stale = write_browser_redirect(&dir, "http://127.0.0.1:1/?token=a").unwrap();
+        let expired = std::time::SystemTime::now()
+            - BROWSER_REDIRECT_MAX_AGE
+            - std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(expired)
+            .unwrap();
+        let recent = write_browser_redirect(&dir, "http://127.0.0.1:1/?token=b").unwrap();
+        assert!(!stale.exists(), "expired redirect was kept");
+
+        write_browser_redirect(&dir, "http://127.0.0.1:1/?token=c").unwrap();
+        assert!(
+            recent.exists(),
+            "redirect inside its grace period was removed"
+        );
     }
 
     #[test]

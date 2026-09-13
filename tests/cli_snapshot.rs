@@ -524,6 +524,32 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
 
 #[test]
 #[serial]
+fn cli_file_name_only_without_results_keeps_stdout_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::write(root.join("lib.rs"), "pub fn present_symbol() {}\n").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--hash",
+            "--no-watch",
+            "--literal",
+            "--file-name-only",
+            "absent_token_zq",
+        ])
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicates::str::contains("No results."));
+}
+
+#[test]
+#[serial]
 fn cli_search_and_context_accept_brace_aware_globs() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");
