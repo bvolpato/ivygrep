@@ -570,17 +570,35 @@ fn strip_annotation_prefix(mut line: &str) -> Result<&str, OpenBrackets> {
         }
         // C# `[Route(...)]`. A bare `[Obsolete]` line is skipped by callers.
         if let Some(rest) = line.strip_prefix('[')
-            && let Some(name_end) = rest.find(|character: char| {
-                !character.is_ascii_alphanumeric() && !matches!(character, '_' | '.')
-            })
-            && name_end > 0
-            && rest[name_end..].starts_with('(')
+            && csharp_attribute_has_arguments(rest)
         {
             line = line[close_open_brackets(line, OpenBrackets::default())?..].trim_start();
             continue;
         }
         return Ok(line);
     }
+}
+
+fn csharp_attribute_has_arguments(rest: &str) -> bool {
+    let mut attribute = rest;
+    let target_end = attribute
+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .unwrap_or(attribute.len());
+    if target_end > 0 {
+        let suffix = attribute[target_end..].trim_start();
+        if let Some(after_target) = suffix.strip_prefix(':')
+            && !after_target.starts_with(':')
+        {
+            attribute = after_target.trim_start();
+        }
+    }
+
+    let name_end = attribute
+        .find(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '.' | ':')
+        })
+        .unwrap_or(attribute.len());
+    name_end > 0 && attribute[name_end..].trim_start().starts_with('(')
 }
 
 /// What a multi-line annotation leaves open at the end of a line.
@@ -674,6 +692,16 @@ mod tests {
         );
         assert_eq!(strip_leading_annotations("@property"), "");
         assert_eq!(strip_leading_annotations("@Route('/x'"), "");
+        assert_eq!(
+            strip_leading_annotations("[Route (\"x\")] public void Get() {}"),
+            "public void Get() {}"
+        );
+        assert_eq!(
+            strip_leading_annotations(
+                "[return: MarshalAs (UnmanagedType.Bool)] public bool Get() {}"
+            ),
+            "public bool Get() {}"
+        );
         assert_eq!(
             strip_leading_annotations("pub fn plain() {}"),
             "pub fn plain() {}"
@@ -806,6 +834,14 @@ mod tests {
             (
                 "[Route(\n    \"api/users\",\n    Name = \"users\"\n)]\npublic class UsersController {\n",
                 "public class UsersController {",
+            ),
+            (
+                "[Route (\n    \"api/users\"\n)]\npublic class UsersController {\n",
+                "public class UsersController {",
+            ),
+            (
+                "[return: MarshalAs (\n    UnmanagedType.Bool\n)]\npublic bool IsReady() {\n",
+                "public bool IsReady() {",
             ),
             // Python floor division is not a comment.
             (
