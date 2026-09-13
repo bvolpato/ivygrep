@@ -1,5 +1,65 @@
 # Public evaluation contracts
 
+This directory pins the public datasets, profiles, gates, and reranker artifacts
+behind ivygrep's retrieval benchmarks. Published reports live in
+[`docs/benchmarks/`](../../docs/benchmarks/).
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `manifest.json` | Dataset sources, task options, benchmark profiles, and the fit-ledger checksum. |
+| `relevance_gates.json` | Per-dataset quality thresholds for `public-core`, checked by `scripts/check_public_relevance.py`. |
+| `reranker_model.json` | Embedded learned-reranker weights, feature schema, and training metadata. |
+| `reranker_fit_query_ids.json` | Fit ledger: every query ID used to fit that model, bound to its SHA-256. |
+| `model_candidates.json` | Embedding-profile candidates for the `model-bakeoff` screening report. |
+| `file_localization_tasks.jsonl` | Issue-text-to-fixed-files tasks for `scripts/bench_file_localization.py`. |
+
+Profiles in `manifest.json` include `public-core` (1,000-query regression panel
+and release gate), `sota-challenge` (harder, disjoint task families),
+`reranker-fit`, `reranker-eval`, `reranker-train`, `model-bakeoff`, and `full`.
+
+## Run a matrix
+
+Requires [uv](https://docs.astral.sh/uv/). The script exports pinned datasets
+into `--datasets-root` unless `--skip-export` is set, builds
+`target/release/ig` unless `--skip-build` is set, and writes aggregated results
+to `--output`:
+
+```bash
+uv run scripts/run_public_benchmark_matrix.py \
+  --profile public-core \
+  --modes lexical,hash,hybrid,blended,neural --runs 3 \
+  --datasets-root /tmp/ivygrep-public-datasets \
+  --work-root /tmp/ivygrep-public-results \
+  --output public-code-retrieval-results.json
+
+python3 scripts/render_public_benchmark.py \
+  --input public-code-retrieval-results.json \
+  --baseline docs/benchmarks/public-code-retrieval-baseline-results.json \
+  --html public-code-retrieval.html
+```
+
+Default modes are `lexical,hash,hybrid`. The release gate runs all five modes
+three times.
+
+## Terms
+
+- **Checkout-reference model**: `reranker_model.json` plus its fit ledger, as
+  checked out at the benchmarked revision. It describes the intended model; it
+  does not prove which model the executed binary embeds.
+- **Fit-ID audit**: `fit_query_audit` in each matrix JSON. It compares the
+  profile's repository-qualified query IDs with the fit ledger and reports
+  overlap.
+- **Schema 2**: `fit_query_audit.schema_version` 2. It separates the verified
+  `reference` model and ledger from `executed_binary` applicability, which stays
+  `unverified` unless every result attests the matching embedded-model checksum.
+- **C2 evidence**: learned-reranker features computed from fixed two-line
+  context (`RANKING_CONTEXT_LINES = 2` in `src/reranker.rs`), independent of
+  display `-C`. Native capture records must use it.
+
+## `public-core` scope
+
 `public-core` is the existing 1,000-query regression panel. Its query sets,
 dataset limits, relevance thresholds and release-CI role are unchanged. It is
 not an unseen-query generalization set for the checkout-reference learned reranker.
@@ -59,9 +119,6 @@ skipped native gate, not converted into a guessed training pool.
 
 With pinned assets already cached, a per-dataset collection command is:
 
-Replace `BUILD_COMMIT` with the exact binary build commit, not the current
-checkout when it differs.
-
 ```bash
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 IVYGREP_RERANKER=learned \
   uv run scripts/eval_code_retrieval.py \
@@ -70,6 +127,9 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 IVYGREP_RERANKER=learned \
     --mode blended --capture-reranker \
     --output /tmp/ivygrep-reranker-traces/codetrans-dl.json
 ```
+
+Replace `BUILD_COMMIT` with the exact binary build commit, not the current
+checkout when it differs.
 
 Use `--mode hash` for hash-only correctness fixtures. Native capture requires
 `--output` and no query expansion. Each output has a sibling

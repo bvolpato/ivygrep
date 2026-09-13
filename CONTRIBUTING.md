@@ -42,7 +42,8 @@ on first use. Hash-only builds need no model download.
 Useful environment variables:
 
 - `IVYGREP_HOME`: isolate indexes and configuration during testing.
-- `IVYGREP_NO_AUTOSPAWN=1`: prevent daemon auto-start.
+- `IVYGREP_NO_AUTOSPAWN=1`: prevent daemon auto-start and disable background
+  vector enhancement; `--wait-for-enhancement` fails while it is set.
 - `IVYGREP_ENHANCE_ON_BATTERY=1`: keep background neural enhancement running on
   battery power (macOS pauses it by default; the hash tier never pauses for battery).
 - `IVYGREP_ENHANCE_MAX_LOAD_RATIO`: load-average multiple of CPU count that pauses

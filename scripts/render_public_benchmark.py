@@ -66,6 +66,39 @@ def default_output_name(matrix: dict) -> str:
     return f"{report_slug(matrix)}-results.json"
 
 
+def report_page_title(matrix: dict) -> str:
+    if matrix["profile"] == "sota-challenge":
+        return "Held-Out Challenge Retrieval Benchmark"
+    return "Public Code-Retrieval Benchmark"
+
+
+def report_heading(matrix: dict) -> str:
+    if matrix["profile"] == "sota-challenge":
+        return "Held-out challenge retrieval"
+    return "Code-retrieval quality and cost"
+
+
+def report_description(matrix: dict) -> str:
+    if matrix["profile"] == "sota-challenge":
+        return "Held-out CoIR challenge retrieval quality, latency, indexing, memory, and index-size results."
+    return "Public CoIR quality, latency, indexing, memory, and index-size results."
+
+
+def measured_release_note(matrix: dict) -> str:
+    versions = sorted(
+        {
+            str(result.get("binary", {}).get("version", "")).removeprefix("ivygrep ").strip()
+            for result in matrix.get("results", [])
+        }
+        - {""}
+    )
+    if not versions:
+        return ""
+    generated = str(matrix.get("generated_at", ""))[:10]
+    suffix = f" ({generated})" if generated else ""
+    return f"Measured with {', '.join(f'v{version}' for version in versions)}{suffix}."
+
+
 def query_evidence_label(matrix: dict) -> str:
     if matrix["profile"] == "public-core":
         return "regression queries"
@@ -467,13 +500,18 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
         if query_text_limit is not None
         else ""
     )
+    measured_note = measured_release_note(matrix)
+    measured_paragraph = (
+        f"            <p>{escape(measured_note)}</p>\n" if measured_note else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep Public Code-Retrieval Benchmark</title>
-    <meta name="description" content="Public CoIR quality, latency, indexing, memory, and index-size results.">
+    <title>ivygrep {escape(report_page_title(matrix))}</title>
+    <meta name="description" content="{escape(report_description(matrix))}">
+    <link rel="canonical" href="https://bvolpato.github.io/ivygrep/benchmarks/{escape(report_slug(matrix))}.html">
     <link rel="stylesheet" href="../style.css">
     <link rel="stylesheet" href="report.css">
     <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
@@ -488,8 +526,8 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
         </nav>
         <section class="report-hero">
             <div class="report-eyebrow">Public benchmark</div>
-            <h1>Code-retrieval quality and cost</h1>
-            <p>Profile <code>{escape(matrix["profile"])}</code>: {matrix["queries"]} {escape(query_evidence_label(matrix))} across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
+            <h1>{escape(report_heading(matrix))}</h1>
+{measured_paragraph}            <p>Profile <code>{escape(matrix["profile"])}</code>: {matrix["queries"]} {escape(query_evidence_label(matrix))} across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
             <p><strong>{escape(corpus_sampling_note(matrix))}</strong></p>
         </section>
         <section class="report-grid">

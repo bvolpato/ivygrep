@@ -1,8 +1,12 @@
 # crates.io publication
 
+Not yet published: crates.io has no `ivygrep` crate. Until the bootstrap run
+below succeeds, install from a [GitHub release](https://github.com/bvolpato/ivygrep/releases),
+Homebrew, WinGet, or source.
+
 ivygrep depends on four behavior-critical forks. Their package names are
-distinct so `cargo install ivygrep --locked` does not depend on local
-`[patch.crates-io]` configuration.
+distinct so `cargo install ivygrep --locked` will not depend on local
+`[patch.crates-io]` configuration once published.
 
 Publication order:
 

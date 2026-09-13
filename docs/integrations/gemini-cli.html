@@ -4,6 +4,23 @@
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep for Gemini CLI</title><meta name="description" content="Connect Gemini CLI to local ivygrep code search and task context packs.">
     <link rel="canonical" href="https://bvolpato.github.io/ivygrep/integrations/gemini-cli.html">
+    <meta property="og:title" content="ivygrep for Gemini CLI">
+    <meta property="og:description" content="Connect Gemini CLI to local ivygrep code search and task context packs.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://bvolpato.github.io/ivygrep/integrations/gemini-cli.html">
+    <meta property="og:site_name" content="ivygrep">
+    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="698">
+    <meta property="og:image:alt" content="ivygrep search and bounded task-context workflow">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="ivygrep for Gemini CLI">
+    <meta name="twitter:description" content="Connect Gemini CLI to local ivygrep code search and task context packs.">
+    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
+    <meta name="twitter:image:alt" content="ivygrep search and bounded task-context workflow">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="integration.css"><link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
 </head>
 <body>
@@ -13,7 +30,7 @@
         <header class="integration-header"><span class="section-tag">Gemini CLI integration</span><h1>Bring repository context to Gemini CLI.</h1><p>Connect one local stdio MCP server. ivygrep returns search results or bounded context packs without uploading repository indexes.</p></header>
         <div class="integration-grid">
             <section class="glass-panel integration-card"><h2>Install</h2><pre class="integration-command">brew install bvolpato/tap/ivygrep
-gemini mcp add --scope user --transport stdio ig ig --mcp</pre><p>Confirm server after restarting Gemini CLI:</p><pre class="integration-command">gemini mcp list</pre><h3>Use</h3><pre class="integration-command">Use ig_search to build one 8000-token context pack for this task, scoped to current repository.</pre></section>
+gemini mcp add --scope user --transport stdio ig ig --mcp</pre><p>Windows: <code>winget install --id BrunoVolpato.ivygrep --exact</code>. See <a href="../index.html#install">all install options</a>.</p><p>Confirm server after restarting Gemini CLI:</p><pre class="integration-command">gemini mcp list</pre><h3>Use</h3><pre class="integration-command">Use ig_search to build one 8000-token context pack for this task, scoped to current repository.</pre></section>
             <aside class="glass-panel integration-card"><h2>Recommended inputs</h2><ul><li><code>output=context_pack</code></li><li><code>budget_tokens=8000</code></li><li><code>since=main</code> when branch changes matter</li><li>Absolute path to active worktree</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
         </div>
     </div></main>
