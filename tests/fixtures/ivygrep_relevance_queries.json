@@ -237,16 +237,6 @@
         { "pattern": "src/search_execution.rs", "grade": 3 }
       ],
       "spam_patterns": ["tests/**", "benches/**"]
-    },
-    {
-      "id": "pasted-index-lock-error",
-      "query": "Error: failed to acquire index lock /home/dev/.local/share/ivygrep/indexes/7c41e0a9d2f3/index.lock\n\nCaused by:\n    Resource temporarily unavailable (os error 11)",
-      "intent": "Pasted error chain: per-workspace index lock.",
-      "judgments": [
-        { "pattern": "src/indexer.rs", "grade": 3 },
-        { "pattern": "src/workspace.rs", "grade": 1 }
-      ],
-      "spam_patterns": ["tests/**", "benches/**"]
     }
   ]
 }

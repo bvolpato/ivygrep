@@ -22,7 +22,7 @@ All notable changes to ivygrep are documented in this file.
 
 - Criterion benchmarks return their fixtures so temporary-directory cleanup stays outside timed samples. The ANN fixture uses 50,000 distinct seeded vectors instead of 97 repeated values, and its guarded benches are renamed `*_distinct_hot` because earlier results are not comparable. The benchmark guard records the head measurement and passes when the baseline ref has no such bench.
 - Million-chunk query phases use disjoint query sets, so CLI warm and concurrent latency no longer replay cached daemon answers. Paired comparisons fail when peak indexing RSS or disk use exceeds 1.25 times the baseline.
-- The self-repository relevance fixture adds three multi-line queries, two pasted source snippets and a pasted error chain, so the gate covers multi-line ranking.
+- The self-repository relevance fixture adds two multi-line queries that paste source snippets, so the gate covers multi-line ranking.
 
 ### Changed
 
