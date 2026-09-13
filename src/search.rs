@@ -790,12 +790,67 @@ fn fold_literal_case(text: &str) -> String {
     if text.is_ascii() {
         text.to_ascii_lowercase()
     } else {
-        // Unicode simple case folding also maps word-final sigma to sigma.
-        text.chars()
-            .flat_map(char::to_lowercase)
-            .map(|character| if character == 'ς' { 'σ' } else { character })
-            .collect()
+        let mut folded = String::with_capacity(text.len());
+        for character in text.chars() {
+            fold_literal_char(character, &mut folded);
+        }
+        folded
     }
+}
+
+fn fold_literal_char(character: char, folded: &mut String) {
+    // Unicode simple case folding also maps word-final sigma to sigma.
+    folded.extend(
+        character
+            .to_lowercase()
+            .map(|lower| if lower == 'ς' { 'σ' } else { lower }),
+    );
+}
+
+/// Byte range of the first case-folded occurrence of `query_lower` in `line`.
+fn literal_match_range(line: &str, query_lower: &str) -> Option<std::ops::Range<usize>> {
+    if query_lower.is_empty() {
+        return None;
+    }
+    if line.is_ascii() {
+        let start = line.to_ascii_lowercase().find(query_lower)?;
+        return Some(start..start + query_lower.len());
+    }
+    // Folding can change byte lengths, so map folded offsets back to source characters.
+    let mut folded = String::with_capacity(line.len());
+    let mut origins = Vec::new();
+    for (offset, character) in line.char_indices() {
+        origins.push((folded.len(), offset));
+        fold_literal_char(character, &mut folded);
+    }
+    let found = folded.find(query_lower)?;
+    let source_offset = |folded_offset: usize| {
+        origins[origins.partition_point(|(start, _)| *start <= folded_offset) - 1].1
+    };
+    let start = source_offset(found);
+    let last = source_offset(found + query_lower.len() - 1);
+    Some(start..last + line[last..].chars().next().map_or(0, char::len_utf8))
+}
+
+/// Joins snippet lines for a literal hit. The matching line keeps its first
+/// match inside the preview window.
+fn literal_preview(
+    lines: &[&str],
+    start_line: usize,
+    match_line: usize,
+    query_lower: &str,
+) -> String {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| {
+            let found = (start_line + offset == match_line && line.len() > MAX_PREVIEW_LINE_BYTES)
+                .then(|| literal_match_range(line, query_lower))
+                .flatten();
+            preview_line_window(line, found)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn literal_search_walk(
@@ -892,7 +947,12 @@ fn literal_search_paths(
                     file_path: rel_path.clone(),
                     start_line,
                     end_line,
-                    preview: lines[start_line.saturating_sub(1)..end_line].join("\n"),
+                    preview: literal_preview(
+                        &lines[start_line.saturating_sub(1)..end_line],
+                        start_line,
+                        line_number,
+                        query_lower,
+                    ),
                     reason: format!("literal match: {}", truncate_for_reason(line.trim())),
                     score: 1.0,
                     sources: vec!["literal".to_string()],
@@ -2525,6 +2585,47 @@ fn query_targets_secondary_sources(query_text: &str) -> bool {
                 | "tutorial"
         )
     })
+}
+
+/// Longest line that literal and regex previews return unchanged.
+pub(crate) const MAX_PREVIEW_LINE_BYTES: usize = 1_024;
+const PREVIEW_CUT_MARKER: &str = "…";
+
+/// Bounds one preview line. A longer line, such as a minified bundle, keeps a
+/// `MAX_PREVIEW_LINE_BYTES` window around `first_match`, or its start, cut on
+/// character boundaries and marked with an ellipsis on each cut side.
+pub(crate) fn preview_line_window(
+    line: &str,
+    first_match: Option<std::ops::Range<usize>>,
+) -> std::borrow::Cow<'_, str> {
+    if line.len() <= MAX_PREVIEW_LINE_BYTES {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut start = first_match
+        .filter(|found| found.start <= found.end && found.end <= line.len())
+        .map_or(0, |found| {
+            let lead = MAX_PREVIEW_LINE_BYTES.saturating_sub(found.len()) / 2;
+            found
+                .start
+                .saturating_sub(lead)
+                .min(line.len() - MAX_PREVIEW_LINE_BYTES)
+        });
+    while !line.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = (start + MAX_PREVIEW_LINE_BYTES).min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut window = String::with_capacity(end - start + 2 * PREVIEW_CUT_MARKER.len());
+    if start > 0 {
+        window.push_str(PREVIEW_CUT_MARKER);
+    }
+    window.push_str(&line[start..end]);
+    if end < line.len() {
+        window.push_str(PREVIEW_CUT_MARKER);
+    }
+    std::borrow::Cow::Owned(window)
 }
 
 fn truncate_for_reason(line: &str) -> String {
@@ -6413,6 +6514,75 @@ mod tests {
             let hits = literal_search(&workspace, query, &SearchOptions::default()).unwrap();
             assert_eq!(hits.len(), 1, "{query}");
             assert_eq!(hits[0].file_path, PathBuf::from("unicode.rs"), "{query}");
+        }
+    }
+
+    #[test]
+    fn preview_line_window_keeps_match_on_char_boundaries() {
+        let short = "pub fn short_line() {}";
+        assert!(matches!(
+            preview_line_window(short, Some(7..17)),
+            std::borrow::Cow::Borrowed(line) if line == short
+        ));
+
+        // Multi-byte padding puts both naive byte cuts inside characters, and
+        // folding `İ` grows the text before the match.
+        let line = format!("{}needle_marker{}", "İé".repeat(400), "日é".repeat(400));
+        let found = literal_match_range(&line, &fold_literal_case("NEEDLE_Marker")).unwrap();
+        assert_eq!(&line[found.clone()], "needle_marker");
+        let window = preview_line_window(&line, Some(found));
+        assert!(window.contains("needle_marker"));
+        assert!(window.starts_with('…') && window.ends_with('…'));
+        assert!(window.len() <= MAX_PREVIEW_LINE_BYTES + 2 * '…'.len_utf8());
+    }
+
+    #[test]
+    #[serial]
+    fn literal_and_regex_previews_window_long_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        // A 20 KB generated line stays under the minified-file threshold, so it is indexed.
+        let long_line = format!(
+            "{}window_marker();{}",
+            "a=1;".repeat(500),
+            "b=2;".repeat(4_500)
+        );
+        std::fs::write(
+            tmp.path().join("bundle.js"),
+            format!("before();\n{long_line}\nafter();\n"),
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let options = SearchOptions {
+            context: 1,
+            ..SearchOptions::default()
+        };
+        let literal = literal_search(&workspace, "WINDOW_MARKER", &options).unwrap();
+        let regex = crate::regex_search::regex_search_with_options(
+            &workspace,
+            r"window_marker\(\)",
+            &options,
+        )
+        .unwrap();
+        for (mode, hits) in [("literal", literal), ("regex", regex)] {
+            assert_eq!(hits.len(), 1, "{mode}");
+            assert_eq!((hits[0].start_line, hits[0].end_line), (1, 3), "{mode}");
+            let lines = hits[0].preview.lines().collect::<Vec<_>>();
+            assert_eq!(lines.len(), 3, "{mode}");
+            assert_eq!((lines[0], lines[2]), ("before();", "after();"), "{mode}");
+            assert!(
+                lines[1].starts_with('…') && lines[1].ends_with('…'),
+                "{mode}"
+            );
+            assert!(lines[1].contains("window_marker();"), "{mode}");
+            assert!(
+                lines[1].len() <= MAX_PREVIEW_LINE_BYTES + 2 * '…'.len_utf8(),
+                "{mode}"
+            );
         }
     }
 

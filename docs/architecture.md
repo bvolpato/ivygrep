@@ -329,6 +329,12 @@ Live source reads use `workspace_file.rs` to open regular files beneath the
 selected workspace without following child symlinks. Preview metadata and text
 come from the same opened file; unavailable live previews use indexed text.
 
+Literal and regex previews return lines up to 1 KiB unchanged. A longer line,
+such as a minified bundle or source map, keeps a 1 KiB window around its first
+match (context lines keep their start), cut on character boundaries and marked
+with `…`, so one hit cannot return megabytes of text. Line numbers and the line
+count stay unchanged.
+
 Literal searches retain at most the requested hit count per file and per parallel
 partial result set. They preserve path/span ordering without materializing every
 matching snippet; source-file reads and explicit unbounded output retain their
