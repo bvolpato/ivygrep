@@ -652,7 +652,7 @@ fn public_boolean_constraints_reject_unterminated_operator_quotes() {
     // Both delimiters are rejected by the pinned parser. Public dispatch must
     // not hide these malformed Boolean requests from that strict parser.
     let ctx = SearchContext::load(&workspace, None, false).unwrap();
-    let parser = lexical_query_parser(&ctx, false);
+    let parser = lexical_query_parser(&ctx, &ctx.fields, false);
     assert!(parser.parse_query("\"alpha AND beta").is_err());
     assert!(parser.parse_query("'alpha AND beta").is_err());
     for query in [r#""NOT(beta)"#, "'NOT(beta)"] {

@@ -159,7 +159,20 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // A raw STRING path match can mask phrase errors in analyzed fields.
     // Keep it available through explicit file_path: queries, not defaults.
     let conjunctive_numeric_query = should_use_conjunctive_numeric_query(trimmed);
-    let parser = lexical_query_parser(ctx, conjunctive_numeric_query);
+    // Multi-line input such as pasted source carries many incidental
+    // identifiers. Scored as a separate boosted field, each one adds a
+    // near-maximal bonus to every one-line definition signature that shares it,
+    // burying the snippet's body evidence. Signature text remains searchable
+    // through the body field. Explicit Boolean queries keep the default fields.
+    let lexical_fields = if is_multiline_query(trimmed) {
+        TantivyFields {
+            signature: None,
+            ..ctx.fields.clone()
+        }
+    } else {
+        ctx.fields.clone()
+    };
+    let parser = lexical_query_parser(ctx, &lexical_fields, conjunctive_numeric_query);
 
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();
@@ -192,7 +205,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let lexical_query_limits =
         lexical_query_candidate_limits(candidate_limit, lexical_search_queries.len());
     let executor = LexicalQueryExecutor {
-        fields: &ctx.fields,
+        fields: &lexical_fields,
         parser: &parser,
         conjunctive_numeric_query,
         scope_filter: options.scope_filter.as_ref(),

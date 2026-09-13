@@ -109,18 +109,22 @@ fn backtick_runs(query: &str) -> HashMap<usize, VecDeque<usize>> {
     runs
 }
 
-pub(super) fn lexical_query_parser(ctx: &SearchContext, conjunction: bool) -> QueryParser {
+pub(super) fn lexical_query_parser(
+    ctx: &SearchContext,
+    fields: &TantivyFields,
+    conjunction: bool,
+) -> QueryParser {
     // Raw STRING paths remain available through explicit file_path: clauses,
     // not defaults, so they cannot hide unsupported phrase queries.
-    let mut fields = vec![ctx.fields.text];
-    fields.extend(ctx.fields.file_path_text);
-    fields.extend(ctx.fields.signature);
-    let mut parser = QueryParser::for_index(&ctx.indexes[0], fields);
-    parser.set_field_boost(ctx.fields.file_path, 2.0);
-    if let Some(field) = ctx.fields.file_path_text {
+    let mut default_fields = vec![fields.text];
+    default_fields.extend(fields.file_path_text);
+    default_fields.extend(fields.signature);
+    let mut parser = QueryParser::for_index(&ctx.indexes[0], default_fields);
+    parser.set_field_boost(fields.file_path, 2.0);
+    if let Some(field) = fields.file_path_text {
         parser.set_field_boost(field, 5.0);
     }
-    if let Some(field) = ctx.fields.signature {
+    if let Some(field) = fields.signature {
         parser.set_field_boost(field, 5.0);
     }
     if conjunction {
@@ -177,7 +181,7 @@ pub(super) fn boolean_candidates(
     if !has_explicit_boolean_operators(text) {
         return Ok(None);
     }
-    let parser = lexical_query_parser(ctx, should_use_conjunctive_numeric_query(text));
+    let parser = lexical_query_parser(ctx, &ctx.fields, should_use_conjunctive_numeric_query(text));
     let mut ast = tantivy::query_grammar::parse_query(text)
         .map_err(|_| anyhow::anyhow!(boolean_query_error(text)))?;
     anchor_negative_clauses(&mut ast);
