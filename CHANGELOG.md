@@ -30,6 +30,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Multi-line queries are ranked as pasted source. They no longer boost one-line definition signatures that share a few of the snippet's identifiers, and `owner.member` calls inside them no longer become exact-symbol lookups, so the code that contains the snippet ranks first. On the held-out reranker-evaluation half of the public panel, lexical nDCG@10 rises from `.3140` to `.5418` on codetrans-contest and from `.2273` to `.2932` on codetrans-dl. Single-line queries are unchanged.
 - Fallback-chunked languages index lines before the first declaration, such as Protobuf `package` and `option` lines. Python multi-line decorators stay in their definition's chunk, while continuation headers still name the `def` or `class` line.
 - Indexed signatures and definition-name ranking skip multi-line annotations, decorators, and attributes such as `@router.get(...)`, `@RequestMapping(...)`, and `#[cfg_attr(...)]` until their brackets balance, so the declaration line is used instead of an argument line.
 - Java records, module-level JavaScript and TypeScript `const name = () => ...` bindings, and module-level Rust `macro_rules!` macros produce symbol definitions. A declaration that binds several functions, such as `export const a = () => 1, b = () => 2`, registers every function name.

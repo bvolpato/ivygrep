@@ -2099,8 +2099,22 @@ fn natural_language_symbol_queries(query_text: &str) -> Vec<String> {
     queries
 }
 
+/// Multi-line input: usually pasted source, a stack trace, or a multi-paragraph
+/// prompt rather than a request for one symbol.
+fn is_multiline_query(query_text: &str) -> bool {
+    query_text.trim().contains('\n')
+}
+
+/// Member names a prose query mentions as `owner.member`. In multi-line input
+/// such as pasted source, `np.zeros` or `f.write` are ordinary calls; promoting
+/// them to exact-symbol candidates would outrank the snippet's own lexical
+/// evidence.
 fn qualified_symbol_leaf_names(query_text: &str) -> Vec<String> {
     const MAX_QUALIFIED_NAMES: usize = 4;
+
+    if is_multiline_query(query_text) {
+        return Vec::new();
+    }
 
     let mut names = Vec::new();
     let mut seen = HashSet::new();
@@ -7808,6 +7822,15 @@ function sendfile(res, path, options, callback) {
         assert!(qualified_symbol_leaf_names("Plug.Session cookie store").is_empty());
         assert!(qualified_symbol_leaf_names("absl::Mutex locking").is_empty());
         assert!(qualified_symbol_leaf_names("read config.toml").is_empty());
+        assert!(
+            qualified_symbol_leaf_names("x = tf.constant(0.5)\ny = np.zeros(3)\nd2l.plot(x, y)")
+                .is_empty(),
+            "pasted multi-line source must not become exact member lookups"
+        );
+        assert_eq!(
+            qualified_symbol_leaf_names("  static file serving with res.sendFile\n"),
+            ["sendFile"]
+        );
     }
 
     #[test]
@@ -8275,6 +8298,60 @@ export function registerCommands(p: Plugin) {
             files[0], "handler.rs",
             "definition site should rank #1 thanks to signature boost, got order: {:?}",
             files
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn pasted_source_ranks_body_evidence_above_signature_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("target.py"),
+            "def main():\n    values = load(source)\n    totals = summarize(values)\n    report = render(totals)\n    publish(report)\n",
+        )
+        .unwrap();
+        // More one-line definitions than the rerank window, each naming two of
+        // the snippet's identifiers in its signature and none in its body.
+        let decoys = [
+            "def load(source):\n    return None\n",
+            "def summarize(values):\n    return None\n",
+            "def render(totals):\n    return None\n",
+            "def publish(report):\n    return None\n",
+        ];
+        for index in 0..40 {
+            std::fs::write(
+                tmp.path().join(format!("decoy_{index:02}.py")),
+                decoys[index % decoys.len()],
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "values = load(source)\ntotals = summarize(values)\nreport = render(totals)\npublish(report)",
+            None,
+            &SearchOptions {
+                limit: Some(20),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            hits.first().map(|hit| hit.file_path.clone()),
+            Some(PathBuf::from("target.py")),
+            "pasted source should rank the body that contains it first, got: {:?}",
+            hits.iter()
+                .take(5)
+                .map(|hit| hit.file_path.clone())
+                .collect::<Vec<_>>()
         );
     }
 
