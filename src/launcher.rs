@@ -559,7 +559,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let home = tempfile::tempdir().unwrap();
-        let token = "5f1c0b7e2d9a4c3b8e6f0a1d2c3b4a59";
+        let token = "test-session-token";
         let url = format!("http://127.0.0.1:4747/?q=auth%20flow&workspace=/repo&token={token}");
         let redirect = write_browser_redirect(&home.path().join("browser"), &url).unwrap();
         let launch = browser_launch(&redirect);
