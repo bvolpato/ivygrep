@@ -624,7 +624,7 @@ enum LineComments {
     Hash,
     /// Elsewhere `#` also starts Rust attributes and raw strings, C#
     /// directives, CSS colors, Dart symbols, and JavaScript private names, so
-    /// only `#` followed by whitespace counts, as does `//` at line start.
+    /// only `#` followed by whitespace counts. `//` outside a string always does.
     Mixed,
 }
 
@@ -688,13 +688,12 @@ fn close_open_brackets(
             offset += 2;
             continue;
         }
-        // `# note (see` ends the line, and so does a line starting `// legacy (v1`.
-        // Outside Python, `#fff` and `r#"` do not; Python's `n // 2` never does.
+        // `# note (see` and `// legacy (v1` end the line, even after arguments, so a
+        // `/*` inside them cannot open a block comment. Outside Python, `#fff` and
+        // `r#"` do not; Python's `n // 2` never does.
         let comment = match comments {
             LineComments::Hash => rest[0] == b'#',
-            LineComments::Mixed if rest.starts_with(b"//") => {
-                bytes[..offset].iter().all(u8::is_ascii_whitespace)
-            }
+            LineComments::Mixed if rest.starts_with(b"//") => true,
             LineComments::Mixed => {
                 rest[0] == b'#'
                     && (offset == 0 || bytes[offset - 1].is_ascii_whitespace())
@@ -897,11 +896,6 @@ mod tests {
                 "[return: MarshalAs (\n    UnmanagedType.Bool\n)]\npublic bool IsReady() {\n",
                 "public bool IsReady() {",
             ),
-            // Python floor division is not a comment.
-            (
-                "@lru_cache(maxsize=256 // 4)\ndef cached():\n",
-                "def cached():",
-            ),
             // Nor do brackets inside block comments.
             (
                 "@RequestMapping(\n    /* legacy (v1 */\n    value = \"/users\"\n)\npublic List<User> list() {\n",
@@ -910,6 +904,11 @@ mod tests {
             (
                 "#[cfg_attr(\n    /*\n     * see (docs\n     */\n    feature = \"serde\",\n    derive(Serialize)\n)]\npub fn encode() {}\n",
                 "pub fn encode() {}",
+            ),
+            // A trailing `//` comment ends the line before a `/*` inside it.
+            (
+                "@Foo(\n    value = 1, // document the /* token\n    other = 2\n)\npublic void run() {\n",
+                "public void run() {",
             ),
         ] {
             let range = first_code_line_range(text, "").unwrap();
@@ -922,6 +921,11 @@ mod tests {
         let text = "@pytest.mark.parametrize(\n    \"value\",  #TODO(flaky\n    [1, 2],#see [docs\n)\ndef test_value(value):\n";
         let range = first_code_line_range(text, "python").unwrap();
         assert_eq!(&text[range], "def test_value(value):");
+
+        // Python floor division is not a comment.
+        let text = "@lru_cache(maxsize=256 // 4)\ndef cached():\n";
+        let range = first_code_line_range(text, "python").unwrap();
+        assert_eq!(&text[range], "def cached():");
 
         // Elsewhere `#name` can be code, such as a Dart symbol.
         let text = "@MirrorsUsed(\n    symbols: #foo)\nclass Reflected {}\n";
