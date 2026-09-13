@@ -426,9 +426,8 @@ fn constrain_query_to_scope(
     ])))
 }
 
-/// Parallel regex search over a known set of file paths.
 /// Lossy decoding keeps lines with invalid UTF-8, so binary files need an
-/// explicit filter: stop at the first NUL like grep, before any hit is emitted.
+/// explicit filter: like grep, stop searching a file once a NUL byte is read.
 fn text_searcher() -> Searcher {
     SearcherBuilder::new()
         .line_number(true)
@@ -436,6 +435,7 @@ fn text_searcher() -> Searcher {
         .build()
 }
 
+/// Parallel regex search over a known set of file paths.
 fn regex_search_parallel(
     workspace: &Workspace,
     pattern: &str,

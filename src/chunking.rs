@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
-const TEXT_SNIFF_BYTES: usize = 8 * 1024;
+pub(crate) const TEXT_SNIFF_BYTES: usize = 8 * 1024;
 const MIN_PRINTABLE_RATIO: f32 = 0.85;
 
 // ── Types ──────────────────────────────────────────────────────────────────

@@ -870,8 +870,9 @@ fn literal_search_paths(
         let Ok(content) = crate::workspace_file::read_to_string(root, path) else {
             return Vec::new();
         };
-        // Lossy decoding keeps text with stray invalid bytes; NUL still marks binary.
-        if content.contains('\0') {
+        // Lossy decoding keeps text with stray invalid bytes. Like indexing, a NUL
+        // within the sniffed prefix marks the file as binary.
+        if content.as_bytes()[..content.len().min(crate::chunking::TEXT_SNIFF_BYTES)].contains(&0) {
             return Vec::new();
         }
         let lines = content.lines().collect::<Vec<_>>();
@@ -6343,12 +6344,11 @@ mod tests {
             "const CAFÉ_MARKER: u8 = 1;\n// ΛΟΓΟΣΤΗΣ\n",
         )
         .unwrap();
-        // Binary files stay excluded even though live reads decode lossily.
-        std::fs::write(
-            tmp.path().join("blob.bin"),
-            b"rotate_latin1_secret\0\x01\x02\n",
-        )
-        .unwrap();
+        // Binary files stay excluded even though live reads decode lossily. The
+        // Greek queries have no ASCII trigram, so they walk every file.
+        let mut blob = "ΛΟΓΟΣΤΗΣ\n".as_bytes().to_vec();
+        blob.extend_from_slice(b"\0\x01\x02\n");
+        std::fs::write(tmp.path().join("blob.bin"), blob).unwrap();
 
         let workspace = Workspace::resolve(tmp.path()).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
