@@ -15,6 +15,12 @@ All notable changes to ivygrep are documented in this file.
 - Regex coverage caching remembers workspaces with too many unindexed files, so later regex queries skip the repeated walk.
 - Regex searches with a limit return the first matches in path order on every run instead of a thread-scheduling-dependent subset.
 - Hybrid queries without ASCII letters or digits, such as CJK or Cyrillic text, use exact substring matching instead of returning no results.
+- Rust `use super::...` and `self::...` context dependencies follow the module tree instead of the file's directory, so `super::Config` in `src/a/b.rs` resolves to `src/a/mod.rs` rather than `src/lib.rs`.
+- Context tasks treat prose such as "e.g.", "i.e." and version numbers as text instead of explicit symbols that discard matching evidence.
+- Context items keep correct line numbers when leading blank lines are trimmed, and over-budget previews keep the top of a chunk when no task term matches.
+- Stack-trace frames from `node_modules`, `site-packages`, `dist-packages`, Cargo registry, Go module cache and `rustc` paths no longer map to unrelated workspace files by file name.
+- Co-change evidence keeps non-ASCII file names, and Markdown previews containing code fences render inside a longer fence.
+- `ig context --since` accepts revision syntax such as `HEAD~3`, `main^` and `@{upstream}`.
 
 ## [1.2.14] - 2026-09-10
 

@@ -1265,6 +1265,15 @@ fn resolve_local_dependency(
     {
         normalized = normalized.replace('.', "/");
     }
+    if language == "rust" && (normalized.starts_with("self/") || normalized.starts_with("super/")) {
+        return resolve_rust_module_relative(
+            root,
+            snapshot,
+            source_path,
+            &normalized,
+            local_rust_crate,
+        );
+    }
     let mut package_relative = false;
     if language == "rust"
         && let Some(crate_context) = local_rust_crate
@@ -1319,14 +1328,6 @@ fn resolve_local_dependency(
         .or_else(|| normalized.strip_prefix("~/"))
         .unwrap_or(&normalized)
         .to_string();
-    let mut super_prefix = String::new();
-    while let Some(rest) = normalized.strip_prefix("super/") {
-        super_prefix.push_str("../");
-        normalized = rest.to_string();
-    }
-    if !super_prefix.is_empty() {
-        normalized = format!("{super_prefix}{normalized}");
-    }
     normalized = normalized.trim_start_matches("./").to_string();
 
     let mut targets = vec![PathBuf::from(&normalized)];
@@ -1982,6 +1983,52 @@ fn rust_module_declaration_base(source_path: &Path) -> PathBuf {
         Some("lib" | "main" | "mod" | "build") | None => parent.to_path_buf(),
         Some(_) if parent.as_os_str().is_empty() || crate_root_directory => parent.to_path_buf(),
         Some(stem) => parent.join(stem),
+    }
+}
+
+/// `self::` and `super::` follow the module tree, not the directory tree:
+/// `src/a/b.rs` is `crate::a::b`, so `super::Config` lives in `src/a.rs` or
+/// `src/a/mod.rs`.
+fn resolve_rust_module_relative(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    source_path: &Path,
+    spec: &str,
+    local_rust_crate: Option<&RustCrateContext>,
+) -> Option<PathBuf> {
+    let crate_root = local_rust_crate
+        .map(|context| context.crate_root.clone())
+        .unwrap_or_else(|| rust_default_crate_root(root, snapshot, source_path));
+    let crate_directory = crate_root.parent().unwrap_or_else(|| Path::new(""));
+    // Directory holding the children of the module named by the spec prefix.
+    let mut module_directory = if crate_root == source_path {
+        crate_directory.to_path_buf()
+    } else {
+        rust_module_declaration_base(source_path)
+    };
+    let mut module_path = spec.strip_prefix("self/").unwrap_or(spec);
+    while let Some(rest) = module_path.strip_prefix("super/") {
+        if module_directory == crate_directory || !module_directory.pop() {
+            return None;
+        }
+        module_path = rest;
+    }
+    let module_file = |module: &Path| {
+        [module.with_extension("rs"), module.join("mod.rs")]
+            .iter()
+            .find_map(|candidate| existing_workspace_file(root, snapshot, candidate))
+    };
+    let mut item = Path::new(module_path);
+    while !item.as_os_str().is_empty() {
+        if let Some(relative) = module_file(&module_directory.join(item)) {
+            return Some(relative);
+        }
+        item = item.parent().unwrap_or_else(|| Path::new(""));
+    }
+    if module_directory == crate_directory {
+        existing_workspace_file(root, snapshot, &crate_root)
+    } else {
+        module_file(&module_directory)
     }
 }
 
@@ -2667,6 +2714,7 @@ fn recent_cochange_edges(workspace: &Workspace, seed_paths: &[PathBuf]) -> Vec<R
     let Ok(log) = Command::new("git")
         .args([
             "log",
+            "-z",
             &format!("--max-count={MAX_COCHANGE_COMMITS}"),
             "--no-merges",
             "--format=format:__IVYGREP_COMMIT__",
@@ -2696,13 +2744,20 @@ fn recent_cochange_edges(workspace: &Workspace, seed_paths: &[PathBuf]) -> Vec<R
             }
         }
     };
-    for line in String::from_utf8_lossy(&log.stdout).lines() {
-        let line = line.trim();
-        if line == COMMIT_MARKER {
-            record_commit(&commit_paths, &mut counts);
-            commit_paths.clear();
-        } else if !line.is_empty() {
-            commit_paths.insert(PathBuf::from(line));
+    // `-z` emits paths verbatim; line output C-quotes non-ASCII names. Each
+    // commit record starts with the marker line before its first path.
+    for record in log.stdout.split(|byte| *byte == 0) {
+        let record = String::from_utf8_lossy(record);
+        let path = match record.strip_prefix(COMMIT_MARKER) {
+            Some(first_path) => {
+                record_commit(&commit_paths, &mut counts);
+                commit_paths.clear();
+                first_path.trim_start_matches(['\r', '\n'])
+            }
+            None => &record[..],
+        };
+        if !path.is_empty() {
+            commit_paths.insert(PathBuf::from(path));
         }
     }
     record_commit(&commit_paths, &mut counts);
@@ -4563,6 +4618,52 @@ const char *example = "\
     }
 
     #[test]
+    fn rust_self_and_super_imports_follow_module_tree() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            ("src/lib.rs", "pub mod a;\npub mod root;\n"),
+            ("src/root.rs", "pub struct Root;\n"),
+            (
+                "src/a/mod.rs",
+                "pub mod b;\npub mod sibling;\npub struct Config;\n",
+            ),
+            ("src/a/sibling.rs", "pub struct Sibling;\n"),
+            ("src/a/b/child.rs", "pub struct Child;\n"),
+            ("src/a/child.rs", "pub struct WrongChild;\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        let dependencies = |source: &str, content: &str| {
+            extract_file_edges(root.path(), None, Path::new(source), content)
+                .into_iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path)
+                .collect::<BTreeSet<_>>()
+        };
+
+        assert_eq!(
+            dependencies(
+                "src/a/b.rs",
+                "use super::Config;\nuse super::sibling::Sibling;\nuse self::child::Child;\n",
+            ),
+            BTreeSet::from([
+                PathBuf::from("src/a/b/child.rs"),
+                PathBuf::from("src/a/mod.rs"),
+                PathBuf::from("src/a/sibling.rs"),
+            ])
+        );
+        assert_eq!(
+            dependencies(
+                "src/a/mod.rs",
+                "use super::root::Root;\nuse super::Missing;\nuse super::super::Invalid;\n",
+            ),
+            BTreeSet::from([PathBuf::from("src/lib.rs"), PathBuf::from("src/root.rs")])
+        );
+    }
+
+    #[test]
     fn go_module_imports_resolve_arbitrary_package_files() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("internal/auth")).unwrap();
@@ -4707,6 +4808,42 @@ const char *example = "\
                 && edge.source_path == Path::new("src/auth.rs")
                 && edge.target_path == Path::new("tests/auth.rs")
                 && edge.cochange_count == 1
+        }));
+    }
+
+    #[test]
+    fn cochange_edges_keep_non_ascii_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/auth.rs"), "pub fn auth() {}\n").unwrap();
+        fs::write(root.path().join("src/café.rs"), "pub fn cafe() {}\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=ivygrep test",
+                        "-c",
+                        "user.email=ivygrep@example.invalid",
+                        "-c",
+                        "commit.gpgsign=false",
+                    ])
+                    .args(args)
+                    .current_dir(root.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "fixture"]);
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let edges = recent_cochange_edges(&workspace, &[PathBuf::from("src/auth.rs")]);
+        assert!(edges.iter().any(|edge| {
+            edge.source_path == Path::new("src/auth.rs")
+                && edge.target_path == Path::new("src/café.rs")
         }));
     }
 

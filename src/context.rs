@@ -1502,13 +1502,23 @@ fn task_symbols(task: &str) -> Vec<String> {
         part.contains('_')
             || part.contains("::")
             || part.contains('#')
-            || part.contains('.') && !looks_like_file_name(part)
+            || part.contains('.') && !looks_like_file_name(part) && looks_like_member_path(part)
             || looks_like_mixed_case_identifier(part)
     })
     .filter(|part| !is_generic_symbol(part))
     .filter(|part| seen.insert(part.to_ascii_lowercase()))
     .map(ToOwned::to_owned)
     .collect()
+}
+
+/// `client.send` names a member; prose such as `e.g`, `U.S`, and `2.0` does not.
+fn looks_like_member_path(token: &str) -> bool {
+    token.split('.').any(|part| part.len() >= 2)
+        && token.split('.').all(|part| {
+            part.starts_with(|character: char| {
+                character.is_ascii_alphabetic() || matches!(character, '_' | '$')
+            })
+        })
 }
 
 fn looks_like_path_location(token: &str) -> bool {
@@ -1797,7 +1807,8 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
         return (String::new(), false, 0);
     }
     if estimate_tokens(text) <= budget {
-        return (text.trim().to_string(), false, 0);
+        let (preview, removed_lines) = trim_leading_lines(text);
+        return (preview, false, removed_lines);
     }
     let lines = text.lines().collect::<Vec<_>>();
     let terms = significant_task_terms(task);
@@ -1808,7 +1819,7 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
     let focus = lines
         .iter()
         .enumerate()
-        .max_by_key(|(_, line)| {
+        .max_by_key(|(index, line)| {
             let lower = line.to_ascii_lowercase();
             let exact_identifier_bonus =
                 if explicit_symbols.iter().any(|symbol| lower.contains(symbol)) {
@@ -1816,12 +1827,15 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
                 } else {
                     0
                 };
-            exact_identifier_bonus
+            let score = exact_identifier_bonus
                 + terms
                     .iter()
                     .filter(|term| lower.contains(term.as_str()))
                     .map(String::len)
-                    .sum::<usize>()
+                    .sum::<usize>();
+            // `max_by_key` keeps the last maximum; the earliest line keeps
+            // signatures when no line matches the task.
+            (score, std::cmp::Reverse(*index))
         })
         .map(|(index, _)| index)
         .unwrap_or(lines.len() / 2);
@@ -1858,7 +1872,15 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
             break;
         }
     }
-    (lines[start..end].join("\n").trim().to_string(), true, start)
+    let (preview, removed_lines) = trim_leading_lines(&lines[start..end].join("\n"));
+    (preview, true, start.saturating_add(removed_lines))
+}
+
+/// Trims a preview and reports how many leading lines were removed.
+fn trim_leading_lines(text: &str) -> (String, usize) {
+    let trimmed = text.trim_start();
+    let removed_lines = text[..text.len() - trimmed.len()].matches('\n').count();
+    (trimmed.trim_end().to_string(), removed_lines)
 }
 
 pub fn render_markdown(bundle: &ContextBundle) -> String {
@@ -1989,7 +2011,15 @@ fn render_markdown_item(index: usize, item: &ContextItem) -> String {
         output.push_str(&format!("Signals: {}.\n\n", item.sources.join(", ")));
     }
     let language = language_fence(&item.file_path);
-    output.push_str(&format!("```{language}\n{}\n```\n", item.preview));
+    // A fence must outgrow every backtick run in the preview to stay closed.
+    let longest_backtick_run = item
+        .preview
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest_backtick_run.saturating_add(1).max(3));
+    output.push_str(&format!("{fence}{language}\n{}\n{fence}\n", item.preview));
     output
 }
 
@@ -2714,5 +2744,96 @@ mod tests {
         assert!(truncated);
         assert!(preview.contains("search_call_sites"));
         assert!(offset > 0);
+    }
+
+    #[test]
+    fn prose_abbreviations_and_versions_are_not_explicit_symbols() {
+        let task = "fix login redirect, e.g. after 2.0 upgrade";
+        assert!(task_symbols(task).is_empty());
+        assert!(task_symbols("i.e. for U.S. users").is_empty());
+        assert_eq!(
+            task_symbols("retry client.send e.g. on 2.0"),
+            ["client.send"]
+        );
+        let hit = candidate(
+            "src/auth.rs",
+            1,
+            ContextRole::Primary,
+            "fn login_redirect() {}",
+            1.0,
+        )
+        .hit;
+        assert!(hit_matches_task(&hit, task));
+    }
+
+    #[test]
+    fn trimmed_leading_blank_lines_keep_line_numbers() {
+        assert_eq!(
+            truncate_to_token_budget("\n\nfn a() {}", 100, "task"),
+            ("fn a() {}".to_string(), false, 2)
+        );
+        let text = ["", "", "fn search_call_sites() {}"]
+            .into_iter()
+            .map(str::to_string)
+            .chain((0..200).map(|index| format!("let unrelated_{index} = true;")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (preview, truncated, offset) =
+            truncate_to_token_budget(&text, 40, "fix search_call_sites");
+        assert!(truncated);
+        assert!(preview.starts_with("fn search_call_sites() {}"));
+        assert_eq!(offset, 2);
+
+        let bundle = assemble_bundle(
+            "task",
+            Path::new("/repo"),
+            500,
+            Vec::new(),
+            None,
+            Vec::new(),
+            vec![candidate(
+                "src/lib.rs",
+                10,
+                ContextRole::Primary,
+                "\n\nfn a() {}",
+                1.0,
+            )],
+        );
+        assert_eq!(
+            (bundle.items[0].start_line, bundle.items[0].end_line),
+            (12, 12)
+        );
+        assert!(render_markdown(&bundle).contains("### 1. src/lib.rs:12-12 [primary]"));
+    }
+
+    #[test]
+    fn truncation_without_task_matches_keeps_preview_top() {
+        let text = std::iter::once("pub fn handle_request() {".to_string())
+            .chain((1..300).map(|index| format!("    let unrelated_{index} = true;")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (preview, truncated, offset) =
+            truncate_to_token_budget(&text, 96, "fix login redirect");
+        assert!(truncated);
+        assert_eq!(offset, 0);
+        assert!(preview.starts_with("pub fn handle_request() {"));
+    }
+
+    #[test]
+    fn markdown_fence_outgrows_backtick_runs_in_preview() {
+        let item = ContextItem {
+            file_path: PathBuf::from("docs/guide.md"),
+            start_line: 1,
+            end_line: 4,
+            roles: vec![ContextRole::Documentation],
+            reasons: Vec::new(),
+            sources: Vec::new(),
+            preview: "# Guide\n```rust\nfn a() {}\n```".to_string(),
+            estimated_tokens: 0,
+        };
+        assert!(
+            render_markdown_item(1, &item)
+                .ends_with("\n````markdown\n# Guide\n```rust\nfn a() {}\n```\n````\n")
+        );
     }
 }
