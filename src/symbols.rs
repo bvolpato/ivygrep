@@ -549,12 +549,13 @@ fn query_workspace_db(
         {
             continue;
         }
-        let preview = try_decompress_text(raw).with_context(|| {
+        let stored = try_decompress_text(raw).with_context(|| {
             format!(
                 "failed to read stored symbol text for {}:{start_line}-{end_line}",
                 file_path.display()
             )
         })?;
+        let preview = crate::chunking::strip_chunk_header(&stored, &file_path).to_string();
         let exact_case = name == query.name;
         let mut score = if exact_case { 10.0 } else { 9.0 };
         if tier == OWNER_TIER_FOLDED {
@@ -819,7 +820,8 @@ fn search_call_sites_with_references(
                         file_path: file_path.clone(),
                         start_line: chunk.start_line,
                         end_line: chunk.end_line,
-                        preview: chunk.text,
+                        preview: crate::chunking::strip_chunk_header(&chunk.text, &file_path)
+                            .to_string(),
                         reason: "exact caller match".to_string(),
                         score: 8.0,
                         sources: vec!["caller".to_string()],

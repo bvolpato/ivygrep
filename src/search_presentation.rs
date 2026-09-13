@@ -104,12 +104,13 @@ pub(super) fn prepare_hit(
 
     // The cache already attempted a contained live read. Do not reopen its
     // rejected path here; the indexed source remains safe to present.
+    let preview = crate::chunking::strip_chunk_header(&chunk.text, &chunk.file_path).to_string();
     Ok(PreparedHit {
         hit: SearchHit {
             file_path: chunk.file_path,
             start_line: chunk.start_line,
             end_line: chunk.end_line,
-            preview: chunk.text,
+            preview,
             reason: format!(
                 "route={} neural_requested={} neural_executed={}; live file unavailable; using indexed text",
                 presentation.routing.intent.name(),
