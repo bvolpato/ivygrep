@@ -5617,6 +5617,27 @@ mod tests {
         }
     }
 
+    struct CountingTestEmbeddingModel384(std::sync::atomic::AtomicUsize);
+
+    impl EmbeddingModel for CountingTestEmbeddingModel384 {
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TestEmbeddingModel384.embed(text)
+        }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some("general")
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            TestEmbeddingModel384.model_identity()
+        }
+    }
+
     fn assert_hybrid_search_scope_filter(scope_dir: &str, out_of_scope_dirs: &[&str]) {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -6016,6 +6037,26 @@ mod tests {
                 .iter()
                 .any(|hit| hit.sources.iter().any(|source| source == "neural")),
             "forced neural routing must execute neural retrieval"
+        );
+
+        let counting_neural_model =
+            CountingTestEmbeddingModel384(std::sync::atomic::AtomicUsize::new(0));
+        hybrid_search(
+            &workspace,
+            "认证用户",
+            Some(&counting_neural_model),
+            &SearchOptions {
+                force_neural: true,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            counting_neural_model
+                .0
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0,
+            "forced neural routing must execute for non-ASCII queries"
         );
     }
 

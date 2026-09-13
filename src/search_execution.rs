@@ -23,6 +23,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // them, and semantic-only hits need that support, so exact substring matching
     // is the only pass that can find it. Symbol-only queries keep the normal route.
     if query_text.chars().any(char::is_alphanumeric)
+        && !options.force_neural
         && !query_text
             .chars()
             .any(|character| character.is_ascii_alphanumeric())
