@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 
 use crate::chunking::{
-    cpp_non_code_ranges, language_for_path, parse_source_tree, resolve_type_alias,
+    SourceTrees, cpp_non_code_ranges, language_for_path, parse_source_tree, resolve_type_alias,
 };
 use crate::indexer::open_sqlite_readonly;
 use crate::merkle::MerkleSnapshot;
@@ -180,6 +180,17 @@ pub(crate) fn extract_file_graph(
     rel_path: &Path,
     content: &str,
 ) -> FileGraphExtraction {
+    extract_file_graph_with_trees(root, snapshot, rel_path, content, SourceTrees::default())
+}
+
+/// `trees` holds the chunker's parses of `content`; missing trees are parsed here.
+pub(crate) fn extract_file_graph_with_trees(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    rel_path: &Path,
+    content: &str,
+    trees: SourceTrees,
+) -> FileGraphExtraction {
     let mut edges = BTreeSet::new();
     let mut unresolved_dependencies = BTreeSet::new();
     let mut resolved_dependencies = BTreeSet::new();
@@ -192,7 +203,7 @@ pub(crate) fn extract_file_graph(
         .flatten();
 
     if supports_dependency_scan(language) {
-        for spec in dependency_specs(rel_path, language, content) {
+        for spec in dependency_specs(rel_path, language, content, trees) {
             if is_javascript_package_specifier(language, &spec)
                 || is_external_go_specifier(language, &spec, local_go_module.as_ref())
             {
@@ -517,9 +528,14 @@ fn insert_edge(
     }
 }
 
-fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<String> {
+fn dependency_specs(
+    rel_path: &Path,
+    language: &str,
+    content: &str,
+    trees: SourceTrees,
+) -> Vec<String> {
     if matches!(language, "python" | "objc") {
-        return syntax_dependency_specs(rel_path, language, content)
+        return syntax_dependency_specs(rel_path, language, content, trees)
             .unwrap_or_default()
             .into_iter()
             .take(128)
@@ -863,11 +879,14 @@ fn syntax_dependency_specs(
     rel_path: &Path,
     language: &str,
     content: &str,
+    trees: SourceTrees,
 ) -> Option<BTreeSet<String>> {
     // Parse the complete source, not a line-truncated prefix that could turn
     // an unfinished string into code. The existing parser bounds each pass;
     // failed parses must not fall back to treating examples as dependencies.
-    let tree = parse_source_tree(rel_path, content, language)?;
+    let tree = trees
+        .tree
+        .or_else(|| parse_source_tree(rel_path, content, language))?;
     let non_code = if language == "objc"
         && rel_path
             .extension()
@@ -876,7 +895,11 @@ fn syntax_dependency_specs(
     {
         // Objective-C's grammar does not recognize C++ raw strings. Reuse the
         // mixed-language chunker's veto instead of accepting fake directives.
-        cpp_non_code_ranges(&parse_source_tree(rel_path, content, "cpp")?)
+        cpp_non_code_ranges(
+            &trees
+                .cpp_tree
+                .or_else(|| parse_source_tree(rel_path, content, "cpp"))?,
+        )
     } else {
         Vec::new()
     };
@@ -4142,6 +4165,23 @@ const char *example = "\
             assert!(
                 graph.unresolved_dependencies.is_empty(),
                 "{path}: {graph:?}"
+            );
+
+            // Indexing hands the chunker's trees over instead of parsing again.
+            let mut trees = SourceTrees::default();
+            crate::chunking::chunk_source_with_metadata(Path::new(path), &content, &mut trees);
+            assert!(trees.tree.is_some(), "{path}");
+            assert_eq!(trees.cpp_tree.is_some(), path.ends_with(".mm"), "{path}");
+            let shared =
+                extract_file_graph_with_trees(root.path(), None, Path::new(path), &content, trees);
+            assert_eq!(shared.edges, graph.edges, "{path}");
+            assert_eq!(
+                shared.resolved_dependencies, graph.resolved_dependencies,
+                "{path}"
+            );
+            assert_eq!(
+                shared.unresolved_dependencies, graph.unresolved_dependencies,
+                "{path}"
             );
         }
     }

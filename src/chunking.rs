@@ -68,6 +68,16 @@ pub(crate) struct ChunkedSource {
     pub rust_doc_includes: Vec<RustDocInclude>,
 }
 
+/// Syntax trees the chunker already parsed, so later passes over the same
+/// source can skip a second parse. A missing tree means the chunker did not
+/// parse or ran out of budget; callers then parse on their own.
+#[derive(Debug, Default)]
+pub(crate) struct SourceTrees {
+    pub tree: Option<tree_sitter::Tree>,
+    /// Unmasked C++ parse of an Objective-C++ (`.mm`) source.
+    pub cpp_tree: Option<tree_sitter::Tree>,
+}
+
 // ── Language Registry ──────────────────────────────────────────────────────
 
 /// Defines a supported language: file-matching rules and structural chunking.
@@ -662,10 +672,15 @@ fn should_skip_tree_sitter_for_generated_source(
 }
 
 pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
-    chunk_source_with_metadata(rel_path, text).chunks
+    chunk_source_with_metadata(rel_path, text, &mut SourceTrees::default()).chunks
 }
 
-pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> ChunkedSource {
+/// `trees` receives any successful parse, even when heuristic chunks win.
+pub(crate) fn chunk_source_with_metadata(
+    rel_path: &Path,
+    text: &str,
+    trees: &mut SourceTrees,
+) -> ChunkedSource {
     let lang_def = find_language_def(rel_path);
     let language = lang_def.map(|d| d.name).unwrap_or("text").to_string();
     let lines: Vec<&str> = text.lines().collect();
@@ -684,7 +699,8 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
         should_skip_tree_sitter_for_generated_source(&language, &lines, def.detect_signature)
     });
     if !skip_tree_sitter
-        && let Some(chunked) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines)
+        && let Some(chunked) =
+            try_tree_sitter_chunk_source(rel_path, text, &language, &lines, trees)
         && !chunked.chunks.is_empty()
     {
         return chunked;
@@ -761,6 +777,7 @@ fn try_tree_sitter_chunk_source(
     text: &str,
     language: &str,
     lines: &[&str],
+    trees: &mut SourceTrees,
 ) -> Option<ChunkedSource> {
     try_tree_sitter_chunk_source_with_timeout(
         rel_path,
@@ -768,6 +785,7 @@ fn try_tree_sitter_chunk_source(
         language,
         lines,
         std::time::Duration::from_millis(100),
+        trees,
     )
 }
 
@@ -874,6 +892,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
     language: &str,
     lines: &[&str],
     parse_timeout: std::time::Duration,
+    trees: &mut SourceTrees,
 ) -> Option<ChunkedSource> {
     use streaming_iterator::StreamingIterator;
     use tree_sitter::QueryCursor;
@@ -887,6 +906,8 @@ fn try_tree_sitter_chunk_source_with_timeout(
             .is_some_and(|extension| extension.eq_ignore_ascii_case("mm")))
     .then(|| (std::time::Instant::now(), thread_cpu_time()));
     let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
+    // Keep the tree even if chunking falls back below; graph extraction reuses it.
+    let tree = trees.tree.insert(tree);
     let mut cursor = QueryCursor::new();
 
     let mut captured = Vec::new();
@@ -977,7 +998,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
         // All grammar passes share the existing per-file budget. If any fails,
         // retain the normal whole-file fallback, never a partial AST result.
         let remaining = parse_timeout.checked_sub(elapsed)?;
-        objective_cpp_definition_ranges(rel_path, text, captured, remaining)?
+        objective_cpp_definition_ranges(rel_path, text, captured, remaining, &mut trees.cpp_tree)?
     } else {
         captured_definition_ranges(captured, language, text.as_bytes())
     };
@@ -1423,6 +1444,7 @@ fn objective_cpp_definition_ranges(
     text: &str,
     mut objc_captured: Vec<(tree_sitter::Node<'_>, ChunkKind)>,
     parse_timeout: std::time::Duration,
+    cpp_tree: &mut Option<tree_sitter::Tree>,
 ) -> Option<Vec<CapturedRange>> {
     use streaming_iterator::StreamingIterator;
 
@@ -1431,6 +1453,9 @@ fn objective_cpp_definition_ranges(
     let wall_start = std::time::Instant::now();
     let cpu_start = thread_cpu_time();
     let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
+    // Copying a tree only bumps a reference count; the masked reparse below
+    // must not replace the unmasked tree callers reuse.
+    *cpp_tree = Some(tree.clone());
     let non_code = cpp_non_code_ranges(&tree);
     // The ObjC grammar does not understand C++ raw strings. Its apparent
     // @interface/method captures inside those strings are not declarations.
@@ -3821,7 +3846,11 @@ const TEMPLATE: &str = include_str!("not-doc.md");
 pub fn unsupported_dynamic_include() {}
 "###;
 
-        let chunked = chunk_source_with_metadata(Path::new("src/middleware/mod.rs"), src);
+        let chunked = chunk_source_with_metadata(
+            Path::new("src/middleware/mod.rs"),
+            src,
+            &mut SourceTrees::default(),
+        );
         assert_eq!(
             chunked.rust_doc_includes,
             vec![
@@ -4589,6 +4618,7 @@ export function register(p: Plugin) {
                 "starlark",
                 &lines,
                 std::time::Duration::ZERO,
+                &mut SourceTrees::default(),
             )
             .is_none()
         );
