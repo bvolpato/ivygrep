@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -15,13 +15,26 @@ impl LaunchCommand {
         Command::new(&self.program).args(&self.args).status()
     }
 
-    pub(crate) fn spawn_detached(&self) -> std::io::Result<Child> {
-        Command::new(&self.program)
+    /// Start the program without waiting for it and return its pid. A
+    /// background thread reaps the child, so long-lived callers (the daemon's
+    /// `/api/open`) do not leave a zombie process per launch.
+    pub(crate) fn spawn_detached(&self) -> std::io::Result<u32> {
+        let mut child = Command::new(&self.program)
             .args(&self.args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
+            .spawn()?;
+        let pid = child.id();
+        if let Err(error) = std::thread::Builder::new()
+            .name("ig-launch-reaper".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+        {
+            tracing::warn!("could not start a reaper for launched process {pid}: {error}");
+        }
+        Ok(pid)
     }
 }
 
@@ -380,6 +393,25 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_launch_is_reaped_after_exit() {
+        let launch = LaunchCommand {
+            program: OsString::from("true"),
+            args: Vec::new(),
+        };
+        let pid = launch.spawn_detached().unwrap();
+        let proc_entry = format!("/proc/{pid}");
+        let started = std::time::Instant::now();
+        while Path::new(&proc_entry).exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "detached child {pid} was never reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]

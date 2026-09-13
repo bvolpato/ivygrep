@@ -52,20 +52,20 @@ const RANKED_HIT_OVERFETCH: usize = 5;
 const ENUMERATING_HIT_OVERFETCH: usize = 20;
 const MIN_ENUMERATING_HIT_BUDGET: usize = 200;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct JsonRpcRequest {
-    #[serde(default)]
+    /// `None` for a notification (no `id` member). `Some(Value::Null)` is a
+    /// request with a null id and still gets a response.
     id: Option<Value>,
     method: String,
-    #[serde(default)]
     params: Value,
 }
 
 #[derive(Debug, Serialize)]
 struct JsonRpcResponse {
     jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<Value>,
+    /// Always serialized; `null` when the request id could not be determined.
+    id: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,42 +152,7 @@ pub fn serve_stdio() -> Result<()> {
             None => break,
         };
 
-        let request: JsonRpcRequest = match serde_json::from_slice(&payload) {
-            Ok(request) => request,
-            Err(err) => {
-                let response = JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION,
-                    id: None,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32700,
-                        message: format!("parse error: {err}"),
-                    }),
-                };
-                write_message(&mut writer, &response, mode)?;
-                continue;
-            }
-        };
-
-        // Isolate handler panics: a panic deep in search must not crash the
-        // whole MCP session. Capture it and return a JSON-RPC error instead.
-        let request_id = request.id.clone();
-        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handle_request(request)
-        })) {
-            Ok(response) => response,
-            Err(_) => request_id.map(|id| JsonRpcResponse {
-                jsonrpc: JSONRPC_VERSION,
-                id: Some(id),
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -32603,
-                    message: "internal error: request handler panicked".to_string(),
-                }),
-            }),
-        };
-
-        if let Some(response) = response {
+        if let Some(response) = handle_payload(&payload) {
             write_message(&mut writer, &response, mode)?;
         }
     }
@@ -195,9 +160,83 @@ pub fn serve_stdio() -> Result<()> {
     Ok(())
 }
 
+/// Handle one framed JSON-RPC payload. `None` means nothing is sent back.
+fn handle_payload(payload: &[u8]) -> Option<JsonRpcResponse> {
+    let request = match parse_request(payload) {
+        Ok(Some(request)) => request,
+        Ok(None) => return None,
+        Err(response) => return Some(response),
+    };
+
+    // Isolate handler panics: a panic deep in search must not crash the
+    // whole MCP session. Capture it and return a JSON-RPC error instead.
+    let request_id = request.id.clone();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_request(request))) {
+        Ok(response) => response,
+        Err(_) => request_id.map(|id| {
+            error_response(
+                id,
+                -32603,
+                "internal error: request handler panicked".to_string(),
+            )
+        }),
+    }
+}
+
+/// Decode one JSON-RPC 2.0 message. `Ok(None)` is a client's response to a
+/// server request, which needs no answer; `Err` carries the error response.
+fn parse_request(payload: &[u8]) -> std::result::Result<Option<JsonRpcRequest>, JsonRpcResponse> {
+    let message: Value = serde_json::from_slice(payload)
+        .map_err(|err| error_response(Value::Null, -32700, format!("parse error: {err}")))?;
+    let Value::Object(mut message) = message else {
+        return Err(error_response(
+            Value::Null,
+            -32600,
+            "invalid request: expected a JSON object".to_string(),
+        ));
+    };
+    // Only a missing `id` member makes a notification; `"id": null` is a request.
+    let id = message.remove("id");
+    if id
+        .as_ref()
+        .is_some_and(|id| !(id.is_null() || id.is_string() || id.is_number()))
+    {
+        return Err(error_response(
+            Value::Null,
+            -32600,
+            "invalid request: id must be a string, number, or null".to_string(),
+        ));
+    }
+    match message.remove("method") {
+        Some(Value::String(method)) => Ok(Some(JsonRpcRequest {
+            id,
+            method,
+            params: message.remove("params").unwrap_or(Value::Null),
+        })),
+        None if id.is_some()
+            && (message.contains_key("result") || message.contains_key("error")) =>
+        {
+            Ok(None)
+        }
+        _ => Err(error_response(
+            id.unwrap_or(Value::Null),
+            -32600,
+            "invalid request: method must be a string".to_string(),
+        )),
+    }
+}
+
+fn error_response(id: Value, code: i64, message: String) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION,
+        id,
+        result: None,
+        error: Some(JsonRpcError { code, message }),
+    }
+}
+
 fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
-    let id = request.id.as_ref()?;
-    let id = Some(id.clone());
+    let id = request.id?;
 
     match dispatch(request.method.as_str(), request.params) {
         Ok(result) => Some(JsonRpcResponse {
@@ -206,15 +245,7 @@ fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
             result: Some(result),
             error: None,
         }),
-        Err(err) => Some(JsonRpcResponse {
-            jsonrpc: JSONRPC_VERSION,
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: err.code,
-                message: err.message,
-            }),
-        }),
+        Err(err) => Some(error_response(id, err.code, err.message)),
     }
 }
 
@@ -304,7 +335,7 @@ fn search_tool_schema() -> Value {
                 },
                 "type": {"type": "string", "description": "Language filter - accepts names (rust, python), extensions (rs, py, md), or aliases (c++, bash, js)."},
                 "regex": {"type": "boolean", "description": "Use regex mode (index-prefiltered when possible; otherwise walks raw files). Prefer 'literal' for exact matches."},
-                "literal": {"type": "boolean", "description": "Fast exact-match search backed by the index. Deterministic, orders of magnitude faster than regex."},
+                "literal": {"type": "boolean", "description": "Fast exact-match search backed by the index. Deterministic results."},
                 "symbol": {"type": "boolean", "description": "Find exact symbol definitions."},
                 "refs": {"type": "boolean", "description": "Find exact references to the named symbol."},
                 "callers": {"type": "boolean", "description": "Find functions or methods that call the named symbol."},
@@ -1750,6 +1781,42 @@ mod tests {
         let mut mode = FramingMode::Unknown;
         let payload = read_message(&mut reader, &mut mode).unwrap().unwrap();
         assert_eq!(payload, body.as_bytes());
+    }
+
+    fn payload_response(payload: &str) -> Option<Value> {
+        handle_payload(payload.as_bytes()).map(|response| serde_json::to_value(response).unwrap())
+    }
+
+    #[test]
+    fn jsonrpc_parse_error_reports_null_id() {
+        let response = payload_response("{not json").unwrap();
+        assert_eq!(response["error"]["code"], -32700);
+        assert_eq!(response.get("id"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn jsonrpc_request_without_method_is_invalid_request_with_its_id() {
+        let response = payload_response(r#"{"jsonrpc":"2.0","id":7,"params":{}}"#).unwrap();
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["id"], 7);
+
+        let response = payload_response("[]").unwrap();
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response.get("id"), Some(&Value::Null));
+
+        // A client's reply to a server request has no method and needs no answer.
+        assert!(payload_response(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#).is_none());
+    }
+
+    #[test]
+    fn jsonrpc_null_id_is_a_request_not_a_notification() {
+        let response = payload_response(r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#).unwrap();
+        assert_eq!(response.get("id"), Some(&Value::Null));
+        assert_eq!(response["result"], json!({}));
+
+        assert!(
+            payload_response(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none()
+        );
     }
 
     #[test]

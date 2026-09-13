@@ -8,6 +8,10 @@ All notable changes to ivygrep are documented in this file.
 
 - **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
 
+### Security
+
+- The Web UI requires the session token on loopback listeners too. Other local users could previously read indexed files, list directories, search, and launch the editor through `127.0.0.1`. Open the URL printed by `ig --web`; bare `http://127.0.0.1:4747/` returns 401.
+
 ### Fixed
 
 - Literal and regex searches match files containing invalid UTF-8, as indexing already did, and regex context expansion and previews decode those files lossily instead of dropping them.
@@ -21,6 +25,14 @@ All notable changes to ivygrep are documented in this file.
 - Stack-trace frames from `node_modules`, `site-packages`, `dist-packages`, Cargo registry and Go module cache paths map only by their package-relative path, so `site-packages/myapp/views.py` still maps to `myapp/views.py` while `node_modules/express/lib/router/index.js` no longer maps to a root `index.js`. `rustc` frames are ignored, and container frames such as `/var/task/index.js` still map to workspace root files.
 - Co-change evidence keeps non-ASCII file names and stays accurate for signed commits when `log.showSignature` is enabled. Markdown previews containing code fences render inside a longer fence.
 - `ig context --since` accepts revision syntax such as `HEAD~3`, `main^` and `@{upstream}`, and rejects negated references such as `^main`.
+- Clients restart the daemon only when it is older or speaks a different protocol, so a newer daemon is no longer restarted by older CLI or MCP processes left running after an upgrade.
+- Web searches carry a cancellation token and the server-side deadline, and stop when the browser closes the connection instead of holding CPU permits until completion.
+- `ig --web --host/--port` reports the active listener address instead of silently reusing a server bound to a different address or port.
+- `ig agent install` updates only the command fields of an existing `ig` entry, preserving `env`, `cwd`, timeouts and other settings. Config writes follow symlinks and keep the target's permissions.
+- Windows TUI ignores key release events, so Esc and navigation keys act once per press.
+- `--file-name-only` prints "No results." to stderr, keeping stdout safe for pipes.
+- MCP responses follow JSON-RPC 2.0 ids: parse errors return `"id": null`, requests without `method` return -32600 with their id, and `"id": null` requests receive a response.
+- `/api/open` reaps launched editor processes instead of leaving one zombie per click.
 
 ## [1.2.14] - 2026-09-10
 

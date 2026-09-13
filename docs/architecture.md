@@ -460,8 +460,10 @@ recorded in the workspace job ledger and retried with exponential backoff (30 s
 doubling to 15 min). The watcher heartbeat re-creates its ledger record when an
 index rebuild wiped `job.json`, so a running watcher never reads as offline. A
 client that sees `watch_enabled` without `watcher_alive` sends `EnsureWatcher`;
-the daemon answers immediately and registers in the background. Clients only
-restart the daemon on a protocol version mismatch.
+the daemon answers immediately and registers in the background. Clients restart
+the daemon only on a protocol version mismatch or when it reports an older build
+than the client; a newer daemon speaking the same protocol is used as-is, so
+clients left over from before an upgrade do not keep killing it.
 
 Search responses never wait on background enhancement bookkeeping. After the
 hits are computed, the daemon schedules a blocking task that checks whether
@@ -505,7 +507,9 @@ handler races the search against the client stream reaching EOF and cancels
 abandoned work on disconnect; CLI and MCP searches send request IDs and issue
 `CancelSearch` when they time out or drop the request. A per-request deadline
 (`IVYGREP_SEARCH_DEADLINE_SECS`, default 60 s, `0` disables) cancels long
-searches and returns the hits gathered so far with a `warnings` entry.
+searches and returns the hits gathered so far with a `warnings` entry. Web
+searches carry the same token and deadline; the HTTP handler cancels them when
+the browser disconnects or an event-stream write fails.
 
 `warnings` on search results is additive and omitted when empty, preserving
 compatibility with older response readers. Unsupported protocol versions and
@@ -540,10 +544,16 @@ Daemon serves embedded assets and APIs for status, search, streaming search,
 file reads, editor launch, and workspace trees. File operations enforce tracked
 workspace containment.
 
-Loopback is default. Non-loopback mode uses a generated session token, Host and
-authentication checks, Content Security Policy, security headers, and request,
-header, file, and concurrency limits. Transport is still plain HTTP; remote use
-requires a trusted network or encrypted tunnel.
+Loopback is default. Every listener, loopback included, requires a generated
+per-daemon session token: any local user can reach a loopback port. The printed
+URL carries the token, which the page exchanges for an HttpOnly cookie; API
+clients may send it as a bearer token. Loopback listeners accept only loopback
+Host names. Content Security Policy, security headers, and request, header,
+file, and concurrency limits apply to every listener. Transport is still plain
+HTTP; remote use requires a trusted network or encrypted tunnel.
+
+A daemon runs one Web listener. `ig --web` reuses it when `--host` and `--port`
+match (port `0` matches any port) and otherwise fails naming the active address.
 
 ## Embeddings and build profiles
 

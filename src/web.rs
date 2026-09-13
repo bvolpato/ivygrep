@@ -97,9 +97,9 @@ pub(crate) fn initial_url(config: &WebConfig, local_addr: SocketAddr) -> String 
             percent_encode(&path.display().to_string())
         ));
     }
-    if !local_addr.ip().is_loopback() {
-        params.push(format!("token={}", percent_encode(web_auth_token())));
-    }
+    // Every local user can reach a loopback port, so loopback listeners need
+    // the session token as well.
+    params.push(format!("token={}", percent_encode(web_auth_token())));
     let mut url = format!("http://{host}:{}/", local_addr.port());
     if !params.is_empty() {
         url.push('?');
@@ -113,7 +113,8 @@ pub(crate) async fn serve(
     state: DaemonState,
     config: WebConfig,
 ) -> Result<()> {
-    let auth_token = (!listener.local_addr()?.ip().is_loopback()).then_some(web_auth_token());
+    let exposed = !listener.local_addr()?.ip().is_loopback();
+    let auth_token = web_auth_token();
     let connections = Arc::new(Semaphore::new(MAX_CONCURRENT_HTTP_CONNECTIONS));
     loop {
         let permit = connections.clone().acquire_owned().await?;
@@ -122,7 +123,7 @@ pub(crate) async fn serve(
         let config = config.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(err) = handle_connection(stream, state, config, auth_token).await {
+            if let Err(err) = handle_connection(stream, state, config, auth_token, exposed).await {
                 tracing::warn!("web request failed: {err:#}");
             }
         });
@@ -133,7 +134,8 @@ async fn handle_connection(
     mut stream: TcpStream,
     state: DaemonState,
     config: WebConfig,
-    auth_token: Option<&'static str>,
+    auth_token: &'static str,
+    exposed: bool,
 ) -> Result<()> {
     let request =
         match read_http_request_with_timeout(&mut stream, HTTP_HEADER_READ_TIMEOUT).await? {
@@ -149,7 +151,7 @@ async fn handle_connection(
             }
         };
     let (path, params) = parse_target(&request.target)?;
-    if !valid_host(&request, auth_token.is_some()) {
+    if !valid_host(&request, exposed) {
         return write_json(
             &mut stream,
             "403 Forbidden",
@@ -162,16 +164,14 @@ async fn handle_connection(
         if request.method != "GET" {
             return method_not_allowed(&mut stream, "GET").await;
         }
-        if let Some(expected) = auth_token {
-            if let Some(presented) = param(&params, "token") {
-                if !tokens_match(presented, expected) {
-                    return unauthorized(&mut stream).await;
-                }
-                return establish_web_session(&mut stream, &path, &params, expected).await;
-            }
-            if !request_has_auth(&request, expected) {
+        if let Some(presented) = param(&params, "token") {
+            if !tokens_match(presented, auth_token) {
                 return unauthorized(&mut stream).await;
             }
+            return establish_web_session(&mut stream, &path, &params, auth_token).await;
+        }
+        if !request_has_auth(&request, auth_token) {
+            return unauthorized(&mut stream).await;
         }
         return write_html(&mut stream, &render_app_html(&config)).await;
     }
@@ -191,9 +191,7 @@ async fn handle_connection(
             )
             .await;
         }
-        if let Some(expected) = auth_token
-            && !request_has_auth(&request, expected)
-        {
+        if !request_has_auth(&request, auth_token) {
             return unauthorized(&mut stream).await;
         }
     }
@@ -210,7 +208,11 @@ async fn handle_connection(
             if request.method != "GET" {
                 return method_not_allowed(&mut stream, "GET").await;
             }
-            let value = run_search(state, &params).await;
+            // Nobody is left to answer once the client hangs up; dropping the
+            // search cancels it.
+            let Some(value) = unless_client_gone(&stream, run_search(state, &params)).await else {
+                return Ok(());
+            };
             write_json(&mut stream, "200 OK", &value).await
         }
         "/api/search/stream" => {
@@ -348,14 +350,16 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>
     }))
 }
 
-fn valid_host(request: &HttpRequest, auth_required: bool) -> bool {
+/// Loopback listeners accept only loopback Host names (DNS-rebinding guard);
+/// exposed listeners also accept literal IP hosts.
+fn valid_host(request: &HttpRequest, exposed: bool) -> bool {
     let Some(authority) = request.headers.get("host") else {
         return false;
     };
     let Some(host) = authority_host(authority) else {
         return false;
     };
-    if !auth_required {
+    if !exposed {
         return host.eq_ignore_ascii_case("localhost")
             || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
     }
@@ -753,7 +757,9 @@ async fn write_search_stream(
     }
 
     write_sse(stream, "status", &json!({"stage": "searching"})).await?;
-    let value = run_search(state, params).await;
+    let Some(value) = unless_client_gone(stream, run_search(state, params)).await else {
+        return Ok(());
+    };
     write_sse(stream, "results", &value).await?;
     write_sse(stream, "done", &json!({"ok": true})).await
 }
@@ -818,7 +824,15 @@ async fn write_all_workspace_search_stream(
     let mut all_hits = Vec::<SearchHit>::new();
     let mut errors = Vec::<String>::new();
     let mut warnings = Vec::<String>::new();
-    while let Some(result) = tasks.join_next().await {
+    loop {
+        // Returning drops the task set, which aborts and cancels the
+        // remaining per-workspace searches.
+        let Some(joined) = unless_client_gone(stream, tasks.join_next()).await else {
+            return Ok(());
+        };
+        let Some(result) = joined else {
+            break;
+        };
         finished += 1;
         match result {
             Ok(Ok((root, mut hits, workspace_warnings))) => {
@@ -883,6 +897,29 @@ async fn write_sse(stream: &mut TcpStream, event: &str, value: &Value) -> Result
         .await?;
     stream.flush().await?;
     Ok(())
+}
+
+/// Run `work` until it finishes or the HTTP client hangs up. Dropping `work`
+/// cancels the daemon searches it started.
+async fn unless_client_gone<F: std::future::Future>(
+    stream: &TcpStream,
+    work: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        output = work => Some(output),
+        () = client_gone(stream) => None,
+    }
+}
+
+/// Resolves once the client closes the connection. Bytes after the request
+/// headers mean the client is still there, so probing stops.
+async fn client_gone(stream: &TcpStream) {
+    let mut probe = [0u8; 1];
+    match stream.peek(&mut probe).await {
+        Ok(0) | Err(_) => {}
+        Ok(_) => std::future::pending::<()>().await,
+    }
 }
 
 fn tracked_roots() -> Result<Vec<PathBuf>> {
@@ -1208,19 +1245,68 @@ mod tests {
         assert!(matches!(result, TimedHttpRequest::TimedOut));
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn abandoned_web_search_stops_waiting_for_cpu() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::daemon::test_state_with_cpu_permits(0);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let config = WebConfig {
+            host: "127.0.0.1".to_string(),
+            port: addr.port(),
+            initial_query: None,
+            initial_path: None,
+        };
+        let handler = tokio::spawn(handle_connection(
+            server,
+            state,
+            config,
+            web_auth_token(),
+            false,
+        ));
+        let workspace = percent_encode(&root.path().display().to_string());
+        client
+            .write_all(
+                format!(
+                    "GET /api/search?q=needle&workspace={workspace} HTTP/1.1\r\nHost: {addr}\r\nCookie: {WEB_AUTH_COOKIE}={}\r\n\r\n",
+                    web_auth_token()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        // Let the search reach the CPU-permit queue, then hang up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(client);
+
+        let finished = tokio::time::timeout(Duration::from_secs(10), handler).await;
+        assert!(
+            finished.is_ok(),
+            "abandoned web search kept waiting for a CPU permit"
+        );
+    }
+
     #[test]
-    fn non_loopback_url_contains_process_token_but_loopback_url_does_not() {
+    fn every_printed_url_carries_process_token() {
         let config = WebConfig {
             host: "127.0.0.1".to_string(),
             port: 4747,
             initial_query: None,
             initial_path: None,
         };
-        let loopback = initial_url(&config, "127.0.0.1:4747".parse().unwrap());
-        assert!(!loopback.contains("token="));
-
-        let exposed = initial_url(&config, "0.0.0.0:4747".parse().unwrap());
-        assert!(exposed.contains(&format!("token={}", web_auth_token())));
+        for addr in ["127.0.0.1:4747", "0.0.0.0:4747"] {
+            let url = initial_url(&config, addr.parse().unwrap());
+            assert!(
+                url.contains(&format!("token={}", web_auth_token())),
+                "{url}"
+            );
+        }
     }
 
     #[test]

@@ -2586,6 +2586,15 @@ fn create_daemon_state() -> DaemonState {
     }
 }
 
+/// Daemon state with a fixed CPU-permit budget, for tests outside this module.
+#[cfg(test)]
+pub(crate) fn test_state_with_cpu_permits(permits: usize) -> DaemonState {
+    DaemonState {
+        cpu_permits: Arc::new(tokio::sync::Semaphore::new(permits)),
+        ..create_daemon_state()
+    }
+}
+
 pub async fn run_daemon() -> Result<()> {
     run_daemon_inner().await
 }
@@ -2676,19 +2685,88 @@ async fn run_daemon_inner() -> Result<()> {
     }
 }
 
+/// Web searches have no request id, but get the same server-side cancellation
+/// as IPC searches: the daemon deadline returns partial results, and dropping
+/// the returned future (the HTTP client hung up, an event-stream write failed,
+/// the all-workspace task set was dropped) cancels the work, including a queued
+/// wait for a CPU permit.
 pub(crate) async fn handle_web_request(
     state: DaemonState,
     request: DaemonRequest,
 ) -> DaemonResponse {
-    handle_request(state, request).await
+    if !is_search_request(&request) {
+        return handle_request(state, request).await;
+    }
+    let cancellation = SearchCancellation::new(false);
+    let mut cancel_on_drop = CancelSearchOnDrop(Some(cancellation.clone()));
+    let handler = handle_request_with_cancellation(state, request, Some(cancellation.clone()));
+    tokio::pin!(handler);
+    let deadline = config::search_deadline();
+    let deadline_timer = async move {
+        match deadline {
+            Some(deadline) => tokio::time::sleep(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(deadline_timer);
+    let mut deadline_armed = deadline.is_some();
+    loop {
+        tokio::select! {
+            biased;
+            response = &mut handler => {
+                cancel_on_drop.disarm();
+                return response;
+            }
+            () = &mut deadline_timer, if deadline_armed => {
+                deadline_armed = false;
+                warn!(
+                    "web search exceeded the {}s daemon deadline; returning partial results",
+                    deadline.map_or(0, |deadline| deadline.as_secs())
+                );
+                cancellation.cancel_for_deadline();
+            }
+        }
+    }
+}
+
+/// Cancels a search whose caller stopped waiting before it finished.
+struct CancelSearchOnDrop(Option<SearchCancellation>);
+
+impl CancelSearchOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelSearchOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.0.take() {
+            cancellation.cancel();
+        }
+    }
+}
+
+/// Whether the running listener serves a `--web` request for `requested`.
+/// Port 0 accepts whichever port the listener already has.
+fn web_bind_matches(requested: SocketAddr, active: SocketAddr) -> bool {
+    requested.ip() == active.ip() && (requested.port() == 0 || requested.port() == active.port())
 }
 
 fn start_web_server(state: &DaemonState, web_config: crate::web::WebConfig) -> Result<String> {
+    let bind_addr = crate::web::bind_addr(&web_config.host, web_config.port)?;
     if let Some(local_addr) = active_web_addr(state) {
+        // One listener per daemon. Reusing one bound elsewhere would keep, say,
+        // an earlier 0.0.0.0 listener exposed while printing a loopback URL.
+        if !web_bind_matches(bind_addr, local_addr) {
+            anyhow::bail!(
+                "the daemon's web server is already listening on {local_addr}; rerun with --host {} --port {}, or stop the ivygrep daemon to bind a different address",
+                local_addr.ip(),
+                local_addr.port()
+            );
+        }
         return Ok(crate::web::initial_url(&web_config, local_addr));
     }
 
-    let bind_addr = crate::web::bind_addr(&web_config.host, web_config.port)?;
     let std_listener = std::net::TcpListener::bind(bind_addr)?;
     std_listener.set_nonblocking(true)?;
     let web_listener = tokio::net::TcpListener::from_std(std_listener)?;
@@ -5426,7 +5504,7 @@ async fn ensure_compatible_daemon() {
     match request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Version, false, None).await
     {
         Ok(Some(DaemonResponse::Version { version }))
-            if version.as_deref() == Some(BUILD_VERSION) => {}
+            if !daemon_build_requires_restart(version.as_deref(), BUILD_VERSION) => {}
         Ok(Some(_)) => restart_daemon_process().await,
         // A bounded transport probe can fail while a live daemon is overloaded.
         // A response decoding failure means the endpoint speaks an incompatible
@@ -5437,6 +5515,79 @@ async fn ensure_compatible_daemon() {
             restart_daemon_process().await;
         }
     }
+}
+
+/// Whether a client built as `client_version` should restart a daemon that
+/// answered its `Version` probe with `daemon_version`. Only an older or
+/// unversioned daemon is replaced; a newer one speaking the same protocol is
+/// kept, so clients left over from before an upgrade do not keep killing it.
+/// Protocol mismatches never get here: the daemon rejects the probe itself.
+pub(crate) fn daemon_build_requires_restart(
+    daemon_version: Option<&str>,
+    client_version: &str,
+) -> bool {
+    let Some(daemon_version) = daemon_version else {
+        return true;
+    };
+    compare_build_versions(daemon_version, client_version)
+        .is_none_or(|ordering| ordering == std::cmp::Ordering::Less)
+}
+
+/// Semver precedence of two build versions, ignoring build metadata. `None`
+/// when either is not `major.minor.patch[-pre-release][+build]`.
+fn compare_build_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let (left_core, left_pre_release) = parse_build_version(left)?;
+    let (right_core, right_pre_release) = parse_build_version(right)?;
+    Some(
+        left_core
+            .cmp(&right_core)
+            .then_with(|| match (left_pre_release, right_pre_release) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(left), Some(right)) => left.cmp(&right),
+            }),
+    )
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PreReleaseIdentifier {
+    // Variant order is semver precedence: numeric identifiers sort first.
+    Numeric(u64),
+    Alphanumeric(String),
+}
+
+type BuildVersionParts = ((u64, u64, u64), Option<Vec<PreReleaseIdentifier>>);
+
+fn parse_build_version(version: &str) -> Option<BuildVersionParts> {
+    let version = version
+        .split_once('+')
+        .map_or(version, |(version, _)| version);
+    let (core, pre_release) = match version.split_once('-') {
+        Some((core, pre_release)) => (core, Some(pre_release)),
+        None => (version, None),
+    };
+    let mut numbers = core.split('.').map(|part| part.parse::<u64>().ok());
+    let core = (numbers.next()??, numbers.next()??, numbers.next()??);
+    if numbers.next().is_some() {
+        return None;
+    }
+    let pre_release = match pre_release {
+        Some(pre_release) => Some(
+            pre_release
+                .split('.')
+                .map(|identifier| match identifier.parse::<u64>() {
+                    Ok(number) => Some(PreReleaseIdentifier::Numeric(number)),
+                    Err(_) if !identifier.is_empty() => {
+                        Some(PreReleaseIdentifier::Alphanumeric(identifier.to_string()))
+                    }
+                    Err(_) => None,
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+    Some((core, pre_release))
 }
 
 pub(crate) async fn restart_daemon_process() {
@@ -7590,6 +7741,31 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "stalled connection must respect timeout"
         );
+    }
+
+    #[test]
+    fn only_older_or_unversioned_daemons_are_restarted() {
+        assert!(!daemon_build_requires_restart(Some("1.2.14"), "1.2.14"));
+        assert!(daemon_build_requires_restart(Some("1.2.13"), "1.2.14"));
+        assert!(daemon_build_requires_restart(Some("1.1.99"), "1.2.0"));
+        assert!(daemon_build_requires_restart(Some("1.3.0-rc.1"), "1.3.0"));
+        assert!(!daemon_build_requires_restart(Some("1.2.15"), "1.2.14"));
+        assert!(!daemon_build_requires_restart(Some("1.2.10"), "1.2.9"));
+        assert!(!daemon_build_requires_restart(Some("2.0.0"), "1.9.9"));
+        assert!(!daemon_build_requires_restart(Some("1.3.0"), "1.3.0-rc.1"));
+        assert!(!daemon_build_requires_restart(
+            Some("1.3.0-rc.2"),
+            "1.3.0-rc.1"
+        ));
+        assert!(!daemon_build_requires_restart(
+            Some("1.2.14+local"),
+            "1.2.14"
+        ));
+        assert!(daemon_build_requires_restart(None, "1.2.14"));
+        assert!(daemon_build_requires_restart(
+            Some("not-a-version"),
+            "1.2.14"
+        ));
     }
 
     #[test]

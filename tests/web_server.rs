@@ -148,8 +148,33 @@ fn http_request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -
     }
 }
 
-fn http_get(port: u16, path: &str) -> String {
-    http_request(port, "GET", path, &[]).body
+fn http_get(port: u16, cookie: &str, path: &str) -> String {
+    http_request(port, "GET", path, &[("Cookie", cookie)]).body
+}
+
+/// Exchange the tokenized URL printed by `ig --web` for the session cookie.
+fn session_cookie(port: u16, url: &str) -> String {
+    let target = url
+        .strip_prefix(&format!("http://127.0.0.1:{port}"))
+        .unwrap_or_else(|| panic!("unexpected URL {url}"));
+    assert!(
+        target.contains("token="),
+        "printed URL must carry the session token: {url}"
+    );
+    let bootstrap = http_request(port, "GET", target, &[]);
+    assert_eq!(
+        bootstrap.status, 303,
+        "bootstrap response: {}",
+        bootstrap.body
+    );
+    bootstrap
+        .headers
+        .get("set-cookie")
+        .expect("bootstrap must establish an auth cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
 }
 
 fn run_web_until_ready(home: &Path, repo: &Path, query: &str) -> String {
@@ -244,19 +269,21 @@ fn web_search_previews_do_not_follow_replaced_parent_symlinks() {
     let _daemon_guard = ChildGuard(daemon);
     let url = run_web_until_ready(&home, &repo, "preview_boundary");
     let port = port_from_url(&url);
+    let cookie = session_cookie(port, &url);
+    let auth = [("Cookie", cookie.as_str())];
     let root = percent_encode(&repo.canonicalize().unwrap().to_string_lossy());
     let file = http_request(
         port,
         "GET",
         &format!("/api/file?workspace={root}&path=src/victim.rs"),
-        &[],
+        &auth,
     );
     assert_eq!(file.status, 400);
     let response = http_request(
         port,
         "GET",
         &format!("/api/search?workspace={root}&q=preview_boundary&context=2"),
-        &[],
+        &auth,
     );
     assert_eq!(response.status, 200);
     assert!(
@@ -280,7 +307,7 @@ fn web_search_previews_do_not_follow_replaced_parent_symlinks() {
         port,
         "GET",
         &format!("/api/file?workspace={root}&path=victim.rs"),
-        &[],
+        &auth,
     );
     assert_eq!(redirected.status, 400, "{}", redirected.body);
     assert!(!redirected.body.contains("OUTSIDE_WEB_PREVIEW_SENTINEL"));
@@ -288,7 +315,7 @@ fn web_search_previews_do_not_follow_replaced_parent_symlinks() {
         port,
         "GET",
         &format!("/api/search?workspace={root}&mode=context&q=preview_boundary"),
-        &[],
+        &auth,
     );
     assert!(
         context.body.contains("workspace is not tracked"),
@@ -338,8 +365,44 @@ fn web_server_serves_status_search_and_file() {
         port_from_url(&second_url),
         "second --web should reuse the current daemon web listener"
     );
+    let active = format!("127.0.0.1:{port}");
+    let other_port = port.checked_add(1).unwrap_or(port - 1).to_string();
+    for (host, requested_port) in [("0.0.0.0", "0"), ("127.0.0.1", other_port.as_str())] {
+        let conflicting = Command::new(bin())
+            .args([
+                "--web",
+                "--host",
+                host,
+                "--port",
+                requested_port,
+                "web_marker",
+            ])
+            .arg(repo.path())
+            .env("IVYGREP_HOME", home.path())
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .env("IVYGREP_NO_BROWSER", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&conflicting.stderr);
+        assert!(
+            !conflicting.status.success(),
+            "--web --host {host} --port {requested_port} must not silently reuse {active}"
+        );
+        assert!(
+            stderr.contains(&active),
+            "error must name the active listener: {stderr}"
+        );
+    }
 
-    let status_response = http_request(port, "GET", "/api/status", &[]);
+    // Loopback is not a trust boundary on a shared host: the API and the app
+    // shell need the session token as well.
+    assert_eq!(http_request(port, "GET", "/api/status", &[]).status, 401);
+    assert_eq!(http_request(port, "GET", "/", &[]).status, 401);
+    let cookie = session_cookie(port, &url);
+    let auth = [("Cookie", cookie.as_str())];
+    assert_eq!(http_request(port, "GET", "/", &auth).status, 200);
+
+    let status_response = http_request(port, "GET", "/api/status", &auth);
     assert_eq!(status_response.status, 200);
     assert_eq!(
         status_response
@@ -377,7 +440,8 @@ fn web_server_serves_status_search_and_file() {
     let workspace = percent_encode(&repo.path().canonicalize().unwrap().display().to_string());
     let search_path =
         format!("/api/search?q=web_marker_search_target&workspace={workspace}&limit=5");
-    let search: serde_json::Value = serde_json::from_str(&http_get(port, &search_path)).unwrap();
+    let search: serde_json::Value =
+        serde_json::from_str(&http_get(port, &cookie, &search_path)).unwrap();
     assert!(
         search["hits"]
             .as_array()
@@ -390,11 +454,13 @@ fn web_server_serves_status_search_and_file() {
     let semantic_query = percent_encode("secure account renewal strategy");
     let alias_search: serde_json::Value = serde_json::from_str(&http_get(
         port,
+        &cookie,
         &format!("/api/search?q={semantic_query}&workspace={workspace}&type=rs&limit=10"),
     ))
     .unwrap();
     let canonical_search: serde_json::Value = serde_json::from_str(&http_get(
         port,
+        &cookie,
         &format!("/api/search?q={semantic_query}&workspace={workspace}&type=rust&limit=10"),
     ))
     .unwrap();
@@ -415,7 +481,8 @@ fn web_server_serves_status_search_and_file() {
         "/api/search?mode=context&q={}&workspace={workspace}&since=main&budget_tokens=4000",
         percent_encode("panic at web.rs:1:7")
     );
-    let context: serde_json::Value = serde_json::from_str(&http_get(port, &context_path)).unwrap();
+    let context: serde_json::Value =
+        serde_json::from_str(&http_get(port, &cookie, &context_path)).unwrap();
     assert_eq!(context["context_pack"]["change_scope"]["since"], "main");
     assert_eq!(
         context["context_pack"]["change_scope"]["dirty_worktree"],
@@ -437,6 +504,7 @@ fn web_server_serves_status_search_and_file() {
     );
     let invalid_budget: serde_json::Value = serde_json::from_str(&http_get(
         port,
+        &cookie,
         &format!("/api/search?mode=context&q=task&workspace={workspace}&budget_tokens=1"),
     ))
     .unwrap();
@@ -447,6 +515,7 @@ fn web_server_serves_status_search_and_file() {
 
     let all_search: serde_json::Value = serde_json::from_str(&http_get(
         port,
+        &cookie,
         "/api/search?q=web_marker_search_target&limit=5",
     ))
     .unwrap();
@@ -464,13 +533,15 @@ fn web_server_serves_status_search_and_file() {
 
     let stream_body = http_get(
         port,
+        &cookie,
         "/api/search/stream?q=web_marker_search_target&limit=5",
     );
     assert!(stream_body.contains("event: results"), "{stream_body}");
     assert!(stream_body.contains("web.rs"), "{stream_body}");
 
     let file_path = format!("/api/file?workspace={workspace}&path=web.rs");
-    let file: serde_json::Value = serde_json::from_str(&http_get(port, &file_path)).unwrap();
+    let file: serde_json::Value =
+        serde_json::from_str(&http_get(port, &cookie, &file_path)).unwrap();
     assert!(
         file["text"]
             .as_str()
@@ -480,7 +551,7 @@ fn web_server_serves_status_search_and_file() {
 
     let absolute_file_path = format!("/api/file?path={}", percent_encode(absolute_hit_path));
     let absolute_file: serde_json::Value =
-        serde_json::from_str(&http_get(port, &absolute_file_path)).unwrap();
+        serde_json::from_str(&http_get(port, &cookie, &absolute_file_path)).unwrap();
     assert!(
         absolute_file["text"]
             .as_str()
@@ -489,20 +560,21 @@ fn web_server_serves_status_search_and_file() {
     );
 
     let open_path = format!("/api/open?workspace={workspace}&path=web.rs&line=1");
-    let get_open = http_request(port, "GET", &open_path, &[]);
+    let get_open = http_request(port, "GET", &open_path, &auth);
     assert_eq!(get_open.status, 405);
     assert_eq!(
         get_open.headers.get("allow").map(String::as_str),
         Some("POST")
     );
-    let open_response = http_request(port, "POST", &open_path, &[]);
+    let open_response = http_request(port, "POST", &open_path, &auth);
     assert_eq!(open_response.status, 200);
     let open: serde_json::Value = serde_json::from_str(&open_response.body).unwrap();
     assert_eq!(open["ok"], true, "open response: {open:#}");
     assert_eq!(open["line"], 1);
 
     let tree_path = format!("/api/tree?workspace={workspace}");
-    let tree: serde_json::Value = serde_json::from_str(&http_get(port, &tree_path)).unwrap();
+    let tree: serde_json::Value =
+        serde_json::from_str(&http_get(port, &cookie, &tree_path)).unwrap();
     assert!(
         tree["entries"]
             .as_array()

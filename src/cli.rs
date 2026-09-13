@@ -128,8 +128,7 @@ pub struct Cli {
     #[arg(long = "interactive", visible_alias = "ui")]
     pub ui: bool,
 
-    /// Fast exact-match search backed by the index. Deterministic results,
-    /// orders of magnitude faster than grep/rg for indexed repos.
+    /// Fast exact-match search backed by the index. Deterministic results.
     #[arg(long, short = 'l')]
     pub literal: bool,
 
@@ -1485,7 +1484,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     version,
                     workspace: runtime_status,
                 }) => {
-                    if version.as_deref() == Some(BUILD_VERSION) {
+                    if !daemon::daemon_build_requires_restart(version.as_deref(), BUILD_VERSION) {
                         let watcher_offline = watch_configured
                             && runtime_status.as_ref().is_some_and(|status| {
                                 status.id == workspace.id
@@ -1533,7 +1532,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                         search_via_daemon = true;
                     } else {
                         tracing::warn!(
-                            "daemon version mismatch: daemon={:?} cli={}, restarting",
+                            "daemon is older than this client: daemon={:?} cli={}, restarting",
                             version,
                             BUILD_VERSION
                         );
@@ -2023,7 +2022,8 @@ fn render_hits(
                 .collect::<Vec<_>>();
             println!("{}", serde_json::to_string_pretty(&files)?);
         } else if grouped.is_empty() {
-            println!("No results.");
+            // stdout carries only paths here, so `| xargs` never sees this.
+            eprintln!("No results.");
         } else {
             for file in grouped {
                 println!("{}", file.file_path.to_string_lossy());

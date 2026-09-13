@@ -209,7 +209,7 @@ profiles download pinned model assets on first use unless cache is already
 populated. Use `--hash`, `./build.sh --hash-only`, or
 `cargo build --locked --no-default-features` to avoid model downloads.
 
-`ig --web` binds to loopback by default. A non-loopback listener prints an authenticated URL but still uses plain HTTP. Use a trusted network, Tailscale, or an encrypted tunnel, and never expose the listener directly to the internet. File contents, including non-ignored dotfiles, can appear in the local index and snippets.
+`ig --web` binds to loopback by default and always prints an authenticated URL: the Web API requires the per-daemon session token on loopback too, so other local users cannot read indexed code through it. A non-loopback listener still uses plain HTTP. Use a trusted network, Tailscale, or an encrypted tunnel, and never expose the listener directly to the internet. File contents, including non-ignored dotfiles, can appear in the local index and snippets.
 
 Report vulnerabilities through a [private security advisory](SECURITY.md). Release archives include checksums, SBOMs, and provenance.
 

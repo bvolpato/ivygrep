@@ -510,11 +510,16 @@ fn write_json_config(path: &Path, executable: &Path) -> Result<bool> {
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .with_context(|| format!("{}.mcpServers must be a JSON object", path.display()))?;
-    let expected = json!({
-        "type": "stdio",
-        "command": executable.to_string_lossy(),
-        "args": ["--mcp"]
-    });
+    // Update only the launch keys so user settings on the entry (env,
+    // timeouts) survive reinstalls.
+    let mut expected = match servers.get("ig") {
+        Some(Value::Object(existing)) => existing.clone(),
+        _ => Map::new(),
+    };
+    expected.insert("type".to_string(), json!("stdio"));
+    expected.insert("command".to_string(), json!(executable.to_string_lossy()));
+    expected.insert("args".to_string(), json!(["--mcp"]));
+    let expected = Value::Object(expected);
     if servers.get("ig") == Some(&expected) {
         return Ok(false);
     }
@@ -547,13 +552,20 @@ fn write_codex_config(path: &Path, executable: &Path) -> Result<bool> {
     let servers = document["mcp_servers"]
         .as_table_mut()
         .with_context(|| format!("{}.mcp_servers must be a TOML table", path.display()))?;
-    let mut server = Table::new();
-    server["command"] = value(executable.to_string_lossy().to_string());
+    if !servers.get("ig").is_some_and(Item::is_table_like) {
+        servers.insert("ig", Item::Table(Table::new()));
+    }
+    // Update only the launch keys so `env`, `cwd`, timeouts, and other user
+    // settings on the entry survive reinstalls.
+    let server = servers
+        .get_mut("ig")
+        .and_then(Item::as_table_like_mut)
+        .with_context(|| format!("{}.mcp_servers.ig must be a TOML table", path.display()))?;
+    server.insert("command", value(executable.to_string_lossy().to_string()));
     let mut args = Array::new();
     args.push("--mcp");
-    server["args"] = Item::Value(TomlValue::Array(args));
-    server["enabled"] = value(true);
-    servers.insert("ig", Item::Table(server));
+    server.insert("args", Item::Value(TomlValue::Array(args)));
+    server.insert("enabled", value(true));
     write_atomic(path, document.to_string().as_bytes())?;
     Ok(true)
 }
@@ -624,7 +636,41 @@ fn command_matches(command: &str, executable: &Path) -> bool {
         .is_some_and(|configured| configured.canonicalize().unwrap_or(configured) == expected)
 }
 
+/// Follow symlinks to the file they name, including a dangling final target.
+fn resolve_symlinks(path: &Path) -> Result<PathBuf> {
+    let mut resolved = path.to_path_buf();
+    // Same bound as the kernel's symlink loop limit.
+    for _ in 0..40 {
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&resolved)?;
+                resolved = match resolved.parent() {
+                    Some(parent) if target.is_relative() => parent.join(target),
+                    _ => target,
+                };
+            }
+            _ => return Ok(resolved),
+        }
+    }
+    bail!("{} has too many levels of symbolic links", path.display())
+}
+
+/// Create `path` owner-only before writing, so contents are never exposed
+/// through umask-default permissions.
+fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
 fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    // Dotfile managers symlink client configs: replace the link's target, not
+    // the link itself.
+    let path = &resolve_symlinks(path)?;
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -636,13 +682,16 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
             .unwrap_or("config"),
         Uuid::new_v4()
     ));
-    fs::write(&temporary, contents)?;
-    if let Ok(metadata) = fs::metadata(path) {
-        fs::set_permissions(&temporary, metadata.permissions())?;
-    }
-    #[cfg(unix)]
-    if !path.exists() {
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    let permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let written = write_private_file(&temporary, contents).and_then(|()| match permissions {
+        Some(permissions) => fs::set_permissions(&temporary, permissions),
+        None => Ok(()),
+    });
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("failed to write {}", path.display()));
     }
     match fs::rename(&temporary, path) {
         Ok(()) => Ok(()),
@@ -769,5 +818,94 @@ mod tests {
         std::os::unix::fs::symlink(&executable, &stable).unwrap();
         assert!(command_matches(&stable.to_string_lossy(), &stable));
         assert!(command_matches(&stable.to_string_lossy(), &executable));
+    }
+
+    #[test]
+    fn json_install_keeps_user_settings_on_existing_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mcp.json");
+        fs::write(
+            &path,
+            r#"{"mcpServers":{"ig":{"type":"stdio","command":"/old/ig","args":["--mcp"],"env":{"IVYGREP_HOME":"/data/ivygrep"},"timeout":30}}}"#,
+        )
+        .unwrap();
+        let executable = env::current_exe().unwrap().canonicalize().unwrap();
+
+        assert!(write_json_config(&path, &executable).unwrap());
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let server = &value["mcpServers"]["ig"];
+        assert_eq!(server["command"], executable.to_string_lossy().as_ref());
+        assert_eq!(server["args"], json!(["--mcp"]));
+        assert_eq!(server["env"]["IVYGREP_HOME"], "/data/ivygrep");
+        assert_eq!(server["timeout"], 30);
+        assert!(!write_json_config(&path, &executable).unwrap());
+    }
+
+    #[test]
+    fn codex_install_keeps_user_settings_on_existing_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            "[mcp_servers.ig]\ncommand = \"/old/ig\"\nargs = [\"--mcp\"]\ncwd = \"/work\"\nstartup_timeout_sec = 30\n\n[mcp_servers.ig.env]\nIVYGREP_HOME = \"/data/ivygrep\"\n",
+        )
+        .unwrap();
+        let executable = env::current_exe().unwrap().canonicalize().unwrap();
+
+        assert!(write_codex_config(&path, &executable).unwrap());
+        let document = fs::read_to_string(&path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert!(codex_document_matches(&document, &executable));
+        let server = document["mcp_servers"]["ig"].as_table_like().unwrap();
+        assert_eq!(server.get("cwd").and_then(Item::as_str), Some("/work"));
+        assert_eq!(
+            server.get("startup_timeout_sec").and_then(Item::as_integer),
+            Some(30)
+        );
+        assert_eq!(
+            server
+                .get("env")
+                .and_then(Item::as_table_like)
+                .and_then(|env| env.get("IVYGREP_HOME"))
+                .and_then(Item::as_str),
+            Some("/data/ivygrep")
+        );
+        assert!(!write_codex_config(&path, &executable).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_writes_through_symlinked_config_and_keeps_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let dotfiles = temp.path().join("dotfiles");
+        let config_dir = temp.path().join("home");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        let target = dotfiles.join("mcp.json");
+        fs::write(&target, r#"{"theme":"dark"}"#).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        let link = config_dir.join("mcp.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let executable = env::current_exe().unwrap().canonicalize().unwrap();
+
+        assert!(write_json_config(&link, &executable).unwrap());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "install must write through the symlink instead of replacing it"
+        );
+        let value: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+        assert_eq!(value["theme"], "dark");
+        assert_eq!(value["mcpServers"]["ig"]["args"], json!(["--mcp"]));
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(fs::read_dir(&config_dir).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&dotfiles).unwrap().count(), 1);
     }
 }

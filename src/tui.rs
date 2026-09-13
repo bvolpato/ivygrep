@@ -1500,6 +1500,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         let Event::Key(key) = ev else {
             continue;
         };
+        if !is_key_press(&key) {
+            continue;
+        }
 
         match app.mode {
             // ===== SEARCH MODE =====
@@ -1855,6 +1858,12 @@ fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
+/// Windows terminals report key releases as separate events; only presses
+/// (and repeats) are dispatched so one keystroke is not handled twice.
+fn is_key_press(key: &event::KeyEvent) -> bool {
+    key.kind != event::KeyEventKind::Release
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1866,6 +1875,28 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    #[test]
+    fn key_release_events_are_not_dispatched() {
+        let press = event::KeyEvent::new_with_kind(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            event::KeyEventKind::Press,
+        );
+        let repeat = event::KeyEvent::new_with_kind(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            event::KeyEventKind::Repeat,
+        );
+        let release = event::KeyEvent::new_with_kind(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            event::KeyEventKind::Release,
+        );
+        assert!(is_key_press(&press));
+        assert!(is_key_press(&repeat));
+        assert!(!is_key_press(&release));
+    }
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
