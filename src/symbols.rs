@@ -588,7 +588,7 @@ fn search_call_sites(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let (callers, references) =
-        search_call_sites_with_references(workspace, name, options, Some(mode))?;
+        search_call_sites_with_references(workspace, None, name, options, Some(mode))?;
     match mode {
         SymbolSearchMode::Callers => Ok(callers),
         SymbolSearchMode::References => Ok(references),
@@ -596,8 +596,13 @@ fn search_call_sites(
     }
 }
 
-pub(crate) fn search_symbol_relationships_in_current_index(
+/// Callers and references of `name` through a search context the caller
+/// already loaded for this workspace. Context packs reuse one context across
+/// anchor symbols instead of reopening index stores per anchor; definition
+/// language lookup still reads the symbol tables on each call.
+pub(crate) fn search_symbol_relationships_with_context(
     workspace: &Workspace,
+    search_context: &SearchContext,
     name: &str,
     options: &SearchOptions,
 ) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
@@ -606,7 +611,13 @@ pub(crate) fn search_symbol_relationships_in_current_index(
     if normalized.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    search_call_sites_with_references(workspace, candidate_name, options, None)
+    search_call_sites_with_references(
+        workspace,
+        Some(search_context),
+        candidate_name,
+        options,
+        None,
+    )
 }
 
 #[derive(Default)]
@@ -703,6 +714,7 @@ fn relationship_definitions(workspace: &Workspace, name: &str) -> Result<Relatio
 
 fn search_call_sites_with_references(
     workspace: &Workspace,
+    search_context: Option<&SearchContext>,
     name: &str,
     options: &SearchOptions,
     requested_mode: Option<SymbolSearchMode>,
@@ -741,7 +753,14 @@ fn search_call_sites_with_references(
     if languages.len() == 1 {
         candidate_options.type_filter = languages.iter().next().cloned();
     }
-    let search_context = SearchContext::load(workspace, None, false)?;
+    let loaded_context;
+    let search_context = match search_context {
+        Some(context) => context,
+        None => {
+            loaded_context = SearchContext::load(workspace, None, false)?;
+            &loaded_context
+        }
+    };
     let mut callers = Vec::new();
     let mut references = Vec::new();
     let mut seen_call_sites = HashSet::new();
@@ -752,7 +771,7 @@ fn search_call_sites_with_references(
         // Search the identifier, not `name(`: values, whitespace, comments,
         // and generic arguments are distinguished during source verification.
         let batch = crate::search::exact_literal_chunks_with_context(
-            &search_context,
+            search_context,
             query.name,
             &candidate_options,
             candidate_options.limit,

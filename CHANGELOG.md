@@ -10,6 +10,9 @@ All notable changes to ivygrep are documented in this file.
 
 ### Performance
 
+- Static embedding profiles convert the model matrix in bounded row blocks instead of whole-tensor copies, lowering peak memory while loading the model from 298 MiB to 154 MiB for static-retrieval-v1 and from 186 MiB to 107 MiB for potion-code-16m-v2. Loaded embeddings are bit-identical.
+- Daemon status, literal, and regex requests reuse the cached workspace resolution that hybrid search already uses, and lease acquisition resolves a linked worktree's main checkout once per request. On a warm linked worktree, daemon Git subprocesses per request drop from 2 to 1 for hybrid search and from 4 to 1 for literal and regex searches. Replaced checkouts and retargeted Git pointers still refresh workspace identity.
+- Context packs reuse their loaded search context across relationship anchors instead of reopening index stores for each anchor's callers and references.
 - Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
 - Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
 

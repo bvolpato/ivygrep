@@ -1543,6 +1543,8 @@ impl DaemonState {
         cancellation: Option<&AtomicBool>,
     ) -> Option<Vec<WorkspaceModeLease>> {
         let mut requirements = HashMap::new();
+        // `main_worktree_root` runs `git worktree list`; resolve each base once.
+        let mut base_ids = HashMap::new();
         for workspace in workspaces {
             let workspace_requires_mutation = direct_exclusive
                 || (unfinished_publication_exclusive
@@ -1562,6 +1564,7 @@ impl DaemonState {
                         skip_gitignore,
                         &workspace_readiness_signature(workspace),
                     );
+                base_ids.insert(workspace.id.clone(), base_workspace.id.clone());
                 requirements
                     .entry(base_workspace.id)
                     .and_modify(|exclusive| *exclusive |= base_requires_mutation)
@@ -1574,12 +1577,10 @@ impl DaemonState {
             workspaces
                 .iter()
                 .filter(|workspace| {
-                    workspace.is_worktree()
-                        && workspace
-                            .main_worktree_root()
-                            .and_then(|root| Workspace::resolve(&root).ok())
-                            .and_then(|base| requirements.get(&base.id))
-                            .is_some_and(|exclusive| !exclusive)
+                    base_ids
+                        .get(&workspace.id)
+                        .and_then(|base_id| requirements.get(base_id))
+                        .is_some_and(|exclusive| !exclusive)
                 })
                 .collect::<Vec<_>>()
         };
@@ -1801,11 +1802,12 @@ impl DaemonState {
             // lease before opening stores.
             let mut resolved_after_wait = Vec::with_capacity(workspaces.len());
             for workspace in &workspaces {
-                resolved_after_wait.push(self.resolve_workspace(&workspace.root).map_err(
-                    |error| DaemonResponse::Error {
-                        message: error.to_string(),
-                    },
-                )?);
+                resolved_after_wait.push(
+                    self.resolve_workspace_revalidated(&workspace.root)
+                        .map_err(|error| DaemonResponse::Error {
+                            message: error.to_string(),
+                        })?,
+                );
             }
             let identity_changed =
                 workspaces
@@ -2031,10 +2033,18 @@ impl DaemonState {
     }
 
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
+        self.resolve_workspace_cached(path, true)
+    }
+
+    fn resolve_workspace_revalidated(&self, path: &Path) -> Result<Workspace> {
+        self.resolve_workspace_cached(path, false)
+    }
+
+    fn resolve_workspace_cached(&self, path: &Path, accept_fresh: bool) -> Result<Workspace> {
         if path.is_absolute()
             && let Some(cached) = self.resolved_workspaces.lock().get_mut(path)
         {
-            if cached.checked_at.elapsed() < WORKSPACE_RESOLUTION_FRESHNESS {
+            if accept_fresh && cached.checked_at.elapsed() < WORKSPACE_RESOLUTION_FRESHNESS {
                 return Ok(cached.workspace.clone());
             }
             if cached.signature.matches_cached_main_checkout(path)
@@ -3370,7 +3380,14 @@ async fn handle_request_with_cancellation(
         },
         DaemonRequest::RuntimeStatus { path } => {
             let workspace = match path {
-                Some(path) => match Workspace::resolve(&path) {
+                // Status only reads per-root runtime state. If cached resolution
+                // races a Git identity change, resolve uncached instead of
+                // returning an error that CLI clients treat as an incompatible
+                // daemon and restart.
+                Some(path) => match state
+                    .resolve_workspace(&path)
+                    .or_else(|_| Workspace::resolve(&path))
+                {
                     Ok(workspace) => {
                         let watch_enabled = workspace
                             .read_metadata()
@@ -3997,7 +4014,7 @@ async fn handle_request_with_cancellation(
                 return cancelled_search_response();
             }
             let workspace_set = if let Some(ref p) = path {
-                match Workspace::resolve(p) {
+                match state.resolve_workspace(p) {
                     Ok(workspace) => SearchWorkspaceSet {
                         workspaces: vec![workspace],
                         warnings: Vec::new(),
@@ -4009,7 +4026,7 @@ async fn handle_request_with_cancellation(
                     }
                 }
             } else {
-                match select_all_indexed_workspaces(Workspace::resolve) {
+                match select_all_indexed_workspaces(|root| state.resolve_workspace(root)) {
                     Ok(workspaces) => workspaces,
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -4128,7 +4145,7 @@ async fn handle_request_with_cancellation(
                 return cancelled_search_response();
             }
             let workspace_set = if let Some(ref p) = path {
-                match Workspace::resolve(p) {
+                match state.resolve_workspace(p) {
                     Ok(workspace) => SearchWorkspaceSet {
                         workspaces: vec![workspace],
                         warnings: Vec::new(),
@@ -4140,7 +4157,7 @@ async fn handle_request_with_cancellation(
                     }
                 }
             } else {
-                match select_all_indexed_workspaces(Workspace::resolve) {
+                match select_all_indexed_workspaces(|root| state.resolve_workspace(root)) {
                     Ok(workspaces) => workspaces,
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -6823,49 +6840,63 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_main_to_linked_after_index() {
-        assert_replaced_workspace_searches_current_base(false, true, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(false, true, false, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_main_to_linked_without_index() {
-        assert_replaced_workspace_searches_current_base(false, false, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(false, false, false, false, false, true)
+            .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_workspace_identity_rechecks_fresh_cache_after_lease() {
+        assert_replaced_workspace_searches_current_base(false, false, false, false, false, false)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_different_base_after_index() {
-        assert_replaced_workspace_searches_current_base(true, true, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(true, true, false, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_different_base_without_index() {
-        assert_replaced_workspace_searches_current_base(true, false, false, false, false).await;
+        assert_replaced_workspace_searches_current_base(true, false, false, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_tracks_retargeted_gitfile() {
-        assert_replaced_workspace_searches_current_base(true, false, true, false, false).await;
+        assert_replaced_workspace_searches_current_base(true, false, true, false, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_main_after_index() {
-        assert_replaced_workspace_searches_current_base(true, true, false, true, false).await;
+        assert_replaced_workspace_searches_current_base(true, true, false, true, false, true).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_linked_to_main_without_index() {
-        assert_replaced_workspace_searches_current_base(true, false, false, true, false).await;
+        assert_replaced_workspace_searches_current_base(true, false, false, true, false, true)
+            .await;
     }
 
     #[tokio::test]
     #[serial]
     async fn daemon_workspace_identity_reconciliation_waits_for_existing_readers() {
-        assert_replaced_workspace_searches_current_base(false, false, false, false, true).await;
+        assert_replaced_workspace_searches_current_base(false, false, false, false, true, true)
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7041,6 +7072,7 @@ mod tests {
         retarget_gitfile: bool,
         replace_with_main: bool,
         hold_existing_reader: bool,
+        expire_resolution_cache: bool,
     ) {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -7108,7 +7140,9 @@ mod tests {
                 );
             }
         }
-        expire_workspace_resolution(&state, &original.root);
+        if expire_resolution_cache {
+            expire_workspace_resolution(&state, &original.root);
+        }
         if explicit_index {
             let response = handle_request(state.clone(), index_request_for(&original, false)).await;
             assert!(
