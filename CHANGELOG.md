@@ -15,6 +15,7 @@ All notable changes to ivygrep are documented in this file.
 - Context packs reuse their loaded search context across relationship anchors instead of reopening index stores for each anchor's callers and references.
 - Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
 - Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
+- Background hash and neural enhancement insert vectors through at most four concurrent lanes instead of one at a time, keeping neural recall@10 within 0.5 points of serial builds. On a 179K-chunk repository, hash enhancement runs 2.0x faster and neural enhancement 2.4x faster. Stores under 1,024 vectors keep serial inserts, and `IVYGREP_INDEX_THREADS=1` restores them everywhere.
 
 ### Testing
 
@@ -31,15 +32,13 @@ All notable changes to ivygrep are documented in this file.
 - `ig --web` opens the browser through an owner-only HTML redirect file under the ivygrep app home instead of passing the tokenized URL to `xdg-open`, `open`, or `ShellExecuteW`, so the token no longer appears in process arguments other local users can read. On Unix the file is mode 0600 in a 0700 `browser/` directory; a later launch removes files older than two minutes. `IVYGREP_NO_BROWSER=1` skips the launch and the file.
 - The token URL answers with a same-origin page that sets the HttpOnly `SameSite=Strict` cookie and refreshes to the app without the token. A redirect lost the cookie when the URL was opened from a local file, as the launcher's redirect page does. The cookie is named per listener port (`ivygrep_session_<port>`), so daemons on different ports keep separate sessions.
 
-### Performance
-
-- Background hash and neural enhancement insert vectors through at most four concurrent lanes instead of one at a time, keeping neural recall@10 within 0.5 points of serial builds. On a 179K-chunk repository, hash enhancement runs 2.0x faster and neural enhancement 2.4x faster. Stores under 1,024 vectors keep serial inserts, and `IVYGREP_INDEX_THREADS=1` restores them everywhere.
-
 ### Fixed
 
 - Multi-line queries are ranked as pasted source. They no longer boost one-line definition signatures that share a few of the snippet's identifiers, and `owner.member` calls inside them no longer become exact-symbol lookups, so the code that contains the snippet ranks first. On the held-out reranker-evaluation half of the public panel, lexical nDCG@10 rises from `.3140` to `.5418` on codetrans-contest and from `.2273` to `.2932` on codetrans-dl. Single-line queries are unchanged.
 - Fallback-chunked languages index lines before the first declaration, such as Protobuf `package` and `option` lines. Python multi-line decorators stay in their definition's chunk, while continuation headers still name the `def` or `class` line.
 - Indexed signatures and definition-name ranking skip multi-line annotations, decorators, and attributes such as `@router.get(...)`, `@RequestMapping(...)`, and `#[cfg_attr(...)]` until their brackets balance, so the declaration line is used instead of an argument line.
+- Fallback-chunked languages index lines before the first declaration, such as Protobuf `package` and `option` lines. Python multi-line decorators, and decorators before a JavaScript or TypeScript `export class`, stay in their definition's chunk, while continuation headers still name the `def` or `class` line.
+- Indexed signatures, definition-name ranking, and text-inferred symbol names skip multi-line annotations, decorators, and attributes such as `@router.get(...)`, `@RequestMapping(...)`, `#[cfg_attr(...)]`, `#![cfg_attr(...)]`, and C# `[Route(...)]` until their brackets balance, so the declaration line is used instead of an argument line. Brackets inside `#` and `//` comments, backtick strings, and triple-quoted strings do not count.
 - Java records, module-level JavaScript and TypeScript `const name = () => ...` bindings, and module-level Rust `macro_rules!` macros produce symbol definitions. A declaration that binds several functions, such as `export const a = () => 1, b = () => 2`, registers every function name.
 - Symbol, caller, and context previews drop the stored chunk header, including continuation headers and Windows path separators, so the first preview line matches the reported start line.
 - Index format v30 rebuilds existing indexes once to pick up the chunking and symbol changes above.

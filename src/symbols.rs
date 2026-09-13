@@ -11,7 +11,7 @@ use crate::indexer::{
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::{SearchContext, SearchOptions};
-use crate::text::strip_leading_annotations;
+use crate::text::{first_code_line_range, strip_leading_annotations};
 use crate::workspace::{Workspace, WorkspaceScope};
 
 const SYMBOL_DEFINITION_LOOKUP_BATCH: usize = 128;
@@ -1601,7 +1601,8 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
         return Some(name);
     }
 
-    let signature = first_definition_signature(&chunk.text)?;
+    // Skips comments and annotations, including multi-line ones.
+    let signature = &chunk.text[first_code_line_range(&chunk.text)?];
 
     let keywords: &[&str] = match chunk.kind.as_str() {
         "Function" | "function" => &["fn", "def", "func", "function", "fun"],
@@ -1642,38 +1643,6 @@ pub(crate) fn is_continuation_text(text: &str) -> bool {
     text.lines()
         .nth(1)
         .is_some_and(|line| line.starts_with("// continuation of "))
-}
-
-fn first_definition_signature(text: &str) -> Option<&str> {
-    let mut in_block_comment = false;
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if in_block_comment {
-            if line.contains("*/") {
-                in_block_comment = false;
-            }
-            continue;
-        }
-        if line.starts_with("/*") {
-            if !line.contains("*/") {
-                in_block_comment = true;
-            }
-            continue;
-        }
-        // `@Override public void run() {` keeps its declaration once the
-        // annotation prefix is removed; a bare decorator line is skipped.
-        let line = strip_leading_annotations(line);
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with('#')
-            || line.starts_with('@')
-            || line.starts_with('*')
-        {
-            continue;
-        }
-        return Some(line);
-    }
-    None
 }
 
 /// Definitions a chunk registers in the symbol table: parser-derived names
@@ -2292,6 +2261,15 @@ mod tests {
             ))
             .as_deref(),
             Some("name")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "python",
+                "Function",
+                "// app/users.py\n\n@app.route(\n    \"/users/{id}\",\n)\ndef get_user():\n    return 1"
+            ))
+            .as_deref(),
+            Some("get_user")
         );
         assert_eq!(
             definition_name(&chunk(
