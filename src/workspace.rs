@@ -2100,6 +2100,17 @@ fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
+        // Snapshot walks skip non-UTF-8 names; counting them here would mark an
+        // index with no other sources unhealthy and rebuild it on every query.
+        if entry
+            .path()
+            .strip_prefix(root)
+            .ok()
+            .and_then(Path::to_str)
+            .is_none()
+        {
+            continue;
+        }
 
         let Ok(mut file) = fs::File::open(entry.path()) else {
             continue;
@@ -3274,6 +3285,25 @@ mod tests {
         assert!(!workspace_has_indexable_files(tmp.path(), false));
 
         std::fs::write(tmp.path().join("app.js"), "const answer = 42;\n").unwrap();
+        assert!(workspace_has_indexable_files(tmp.path(), false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_has_indexable_files_ignores_non_utf8_names() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let invalid = tmp
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"invalid\xff.rs"));
+        if std::fs::write(&invalid, "fn invalid() {}\n").is_err() {
+            // Some filesystems, such as APFS, reject non-UTF-8 names.
+            return;
+        }
+        assert!(!workspace_has_indexable_files(tmp.path(), false));
+
+        std::fs::write(tmp.path().join("valid.rs"), "fn valid() {}\n").unwrap();
         assert!(workspace_has_indexable_files(tmp.path(), false));
     }
 

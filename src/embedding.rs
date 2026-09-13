@@ -1278,10 +1278,29 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn stable_token_hash_is_pinned_and_matches_current_default_hasher() {
-        // Persisted hash vectors depend on these exact values.
+    fn stable_token_hash_is_pinned() {
+        // Persisted hash vectors depend on these exact values. They were taken
+        // from `DefaultHasher::new()` on rustc 1.98.1 and cover every block tail
+        // length; a future std algorithm change must not alter them.
         for (token, expected) in [
             ("", 0x3040_6ea5_23c5_3def),
+            ("a", 0x719b_50b9_a4f0_e9f3),
+            ("ab", 0x6693_0d61_a0cb_581b),
+            ("abc", 0xef09_e0f4_895a_251d),
+            ("abcX", 0x8099_e214_b25d_6488),
+            ("abcXY", 0xf9f7_52c3_2773_38f2),
+            ("abcXYZ", 0x0da1_e78a_553e_65ca),
+            ("abcXYZ_", 0x5f8e_7e7d_fb5d_a672),
+            ("abcXYZ_0", 0x07b4_cbda_16c3_83eb),
+            ("abcXYZ_09", 0x16f0_6a55_6faf_f00f),
+            ("abcXYZ_09é", 0x1fd2_6edf_1980_8c11),
+            ("abcXYZ_09éa", 0x0331_6784_1190_f2ef),
+            ("abcXYZ_09éab", 0xc7c8_8083_6915_816a),
+            ("abcXYZ_09éabc", 0xb480_5234_e112_ac8e),
+            ("abcXYZ_09éabcX", 0x5f97_bca3_b2fb_cab7),
+            ("abcXYZ_09éabcXY", 0x96fd_2a84_90a8_2cf6),
+            ("abcXYZ_09éabcXYZ", 0x7d27_14a4_0a6f_881b),
+            ("abcXYZ_09éabcXYZ_", 0x63ff_cbc3_6642_5a71),
             ("token", 0xe43f_d60a_2cc5_e3c4),
             ("cache", 0x401f_09f7_eb70_9e11),
             ("vector_store", 0xfa3a_177a_bf2d_35e4),
@@ -1289,17 +1308,6 @@ mod tests {
             ("错误", 0xb3f7_cbc4_1239_0cb7),
         ] {
             assert_eq!(stable_token_hash(token), expected, "{token:?}");
-        }
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        for length in 0..40 {
-            let token = "abcXYZ_09é"
-                .chars()
-                .cycle()
-                .take(length)
-                .collect::<String>();
-            let mut hasher = DefaultHasher::new();
-            token.hash(&mut hasher);
-            assert_eq!(stable_token_hash(&token), hasher.finish(), "{token:?}");
         }
     }
 
