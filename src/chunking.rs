@@ -1793,10 +1793,27 @@ fn parsed_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> Pa
             .unwrap_or(ParsedName::Unknown),
         // `export const Button = () => ...` binds a function to a module name.
         "lexical_declaration" if matches!(language, "javascript" | "typescript") => {
-            first_named_child(node, Some("variable_declarator"))
-                .and_then(|declarator| declarator.child_by_field_name("name"))
-                .map(text)
-                .unwrap_or(ParsedName::Unknown)
+            let mut cursor = node.walk();
+            let names = node
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "variable_declarator")
+                .filter(|declarator| {
+                    declarator
+                        .child_by_field_name("value")
+                        .is_some_and(|value| {
+                            matches!(value.kind(), "arrow_function" | "function_expression")
+                        })
+                })
+                .filter_map(|declarator| declarator.child_by_field_name("name"))
+                .filter_map(|name| name.utf8_text(source).ok())
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>();
+            match names.len() {
+                0 => ParsedName::Unknown,
+                1 => ParsedName::Found(names.into_iter().next().unwrap_or_default()),
+                _ => ParsedName::FoundMany(names),
+            }
         }
         "variable_declaration" if language == "zig" => first_named_child(node, Some("identifier"))
             .map(text)
@@ -2930,9 +2947,14 @@ mod tests {
             assert_eq!(
                 parsed_definitions(
                     path,
-                    "import x from \"x\";\nexport const FancyButton = () => {\n  const nested = () => 1;\n  return nested();\n};\nconst helper = function () {\n  return 2;\n};\nconst LIMIT = 3;\n",
+                    "import x from \"x\";\nexport const FancyButton = () => {\n  const nested = () => 1;\n  return nested();\n};\nconst helper = function () {\n  return 2;\n};\nconst value = 1, handler = () => {}, worker = function () {};\nconst LIMIT = 3;\n",
                 ),
-                pairs(&[("FancyButton", None), ("helper", None)]),
+                pairs(&[
+                    ("FancyButton", None),
+                    ("helper", None),
+                    ("handler", None),
+                    ("worker", None),
+                ]),
                 "{path}"
             );
         }
