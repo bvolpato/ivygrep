@@ -462,13 +462,24 @@ fn irregular_singular(token: &str) -> Option<&'static str> {
 
 /// Returns the first source line after generated path headers, documentation
 /// comments, and declaration attributes.
-pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
+pub fn first_code_line_range(text: &str, language: &str) -> Option<Range<usize>> {
+    code_line_ranges(text, language).next()
+}
+
+/// Returns every line [`first_code_line_range`] accepts, in order. Lines inside
+/// block comments and multi-line annotations are skipped, and each range starts
+/// after annotations that share its line.
+pub fn code_line_ranges<'a>(
+    text: &'a str,
+    language: &str,
+) -> impl Iterator<Item = Range<usize>> + use<'a> {
+    let comments = LineComments::for_language(language);
     let mut offset = 0;
     let mut in_block_comment = false;
     // Brackets still open from a multi-line annotation such as `@router.get(`.
     let mut open_brackets = None;
 
-    for line in text.split_inclusive('\n') {
+    text.split_inclusive('\n').filter_map(move |line| {
         let line_start = offset;
         offset += line.len();
         let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
@@ -481,16 +492,16 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
             if trimmed.contains("*/") {
                 in_block_comment = false;
             }
-            continue;
+            return None;
         }
 
         let mut rest = trimmed;
         if let Some(open) = open_brackets.take() {
-            match close_open_brackets(trimmed, open) {
+            match close_open_brackets(trimmed, open, comments) {
                 Ok(end) => rest = trimmed[end..].trim_start(),
                 Err(still_open) => {
                     open_brackets = Some(still_open);
-                    continue;
+                    return None;
                 }
             }
         }
@@ -499,17 +510,17 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
             if !rest.contains("*/") {
                 in_block_comment = true;
             }
-            continue;
+            return None;
         }
 
         // Annotations and attributes that share a line with the declaration
         // (`@Override public void run() {`) are stripped rather than hiding
         // the declaration behind them. Unclosed ones continue on later lines.
-        let code = match strip_annotation_prefix(rest) {
+        let code = match strip_annotation_prefix(rest, comments) {
             Ok(code) => code,
             Err(still_open) => {
                 open_brackets = Some(still_open);
-                continue;
+                return None;
             }
         };
         if code.is_empty()
@@ -520,30 +531,22 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
             || code.starts_with("*/")
             || code.starts_with('[') && code.ends_with(']')
         {
-            continue;
+            return None;
         }
 
         let leading_bytes = line_without_newline.len() - line_without_newline.trim_start().len()
             + (trimmed.len() - code.len());
         let trailing_bytes = line_without_newline.len() - line_without_newline.trim_end().len();
-        return Some(
-            line_start + leading_bytes..line_start + line_without_newline.len() - trailing_bytes,
-        );
-    }
-
-    None
+        Some(line_start + leading_bytes..line_start + line_without_newline.len() - trailing_bytes)
+    })
 }
 
 /// Strips leading annotation / decorator / attribute tokens (`@Name`,
-/// `@Name(...)`, `#[...]`) from a trimmed line and returns the remaining
-/// declaration text. A line that only holds annotations becomes empty.
-pub fn strip_leading_annotations(line: &str) -> &str {
-    strip_annotation_prefix(line).unwrap_or_default()
-}
-
-/// Like [`strip_leading_annotations`], but an annotation left unclosed at the
-/// end of the line reports what remains open.
-fn strip_annotation_prefix(mut line: &str) -> Result<&str, OpenBrackets> {
+/// `@Name(...)`, `#[...]`, C# `[Name(...)]`) from a trimmed line and returns
+/// the remaining declaration text, which is empty when the line only holds
+/// annotations. An annotation left unclosed at the end of the line reports
+/// what remains open.
+fn strip_annotation_prefix(mut line: &str, comments: LineComments) -> Result<&str, OpenBrackets> {
     loop {
         if let Some(rest) = line.strip_prefix('@') {
             let identifier_end = rest
@@ -556,7 +559,7 @@ fn strip_annotation_prefix(mut line: &str) -> Result<&str, OpenBrackets> {
             }
             let mut rest = &rest[identifier_end..];
             if rest.starts_with('(') {
-                rest = &rest[close_open_brackets(rest, OpenBrackets::default())?..];
+                rest = &rest[close_open_brackets(rest, OpenBrackets::default(), comments)?..];
             }
             line = rest.trim_start();
             continue;
@@ -565,14 +568,16 @@ fn strip_annotation_prefix(mut line: &str) -> Result<&str, OpenBrackets> {
         if let Some(rest) = line.strip_prefix("#!").or_else(|| line.strip_prefix('#'))
             && rest.starts_with('[')
         {
-            line = rest[close_open_brackets(rest, OpenBrackets::default())?..].trim_start();
+            line =
+                rest[close_open_brackets(rest, OpenBrackets::default(), comments)?..].trim_start();
             continue;
         }
         // C# `[Route(...)]`. A bare `[Obsolete]` line is skipped by callers.
         if let Some(rest) = line.strip_prefix('[')
             && csharp_attribute_has_arguments(rest)
         {
-            line = line[close_open_brackets(line, OpenBrackets::default())?..].trim_start();
+            line =
+                line[close_open_brackets(line, OpenBrackets::default(), comments)?..].trim_start();
             continue;
         }
         return Ok(line);
@@ -607,6 +612,30 @@ struct OpenBrackets {
     depth: usize,
     /// A backtick or triple-quoted string that continues on the next line.
     string: Option<&'static [u8]>,
+    /// A `/* ... */` comment that continues on the next line.
+    block_comment: bool,
+}
+
+/// Line comments that annotation arguments may contain.
+#[derive(Clone, Copy)]
+enum LineComments {
+    /// Python: every `#` outside a string starts a comment, and `//` is floor
+    /// division.
+    Hash,
+    /// Elsewhere `#` also starts Rust attributes and raw strings, C#
+    /// directives, CSS colors, Dart symbols, and JavaScript private names, so
+    /// only `#` followed by whitespace counts. `//` outside a string always does.
+    Mixed,
+}
+
+impl LineComments {
+    fn for_language(language: &str) -> Self {
+        if language.eq_ignore_ascii_case("python") {
+            Self::Hash
+        } else {
+            Self::Mixed
+        }
+    }
 }
 
 /// String delimiters, longest first so `"""` wins over `"`.
@@ -614,10 +643,14 @@ const STRING_DELIMITERS: [&[u8]; 5] = [b"\"\"\"", b"'''", b"\"", b"'", b"`"];
 
 /// Scans `text` with `open` brackets already unclosed. Returns the byte offset
 /// just past the bracket that closes them all, or what is still open at the
-/// end. `()`, `[]`, and `{}` share one depth. Quoted strings and `#` / `//`
-/// line comments are skipped; only backtick and triple-quoted strings carry
-/// over to the next line.
-fn close_open_brackets(text: &str, mut open: OpenBrackets) -> Result<usize, OpenBrackets> {
+/// end. `()`, `[]`, and `{}` share one depth. Quoted strings, `/* */` block
+/// comments, and line comments are skipped; only block comments and backtick
+/// and triple-quoted strings carry over to the next line.
+fn close_open_brackets(
+    text: &str,
+    mut open: OpenBrackets,
+    comments: LineComments,
+) -> Result<usize, OpenBrackets> {
     let bytes = text.as_bytes();
     let mut string = open.string.take();
     let mut offset = 0;
@@ -634,6 +667,14 @@ fn close_open_brackets(text: &str, mut open: OpenBrackets) -> Result<usize, Open
             }
             continue;
         }
+        if open.block_comment {
+            let Some(end) = rest.windows(2).position(|pair| pair == b"*/") else {
+                break;
+            };
+            open.block_comment = false;
+            offset += end + 2;
+            continue;
+        }
         if let Some(delimiter) = STRING_DELIMITERS
             .into_iter()
             .find(|delimiter| rest.starts_with(delimiter))
@@ -642,14 +683,22 @@ fn close_open_brackets(text: &str, mut open: OpenBrackets) -> Result<usize, Open
             offset += delimiter.len();
             continue;
         }
-        // `# note (see` ends the line, and so does a line starting `// legacy (v1`.
-        // `#fff`, `r#"`, and Python's `n // 2` do not.
-        let comment = if rest.starts_with(b"//") {
-            bytes[..offset].iter().all(u8::is_ascii_whitespace)
-        } else {
-            rest[0] == b'#'
-                && (offset == 0 || bytes[offset - 1].is_ascii_whitespace())
-                && rest.get(1).is_none_or(u8::is_ascii_whitespace)
+        if rest.starts_with(b"/*") {
+            open.block_comment = true;
+            offset += 2;
+            continue;
+        }
+        // `# note (see` and `// legacy (v1` end the line, even after arguments, so a
+        // `/*` inside them cannot open a block comment. Outside Python, `#fff` and
+        // `r#"` do not; Python's `n // 2` never does.
+        let comment = match comments {
+            LineComments::Hash => rest[0] == b'#',
+            LineComments::Mixed if rest.starts_with(b"//") => true,
+            LineComments::Mixed => {
+                rest[0] == b'#'
+                    && (offset == 0 || bytes[offset - 1].is_ascii_whitespace())
+                    && rest.get(1).is_none_or(u8::is_ascii_whitespace)
+            }
         };
         if comment {
             break;
@@ -673,6 +722,10 @@ fn close_open_brackets(text: &str, mut open: OpenBrackets) -> Result<usize, Open
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strip_leading_annotations(line: &str) -> &str {
+        strip_annotation_prefix(line, LineComments::Mixed).unwrap_or_default()
+    }
 
     #[test]
     fn leading_annotations_are_stripped_from_declarations() {
@@ -709,7 +762,7 @@ mod tests {
         assert_eq!(strip_leading_annotations("@"), "@");
 
         let text = "// src/Worker.java\n\n@Override public void run() {\n";
-        let range = first_code_line_range(text).unwrap();
+        let range = first_code_line_range(text, "java").unwrap();
         assert_eq!(&text[range], "public void run() {");
     }
 
@@ -770,7 +823,7 @@ mod tests {
     #[test]
     fn first_code_line_skips_java_doc_and_annotation() {
         let text = "// src/GsonBuilder.java\n\n/**\n * Registers an adapter.\n */\n@CanIgnoreReturnValue\npublic GsonBuilder registerTypeAdapter(Type type, Object adapter) {\n";
-        let range = first_code_line_range(text).unwrap();
+        let range = first_code_line_range(text, "java").unwrap();
 
         assert_eq!(
             &text[range],
@@ -781,7 +834,7 @@ mod tests {
     #[test]
     fn first_code_line_skips_csharp_attribute() {
         let text = "// Example.cs\n\n/// Docs\n[Obsolete]\npublic void RegisterHandler() {}\n";
-        let range = first_code_line_range(text).unwrap();
+        let range = first_code_line_range(text, "csharp").unwrap();
 
         assert_eq!(&text[range], "public void RegisterHandler() {}");
     }
@@ -843,15 +896,41 @@ mod tests {
                 "[return: MarshalAs (\n    UnmanagedType.Bool\n)]\npublic bool IsReady() {\n",
                 "public bool IsReady() {",
             ),
-            // Python floor division is not a comment.
+            // Nor do brackets inside block comments.
             (
-                "@lru_cache(maxsize=256 // 4)\ndef cached():\n",
-                "def cached():",
+                "@RequestMapping(\n    /* legacy (v1 */\n    value = \"/users\"\n)\npublic List<User> list() {\n",
+                "public List<User> list() {",
+            ),
+            (
+                "#[cfg_attr(\n    /*\n     * see (docs\n     */\n    feature = \"serde\",\n    derive(Serialize)\n)]\npub fn encode() {}\n",
+                "pub fn encode() {}",
+            ),
+            // A trailing `//` comment ends the line before a `/*` inside it.
+            (
+                "@Foo(\n    value = 1, // document the /* token\n    other = 2\n)\npublic void run() {\n",
+                "public void run() {",
             ),
         ] {
-            let range = first_code_line_range(text).unwrap();
+            let range = first_code_line_range(text, "").unwrap();
             assert_eq!(&text[range], expected, "{text}");
         }
+    }
+
+    #[test]
+    fn first_code_line_treats_every_python_hash_as_a_comment() {
+        let text = "@pytest.mark.parametrize(\n    \"value\",  #TODO(flaky\n    [1, 2],#see [docs\n)\ndef test_value(value):\n";
+        let range = first_code_line_range(text, "python").unwrap();
+        assert_eq!(&text[range], "def test_value(value):");
+
+        // Python floor division is not a comment.
+        let text = "@lru_cache(maxsize=256 // 4)\ndef cached():\n";
+        let range = first_code_line_range(text, "python").unwrap();
+        assert_eq!(&text[range], "def cached():");
+
+        // Elsewhere `#name` can be code, such as a Dart symbol.
+        let text = "@MirrorsUsed(\n    symbols: #foo)\nclass Reflected {}\n";
+        let range = first_code_line_range(text, "dart").unwrap();
+        assert_eq!(&text[range], "class Reflected {}");
     }
 
     fn collect_tokens(text: &str) -> Vec<String> {

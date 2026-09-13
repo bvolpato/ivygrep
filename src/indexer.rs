@@ -3280,7 +3280,7 @@ fn extract_signature(chunk: &IndexedChunk) -> String {
     if !is_definition {
         return String::new();
     }
-    first_code_line_range(&chunk.text)
+    first_code_line_range(&chunk.text, &chunk.language)
         .map(|range| chunk.text[range].to_string())
         .unwrap_or_default()
 }

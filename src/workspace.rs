@@ -61,8 +61,8 @@ pub struct Workspace {
 ///  27: Preserve Unicode symbol names and identifier boundaries
 ///  28: Rust dependency paths respect Cargo package and target roots
 ///  29: Retain resolved dependency specs for incremental target precedence changes
-///  30: Index fallback preambles, Python decorators, Java records, JS/TS module
-///      function bindings, and Rust macros
+///  30: Index fallback preambles, Python and JS/TS decorators, Java records,
+///      JS/TS module function bindings, and Rust macros
 pub const INDEX_FORMAT_VERSION: u32 = 30;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
