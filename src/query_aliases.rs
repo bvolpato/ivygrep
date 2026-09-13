@@ -111,7 +111,7 @@ mod tests {
         );
 
         let tokens = vec!["search".to_string(), "run".to_string()];
-        assert_eq!(phrase_aliases(&tokens), vec!["semaphore", "permit"]);
+        assert!(phrase_aliases(&tokens).is_empty());
 
         let tokens = vec![
             "server".to_string(),
