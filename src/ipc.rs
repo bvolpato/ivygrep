@@ -199,15 +199,25 @@ mod unix {
         Ok((listener, path))
     }
 
+    /// A Unix connection has no handshake, so an accepted stream goes straight
+    /// to [`authenticate`].
+    pub type PendingIpcStream = IpcStream;
+
     /// Returns true if the connecting peer is the same uid as this process.
     /// The daemon only ever serves its own user; reject anyone else (the
     /// socket exposes cross-workspace search/index/delete).
-    pub fn peer_is_owner(stream: &IpcStream) -> bool {
+    fn peer_is_owner(stream: &IpcStream) -> bool {
         match stream.peer_cred() {
             Ok(cred) => cred.uid() == unsafe { libc::geteuid() },
             // If we can't verify the peer, fail closed.
             Err(_) => false,
         }
+    }
+
+    /// Returns the stream only when the peer runs as the daemon's user. This
+    /// reads nothing from the socket, so it never waits on the client.
+    pub async fn authenticate(stream: PendingIpcStream) -> Option<IpcStream> {
+        peer_is_owner(&stream).then_some(stream)
     }
 
     pub async fn connect() -> std::io::Result<IpcStream> {
@@ -226,7 +236,10 @@ mod unix {
     }
 }
 
-#[cfg(not(unix))]
+// The loopback TCP transport serves Windows. It uses only portable Tokio APIs,
+// so Unix test builds compile it too and exercise its token handshake.
+#[cfg(any(not(unix), test))]
+#[cfg_attr(unix, allow(dead_code))]
 mod windows {
     use crate::config;
     use anyhow::{Context, Result};
@@ -239,28 +252,48 @@ mod windows {
 
     const TOKEN_LENGTH: usize = 32;
     const HANDSHAKE_LENGTH: usize = TOKEN_LENGTH + 1;
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
     pub struct IpcListener {
         inner: TcpListener,
         token: [u8; TOKEN_LENGTH],
     }
 
+    /// A loopback connection that has not presented the daemon token yet.
+    pub struct PendingIpcStream {
+        stream: IpcStream,
+        token: [u8; TOKEN_LENGTH],
+    }
+
     impl IpcListener {
-        pub async fn accept(&self) -> std::io::Result<(IpcStream, SocketAddr)> {
-            loop {
-                let (mut stream, address) = self.inner.accept().await?;
-                let mut handshake = [0u8; HANDSHAKE_LENGTH];
-                let authenticated =
-                    tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut handshake))
-                        .await
-                        .is_ok_and(|result| result.is_ok())
-                        && handshake[..TOKEN_LENGTH] == self.token
-                        && handshake[TOKEN_LENGTH] == b'\n';
-                if authenticated {
-                    return Ok((stream, address));
-                }
-            }
+        /// Accept the next connection without reading from it, so a slow or
+        /// stalled client cannot delay other clients. Serve the stream only
+        /// after [`authenticate`] returns it.
+        pub async fn accept(&self) -> std::io::Result<(PendingIpcStream, SocketAddr)> {
+            let (stream, address) = self.inner.accept().await?;
+            Ok((
+                PendingIpcStream {
+                    stream,
+                    token: self.token,
+                },
+                address,
+            ))
         }
+    }
+
+    /// Wait up to one second for the per-daemon token followed by a newline.
+    /// Returns the stream only for that exact handshake; other bytes, a short
+    /// read, or a timeout reject the connection.
+    pub async fn authenticate(pending: PendingIpcStream) -> Option<IpcStream> {
+        let PendingIpcStream { mut stream, token } = pending;
+        let mut handshake = [0u8; HANDSHAKE_LENGTH];
+        let authenticated =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut handshake))
+                .await
+                .is_ok_and(|result| result.is_ok())
+                && handshake[..TOKEN_LENGTH] == token
+                && handshake[TOKEN_LENGTH] == b'\n';
+        authenticated.then_some(stream)
     }
 
     pub fn socket_path() -> Result<PathBuf> {
@@ -317,11 +350,6 @@ mod windows {
     pub fn socket_exists() -> bool {
         socket_path().map(|p| p.exists()).unwrap_or(false)
     }
-
-    /// The listener validates the per-daemon token before returning the stream.
-    pub fn peer_is_owner(_stream: &IpcStream) -> bool {
-        true
-    }
 }
 
 #[cfg(test)]
@@ -374,6 +402,64 @@ mod tests {
         cleanup_socket();
 
         assert!(!socket_exists(), "socket/port file should be cleaned up");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn loopback_accept_does_not_wait_for_client_handshake() {
+        use std::time::Duration;
+        use tokio::io::AsyncWriteExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", tmp.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+        let (listener, endpoint) = windows::bind().await.unwrap();
+        let port: u16 = std::fs::read_to_string(endpoint)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let accept_timeout = Duration::from_millis(250);
+
+        // Connects but never sends the token.
+        let _stalled_client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let (stalled, _) = tokio::time::timeout(accept_timeout, listener.accept())
+            .await
+            .expect("accept waited for a client handshake")
+            .unwrap();
+
+        let client = tokio::spawn(windows::connect());
+        let (pending, _) = tokio::time::timeout(accept_timeout, listener.accept())
+            .await
+            .expect("a stalled client delayed the next accept")
+            .unwrap();
+        assert!(
+            windows::authenticate(pending).await.is_some(),
+            "client presenting the daemon token was rejected"
+        );
+        client.await.unwrap().unwrap();
+
+        assert!(
+            windows::authenticate(stalled).await.is_none(),
+            "client that never sent the token was accepted"
+        );
+
+        let mut wrong_token = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        wrong_token
+            .write_all(format!("{}\n", "0".repeat(32)).as_bytes())
+            .await
+            .unwrap();
+        let (pending, _) = listener.accept().await.unwrap();
+        assert!(
+            windows::authenticate(pending).await.is_none(),
+            "client presenting the wrong token was accepted"
+        );
     }
 
     #[test]

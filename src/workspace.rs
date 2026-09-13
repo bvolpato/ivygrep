@@ -274,37 +274,42 @@ impl Workspace {
     }
 
     pub fn resolve(path: &Path) -> Result<Self> {
+        Self::resolve_with_main_worktree_root(path).map(|(workspace, _)| workspace)
+    }
+
+    /// Resolve `path` and also return what [`Self::main_worktree_root`] would:
+    /// the main checkout root of a linked worktree, or `None`. Callers that
+    /// cache the resolution can keep the root instead of running
+    /// `git worktree list` again.
+    pub(crate) fn resolve_with_main_worktree_root(path: &Path) -> Result<(Self, Option<PathBuf>)> {
         let root = detect_workspace_root(path)?;
         let id = workspace_id(&root);
         let index_dir = config::indexes_root()?.join(&id);
 
-        let (repo_id, base_index_dir) = match git_common_dir(&root) {
+        let (repo_id, base_index_dir, main_worktree_root) = match git_common_dir(&root) {
             Some(common_dir) => {
                 let rid = repo_id_from_common_dir(&common_dir);
                 // If the common dir's parent is different from root, we are a worktree
-                let main_root = git_main_worktree_root(&root);
-                let base = if let Some(ref main) = main_root {
-                    if *main != root {
-                        let main_id = workspace_id(main);
-                        Some(config::indexes_root()?.join(&main_id))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
+                let main_root = git_main_worktree_root(&root).filter(|main| *main != root);
+                let base = match &main_root {
+                    Some(main) => Some(config::indexes_root()?.join(workspace_id(main))),
+                    None => None,
                 };
-                (Some(rid), base)
+                (Some(rid), base, main_root)
             }
-            None => (None, None),
+            None => (None, None, None),
         };
 
-        Ok(Self {
-            id,
-            root,
-            index_dir,
-            repo_id,
-            base_index_dir,
-        })
+        Ok((
+            Self {
+                id,
+                root,
+                index_dir,
+                repo_id,
+                base_index_dir,
+            },
+            main_worktree_root,
+        ))
     }
 
     /// Returns true if this workspace is a git worktree (not the main checkout).

@@ -45,6 +45,13 @@ async fn bind_for_test() -> Option<(ivygrep::ipc::IpcListener, std::path::PathBu
     }
 }
 
+async fn accept_authenticated(listener: &ivygrep::ipc::IpcListener) -> ivygrep::ipc::IpcStream {
+    let (stream, _) = listener.accept().await.unwrap();
+    ivygrep::ipc::authenticate(stream)
+        .await
+        .expect("client failed daemon authentication")
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "commit.gpgSign=false"])
@@ -88,7 +95,7 @@ async fn serve_one(
     listener: &ivygrep::ipc::IpcListener,
     handler: impl Fn(DaemonRequest) -> DaemonResponse,
 ) {
-    let (stream, _) = listener.accept().await.unwrap();
+    let stream = accept_authenticated(listener).await;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
@@ -167,7 +174,7 @@ async fn daemon_ipc_index_and_search_roundtrip() {
 
     let daemon_handle = tokio::spawn(async move {
         for _ in 0..2 {
-            let (stream, _) = listener.accept().await.unwrap();
+            let stream = accept_authenticated(&listener).await;
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
@@ -286,7 +293,7 @@ async fn daemon_ipc_multiple_concurrent_connections() {
 
     let daemon_handle = tokio::spawn(async move {
         for _ in 0..3 {
-            let (stream, _) = listener.accept().await.unwrap();
+            let stream = accept_authenticated(&listener).await;
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();

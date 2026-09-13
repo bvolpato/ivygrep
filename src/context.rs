@@ -20,8 +20,8 @@ use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::{SearchContext, SearchOptions, hybrid_search_with_context};
 use crate::symbols::{
-    SymbolSearchMode, likely_definition_names, search_symbol_relationships_with_context,
-    search_symbols_in_current_index,
+    likely_definition_names, search_symbol_definitions_with_context,
+    search_symbol_relationships_with_context,
 };
 use crate::walker::SourcePathMatcher;
 use crate::workspace::Workspace;
@@ -288,10 +288,10 @@ pub fn build_context_bundle_with_options(
     symbol_options.limit = Some(4);
     symbol_options.context = 10;
     for symbol in &anchor_symbols {
-        match search_symbols_in_current_index(
+        match search_symbol_definitions_with_context(
             workspace,
+            &search_context,
             symbol,
-            SymbolSearchMode::Definitions,
             &symbol_options,
         ) {
             Ok(hits) => {
@@ -400,7 +400,7 @@ pub fn build_context_bundle_with_options(
         .filter(|path| seen_seed_paths.insert(path.clone()))
         .take(12)
         .collect::<Vec<_>>();
-    match expand_context_graph(workspace, &seed_paths, base_options) {
+    match expand_context_graph(workspace, &search_context, &seed_paths, base_options) {
         Ok(expansions) => {
             for (rank, expansion) in expansions.into_iter().enumerate() {
                 match search_context.representative_hit_for_file(
@@ -433,7 +433,7 @@ pub fn build_context_bundle_with_options(
         }
         Err(error) => tracing::debug!("context graph expansion failed: {error:#}"),
     }
-    match expand_context_tests(workspace, &seed_paths, base_options) {
+    match expand_context_tests(workspace, &search_context, &seed_paths, base_options) {
         Ok(expansions) => {
             let mut test_hits = Vec::new();
             for expansion in expansions {
