@@ -278,8 +278,8 @@ and lexical results remain available while neural vectors are incomplete.
 execution observable in structured output.
 
 Hard visibility and request filters apply before bounded candidate admission.
-Without a residual glob, native TopDocs first collects the normal bounded pool,
-retaining Block-WAND even for daemon requests with cancellation tokens. If every
+Without a residual glob, a native Block-WAND traversal first collects the normal
+bounded pool, even for daemon requests with cancellation tokens. If every
 returned document is eligible, that pool is final. A rejected document triggers
 a second traversal with eligibility checked before heap admission. This fallback
 reads competitive stored metadata, retains bounded memory, and checks cancellation
@@ -289,6 +289,17 @@ missing ANN keys underfill a candidate pool, a cancellation-aware fallback
 streams eligible SQLite keys and exactly scores fixed-size batches. This can
 scan the eligible corpus, but does not allocate a corpus-sized ANN result set.
 Ordinary ANN requests retain shared metadata hydration when no keys are rejected.
+
+Candidate cutoffs do not depend on segment layout. Tantivy breaks equal scores
+by document address, which follows indexing threads and merges, and Block-WAND
+adds term scores in traversal order, so one document's BM25 score can move by a
+few ULPs between layouts. Lexical, path, literal, and Boolean pools compare
+scores by bucket (the top 13 of 23 f32 mantissa bits, `6e-5` to `1.2e-4`
+relative) and order equal buckets by chunk key from a fast column. Collection
+stays one Block-WAND pass: the pruning threshold sits just below the worst kept
+bucket, so tied documents are scored, but no stored document is read to order
+them. Candidates report bucket scores. Indexes written before the key column
+existed keep address order among equal buckets.
 
 Explicit Boolean requests are parsed before expansion. All retrieval signals
 are restricted to a request-local pool of raw-query matches bounded by the
