@@ -235,6 +235,7 @@ impl MerkleSnapshot {
                     };
                     if entry.file_type().is_some_and(|ft| ft.is_file())
                         && let Ok(rel) = entry.path().strip_prefix(root_ref)
+                        && rel.to_str().is_some()
                     {
                         paths_ref.lock().unwrap().insert(index_path_string(rel));
                     }
@@ -1151,6 +1152,29 @@ mod tests {
             MerkleSnapshot::build_content_based(root, false).unwrap(),
         ] {
             assert_eq!(snapshot.files.keys().collect::<Vec<_>>(), vec!["valid.rs"]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_path_does_not_hide_ignored_utf8_collision() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let invalid_name = b"collision\xff.rs";
+        let invalid = root.join(std::ffi::OsStr::from_bytes(invalid_name));
+        if fs::write(&invalid, "fn invalid() {}\n").is_err() {
+            return;
+        }
+
+        let lossy_name = String::from_utf8_lossy(invalid_name).into_owned();
+        fs::write(root.join(&lossy_name), "fn ignored() {}\n").unwrap();
+        fs::write(root.join(".ignore"), format!("{lossy_name}\n")).unwrap();
+
+        for content_based in [false, true] {
+            let snapshot = MerkleSnapshot::build_inner(root, content_based, true).unwrap();
+            assert!(snapshot.files[&lossy_name].ends_with("-1"));
         }
     }
 
