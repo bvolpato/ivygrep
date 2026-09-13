@@ -1065,28 +1065,29 @@ mod tests {
             );
         }
         assert_eq!(
-            referenced_task_paths(root.path(), "at main (/app/index.js:5:1)", false),
+            referenced_task_paths(root.path(), "see index.js:12", false),
             [ContextInputPath {
                 file_path: PathBuf::from("index.js"),
-                line: Some(5),
+                line: Some(12),
             }]
         );
-        assert_eq!(
-            referenced_task_paths(
-                root.path(),
-                "panic at /home/u/repo/src/auth.rs:42\nsee index.js:12",
-                false
-            ),
-            [
-                ContextInputPath {
+        // Frames such as `/app/index.js` are absolute only on Unix hosts.
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                referenced_task_paths(root.path(), "at main (/app/index.js:5:1)", false),
+                [ContextInputPath {
                     file_path: PathBuf::from("index.js"),
-                    line: Some(12),
-                },
-                ContextInputPath {
+                    line: Some(5),
+                }]
+            );
+            assert_eq!(
+                referenced_task_paths(root.path(), "panic at /home/u/repo/src/auth.rs:42", false),
+                [ContextInputPath {
                     file_path: PathBuf::from("src/auth.rs"),
                     line: Some(42),
-                },
-            ]
-        );
+                }]
+            );
+        }
     }
 }
