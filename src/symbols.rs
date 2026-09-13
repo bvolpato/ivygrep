@@ -359,7 +359,7 @@ pub(crate) fn definition_candidates_eligible(
                                         ELSE 2
                                       END,
                                       (COALESCE(s.name, s.normalized_name) = r.exact_name) DESC,
-                                      c.file_path, c.start_line
+                                      c.file_path, c.start_line, c.end_line, c.vector_key
                            ) AS rn
                     FROM requested r
                     JOIN symbols s ON s.normalized_name = r.name
@@ -511,7 +511,7 @@ fn query_workspace_db(
                           ELSE 2
                         END,
                         (COALESCE(s.name, s.normalized_name) = ?2) DESC,
-                        c.file_path, c.start_line";
+                        c.file_path, c.start_line, c.end_line, c.vector_key";
 
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![normalized, query.name, query.owner], |row| {

@@ -123,7 +123,9 @@ the appropriate stores before local queries use them.
    disabled.
 4. Build a flat Merkle snapshot of relative paths and file fingerprints.
 5. Send files through a bounded scanner/chunker producer.
-6. Parse supported languages with Tree-sitter or a bounded text fallback.
+6. Parse supported languages with Tree-sitter or a bounded text fallback. The
+   parse budget counts parser operations, so a file takes the same path on any
+   machine; a CPU-time allowance per operation only stops pathological inputs.
 7. Extract symbols, imports, documentation relationships, tests, configuration,
    and unresolved dependency records.
 8. Persist lexical documents and metadata to staging stores.
@@ -288,6 +290,15 @@ streams eligible SQLite keys and exactly scores fixed-size batches. This can
 scan the eligible corpus, but does not allocate a corpus-sized ANN result set.
 Ordinary ANN requests retain shared metadata hydration when no keys are rejected.
 
+Candidate cutoffs do not depend on segment layout. Tantivy breaks equal scores
+by document address, and Block-WAND can move one document's BM25 score by a few
+ULPs between layouts, so lexical, path, literal, and Boolean pools collect past
+their limit until the tie band at the cutoff is complete (scores within `1e-5`
+relative are equal). Ties are ordered by indexed path, span, and chunk key, so
+rebuilding identical sources with any number of indexing threads yields the same
+pools. Expansion stops at 16 times the limit or 100,000 documents past it; a tie
+band larger than that keeps Tantivy's address order at the extended boundary.
+
 Explicit Boolean requests are parsed before expansion. All retrieval signals
 are restricted to a request-local pool of raw-query matches bounded by the
 normal lexical candidate budget. Semantic scoring ranks only keys in that pool;
@@ -398,7 +409,7 @@ without indexed definitions remain references only. Bounded requests widen
 indexed candidate batches after rejected matches, up to 25,000 chunks. CLI `--no-limit` retains its 50,000-candidate
 ceiling; unbounded API requests (`limit: None`) scan all indexed literal candidates.
 Each candidate file is parsed at most once for occurrence matching with the
-chunker's 100 ms parse budget. Go generic-function evidence is parsed separately
+chunker's parse budget. Go generic-function evidence is parsed separately
 from matching indexed definition chunks.
 
 ## Context-pack pipeline

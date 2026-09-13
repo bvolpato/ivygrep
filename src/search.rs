@@ -1268,7 +1268,7 @@ fn collect_literal_candidate_chunks(
         )?;
 
         for (i, searcher) in ctx.searchers.iter().enumerate() {
-            let docs = collect_top_docs_with_eligibility(
+            let docs = collect_stable_top_docs(
                 searcher,
                 parsed_query.as_ref(),
                 &ctx.fields,
@@ -1281,8 +1281,7 @@ fn collect_literal_candidate_chunks(
             // documents may belong to another language or a shadowed file.
             exhausted &= docs.len() < candidate_limit;
 
-            for (_score, addr) in docs {
-                let doc: TantivyDocument = searcher.doc(addr)?;
+            for (_score, doc) in docs {
                 if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
                     .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
                     .filter(|c| type_matches(c, options.type_filter.as_deref()))
@@ -1671,7 +1670,7 @@ impl LexicalQueryExecutor<'_> {
 
         let mut docs = Vec::new();
         for (searcher_index, searcher) in self.searchers.iter().enumerate() {
-            for (score, address) in collect_top_docs_with_eligibility(
+            for (score, document) in collect_stable_top_docs(
                 searcher,
                 parsed_query.as_ref(),
                 self.fields,
@@ -1680,11 +1679,7 @@ impl LexicalQueryExecutor<'_> {
                 query_candidate_limit,
                 self.cancel_token,
             )? {
-                docs.push((
-                    searcher_index,
-                    score,
-                    searcher.doc::<TantivyDocument>(address)?,
-                ));
+                docs.push((searcher_index, score, document));
             }
         }
         Ok(docs)
@@ -2799,6 +2794,123 @@ fn collect_top_docs_with_eligibility(
             cancel_token,
         },
     )?)
+}
+
+/// Relative band within which BM25 scores count as equal at a candidate cutoff.
+/// Block-WAND adds term scores in posting traversal order, so one document's
+/// score can differ by a few ULPs (observed up to 4e-7) between segment layouts.
+const CANDIDATE_SCORE_TIE_BAND: f32 = 1e-5;
+/// Tie-aware collection grows at most this many times past the requested limit,
+/// and never past `CANDIDATE_TIE_MAX_PROBE` documents beyond it.
+const CANDIDATE_TIE_MAX_EXPANSION: usize = 16;
+const CANDIDATE_TIE_MAX_PROBE: usize = 100_000;
+
+fn candidate_score_tie_band(score: f32) -> f32 {
+    score.abs() * CANDIDATE_SCORE_TIE_BAND
+}
+
+/// Top `limit` eligible documents with a layout-independent selection and order.
+///
+/// Tantivy breaks score ties by document address, which depends on how parallel
+/// indexing threads and merges laid out segments. Rebuilding an identical corpus
+/// could change which equally scored chunks survived a cutoff and their order,
+/// and rank-based fusion turned that into different results. This collects past
+/// the limit until the tie band at the cutoff is complete, folds near-equal scores
+/// onto their band's leading score, and orders ties by indexed path, span, and key.
+fn collect_stable_top_docs(
+    searcher: &tantivy::Searcher,
+    query: &dyn Query,
+    fields: &TantivyFields,
+    filter: &GlobPathQueryFilter,
+    eligibility: CandidateEligibility,
+    limit: usize,
+    cancel_token: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Vec<(f32, TantivyDocument)>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let max_probe = limit
+        .saturating_mul(CANDIDATE_TIE_MAX_EXPANSION)
+        .min(limit.saturating_add(CANDIDATE_TIE_MAX_PROBE));
+    let mut probe = limit.saturating_add((limit / 4).max(16)).min(max_probe);
+    loop {
+        let docs = collect_top_docs_with_eligibility(
+            searcher,
+            query,
+            fields,
+            filter,
+            eligibility.clone(),
+            probe,
+            cancel_token,
+        )?;
+        let settled = docs.len() < probe
+            || docs.last().is_some_and(|(tail, _)| {
+                let boundary = docs[limit - 1].0;
+                *tail < boundary - candidate_score_tie_band(boundary)
+            });
+        if settled || probe >= max_probe {
+            return stable_candidate_order(searcher, fields, docs, limit);
+        }
+        probe = probe.saturating_mul(2).min(max_probe);
+    }
+}
+
+fn stable_candidate_order(
+    searcher: &tantivy::Searcher,
+    fields: &TantivyFields,
+    docs: Vec<(f32, tantivy::DocAddress)>,
+    limit: usize,
+) -> Result<Vec<(f32, TantivyDocument)>> {
+    // Documents below the cutoff's tie band cannot be selected; skip reading them.
+    let survivors = match docs.get(limit.saturating_sub(1)) {
+        Some((boundary, _)) if docs.len() > limit => {
+            let floor = *boundary - candidate_score_tie_band(*boundary);
+            docs.iter().take_while(|(score, _)| *score >= floor).count()
+        }
+        _ => docs.len(),
+    };
+    let mut candidates = Vec::with_capacity(survivors);
+    let mut band_score = f32::NAN;
+    for (score, address) in docs.into_iter().take(survivors) {
+        // `docs` is in descending score order. Fold scores within the band of
+        // the band's first member onto that score so ULP differences cannot
+        // reorder equal evidence.
+        if band_score.is_nan() || score < band_score - candidate_score_tie_band(band_score) {
+            band_score = score;
+        }
+        let document = searcher.doc::<TantivyDocument>(address)?;
+        let key = (
+            document
+                .get_first(fields.file_path)
+                .and_then(|value| tantivy::schema::Value::as_str(&value))
+                .map(str::to_owned)
+                .unwrap_or_default(),
+            document
+                .get_first(fields.start_line)
+                .and_then(|value| tantivy::schema::Value::as_u64(&value))
+                .unwrap_or(u64::MAX),
+            document
+                .get_first(fields.end_line)
+                .and_then(|value| tantivy::schema::Value::as_u64(&value))
+                .unwrap_or(u64::MAX),
+            document
+                .get_first(fields.vector_key)
+                .and_then(|value| tantivy::schema::Value::as_u64(&value))
+                .unwrap_or(u64::MAX),
+        );
+        candidates.push((band_score, key, document));
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    candidates.truncate(limit);
+    Ok(candidates
+        .into_iter()
+        .map(|(score, _, document)| (score, document))
+        .collect())
 }
 
 struct EligibilityCollector<'a> {
@@ -6987,6 +7099,82 @@ mod tests {
             [7, 7, 0],
             "cancellation must stop advancing, including after scores fall below the heap threshold"
         );
+    }
+
+    #[test]
+    fn stable_top_docs_ignore_insertion_and_segment_order() {
+        let collect = |order: &[usize], segment_size: usize| {
+            let root = tempfile::tempdir().unwrap();
+            let (index, fields) = open_tantivy_index(root.path()).unwrap();
+            let mut writer = index
+                .writer_with_num_threads::<TantivyDocument>(1, 15_000_000)
+                .unwrap();
+            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+            for (position, ordinal) in order.iter().enumerate() {
+                let text = if ordinal % 7 == 0 {
+                    "needle needle stronger"
+                } else {
+                    "needle equal"
+                };
+                writer
+                    .add_document(tantivy::doc!(
+                        fields.file_path => format!("src/file_{ordinal:02}.rs"),
+                        fields.start_line => 1u64,
+                        fields.end_line => 3u64,
+                        fields.vector_key => *ordinal as u64,
+                        fields.text => text
+                    ))
+                    .unwrap();
+                if (position + 1) % segment_size == 0 {
+                    writer.commit().unwrap();
+                }
+            }
+            writer.commit().unwrap();
+            let searcher = index.reader().unwrap().searcher();
+            let query = TermQuery::new(
+                tantivy::Term::from_field_text(fields.text, "needle"),
+                IndexRecordOption::WithFreqs,
+            );
+            collect_stable_top_docs(
+                &searcher,
+                &query,
+                &fields,
+                &GlobPathQueryFilter::default(),
+                CandidateEligibility::default(),
+                10,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(_, document)| {
+                document
+                    .get_first(fields.file_path)
+                    .and_then(|value| tantivy::schema::Value::as_str(&value))
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+        };
+
+        let forward = (0..40).collect::<Vec<_>>();
+        let reversed = forward.iter().rev().copied().collect::<Vec<_>>();
+        let expected = [0, 7, 14, 21, 28, 35, 1, 2, 3, 4]
+            .map(|ordinal| format!("src/file_{ordinal:02}.rs"))
+            .to_vec();
+        // Equal-score candidates at the cutoff must not depend on document
+        // addresses, which vary with indexing threads and segment merges.
+        for (order, segment_size) in [
+            (&forward, 40),
+            (&reversed, 40),
+            (&reversed, 7),
+            (&forward, 3),
+        ] {
+            assert_eq!(
+                collect(order, segment_size),
+                expected,
+                "segment size {segment_size}"
+            );
+        }
     }
 
     #[test]

@@ -779,42 +779,78 @@ fn try_tree_sitter_chunk_source(
     lines: &[&str],
     trees: &mut SourceTrees,
 ) -> Option<ChunkedSource> {
-    try_tree_sitter_chunk_source_with_timeout(
+    try_tree_sitter_chunk_source_with_budget(
         rel_path,
         text,
         language,
         lines,
-        std::time::Duration::from_millis(100),
+        &ParseBudget::new(),
         trees,
     )
 }
 
-/// Parse budget measured in this thread's CPU time where the platform exposes
-/// it, wall clock elsewhere. A thread that is descheduled on a busy machine
-/// (or under a parallel test run) must not lose its parse to the budget and
-/// silently degrade to heuristic chunks; a pathological input still hits the
-/// budget because it burns CPU the whole time.
+/// Parser work allowed per file before chunking falls back to the heuristic
+/// splitter, in tree-sitter parser operations. The largest indexed sources in
+/// this repository need about 360k. Large real Rust, C++, and Python sources
+/// cost 0.4-0.5 µs per operation, so the budget spends about 250 ms at most.
+const TREE_SITTER_PARSE_OPERATION_BUDGET: u64 = 500_000;
+/// Tree-sitter's `OP_COUNT_PER_PARSER_CALLBACK_CHECK`: the progress callback
+/// fires once per this many parser operations, counted from zero per parse.
+const TREE_SITTER_OPERATIONS_PER_PROGRESS_CALLBACK: u64 = 100;
+/// Safety net for inputs whose parser operations are pathologically expensive,
+/// such as error recovery over noise (20-40 µs per operation). Ordinary code
+/// stays several times below this allowance even on a loaded machine.
+const TREE_SITTER_PARSE_CPU_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
+const TREE_SITTER_PARSE_CPU_PER_OPERATION: std::time::Duration =
+    std::time::Duration::from_micros(2);
+
+/// Per-file tree-sitter parse budget, shared by every grammar pass on a file.
+///
+/// The primary limit counts parser operations, so a given source always takes
+/// the same chunking path. A time budget made chunk boundaries depend on host
+/// load: files near the limit parsed on a quiet machine and fell back to
+/// heuristic chunks on a busy one. The CPU-time safety net (wall clock where
+/// the platform has no thread CPU clock) scales with the work done, so it only
+/// stops inputs whose operations are orders of magnitude slower than normal.
 struct ParseBudget {
-    limit: std::time::Duration,
+    max_operations: u64,
+    operations: std::cell::Cell<u64>,
     wall_start: std::time::Instant,
     cpu_start: Option<std::time::Duration>,
 }
 
 impl ParseBudget {
-    fn start(limit: std::time::Duration) -> Self {
+    fn new() -> Self {
+        Self::with_operation_limit(TREE_SITTER_PARSE_OPERATION_BUDGET)
+    }
+
+    fn with_operation_limit(max_operations: u64) -> Self {
         Self {
-            limit,
+            max_operations,
+            operations: std::cell::Cell::new(0),
             wall_start: std::time::Instant::now(),
             cpu_start: thread_cpu_time(),
         }
     }
 
-    fn exhausted(&self) -> bool {
+    /// Account for one progress callback and report whether to cancel.
+    fn record_progress(&self) -> bool {
+        let operations = self
+            .operations
+            .get()
+            .saturating_add(TREE_SITTER_OPERATIONS_PER_PROGRESS_CALLBACK);
+        self.operations.set(operations);
+        operations > self.max_operations || self.pathologically_slow(operations)
+    }
+
+    fn pathologically_slow(&self, operations: u64) -> bool {
         let elapsed = match (self.cpu_start, thread_cpu_time()) {
             (Some(start), Some(now)) => now.saturating_sub(start),
             _ => self.wall_start.elapsed(),
         };
-        elapsed >= self.limit
+        let per_operation = TREE_SITTER_PARSE_CPU_PER_OPERATION
+            .saturating_mul(u32::try_from(operations).unwrap_or(u32::MAX));
+        elapsed > TREE_SITTER_PARSE_CPU_FLOOR.saturating_add(per_operation)
     }
 }
 
@@ -842,20 +878,19 @@ pub(crate) fn parse_source_tree(
     language: &str,
 ) -> Option<tree_sitter::Tree> {
     let (grammar, _) = tree_sitter_query(rel_path, language, text.lines().count())?;
-    parse_source_tree_with_budget(text, &grammar, std::time::Duration::from_millis(100))
+    parse_source_tree_with_budget(text, &grammar, &ParseBudget::new())
 }
 
 fn parse_source_tree_with_budget(
     text: &str,
     grammar: &tree_sitter::Language,
-    parse_timeout: std::time::Duration,
+    budget: &ParseBudget,
 ) -> Option<tree_sitter::Tree> {
-    // The production caller uses a 100ms budget to prevent hangs on massive
-    // minified files. ParseOptions replaces timeout_micros in tree-sitter 0.26.
-    let budget = ParseBudget::start(parse_timeout);
+    // The budget prevents hangs on massive or pathological files.
+    // ParseOptions replaces timeout_micros in tree-sitter 0.26.
     let mut parse_cancelled = false;
     let mut cb = |_state: &tree_sitter::ParseState| {
-        if budget.exhausted() {
+        if budget.record_progress() {
             parse_cancelled = true;
             std::ops::ControlFlow::Break(())
         } else {
@@ -886,12 +921,12 @@ fn parse_source_tree_with_budget(
     (!parse_cancelled).then_some(tree)
 }
 
-fn try_tree_sitter_chunk_source_with_timeout(
+fn try_tree_sitter_chunk_source_with_budget(
     rel_path: &Path,
     text: &str,
     language: &str,
     lines: &[&str],
-    parse_timeout: std::time::Duration,
+    budget: &ParseBudget,
     trees: &mut SourceTrees,
 ) -> Option<ChunkedSource> {
     use streaming_iterator::StreamingIterator;
@@ -899,13 +934,12 @@ fn try_tree_sitter_chunk_source_with_timeout(
 
     let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
     let query = query?;
-    let objcxx_started = (language == "objc"
+    let objcxx = language == "objc"
         && rel_path
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("mm")))
-    .then(|| (std::time::Instant::now(), thread_cpu_time()));
-    let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mm"));
+    let tree = parse_source_tree_with_budget(text, &grammar, budget)?;
     // Keep the tree even if chunking falls back below; graph extraction reuses it.
     let tree = trees.tree.insert(tree);
     let mut cursor = QueryCursor::new();
@@ -928,7 +962,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
             }
             // Objective-C's C grammar can call C++ namespaces/classes functions.
             // In mixed files, only the C++ parse may supply C-like declarations.
-            if objcxx_started.is_some() && capture.node.kind() == "function_definition" {
+            if objcxx && capture.node.kind() == "function_definition" {
                 continue;
             }
 
@@ -991,14 +1025,10 @@ fn try_tree_sitter_chunk_source_with_timeout(
         return None;
     }
 
-    let mut ranges = if let Some((wall_start, cpu_start)) = objcxx_started {
-        let elapsed = cpu_start
-            .and_then(|start| thread_cpu_time().map(|now| now.saturating_sub(start)))
-            .unwrap_or_else(|| wall_start.elapsed());
-        // All grammar passes share the existing per-file budget. If any fails,
-        // retain the normal whole-file fallback, never a partial AST result.
-        let remaining = parse_timeout.checked_sub(elapsed)?;
-        objective_cpp_definition_ranges(rel_path, text, captured, remaining, &mut trees.cpp_tree)?
+    let mut ranges = if objcxx {
+        // All grammar passes share the per-file budget. If any fails, retain
+        // the normal whole-file fallback, never a partial AST result.
+        objective_cpp_definition_ranges(rel_path, text, captured, budget, &mut trees.cpp_tree)?
     } else {
         captured_definition_ranges(captured, language, text.as_bytes())
     };
@@ -1443,16 +1473,14 @@ fn objective_cpp_definition_ranges(
     rel_path: &Path,
     text: &str,
     mut objc_captured: Vec<(tree_sitter::Node<'_>, ChunkKind)>,
-    parse_timeout: std::time::Duration,
+    budget: &ParseBudget,
     cpp_tree: &mut Option<tree_sitter::Tree>,
 ) -> Option<Vec<CapturedRange>> {
     use streaming_iterator::StreamingIterator;
 
     let (grammar, query) = tree_sitter_query(rel_path, "cpp", text.lines().count())?;
     let query = query?;
-    let wall_start = std::time::Instant::now();
-    let cpu_start = thread_cpu_time();
-    let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
+    let tree = parse_source_tree_with_budget(text, &grammar, budget)?;
     // Copying a tree only bumps a reference count; the masked reparse below
     // must not replace the unmasked tree callers reuse.
     *cpp_tree = Some(tree.clone());
@@ -1515,11 +1543,7 @@ fn objective_cpp_definition_ranges(
                 }
             }
         }
-        let elapsed = cpu_start
-            .and_then(|start| thread_cpu_time().map(|now| now.saturating_sub(start)))
-            .unwrap_or_else(|| wall_start.elapsed());
-        let remaining = parse_timeout.checked_sub(elapsed)?;
-        parse_source_tree_with_budget(std::str::from_utf8(&masked).ok()?, &grammar, remaining)?
+        parse_source_tree_with_budget(std::str::from_utf8(&masked).ok()?, &grammar, budget)?
     };
 
     let mut cpp_captured = Vec::new();
@@ -4233,8 +4257,8 @@ pub fn unsupported_dynamic_include() {}
         let chunks = chunk_source(Path::new("massive.json"), &pathological_json);
         let elapsed = start.elapsed().as_millis();
 
-        // The budget is 100ms of CPU; the wall bound only has to prove the
-        // parse was cut short rather than hanging, even on a loaded runner.
+        // The operation budget cuts the parse short; the wall bound only has to
+        // prove it did not hang, even on a loaded runner.
         assert!(elapsed < 5000, "Chunking took too long: {}ms", elapsed);
         assert!(
             !chunks.is_empty(),
@@ -4612,12 +4636,12 @@ export function register(p: Plugin) {
         let lines: Vec<&str> = src.lines().collect();
 
         assert!(
-            try_tree_sitter_chunk_source_with_timeout(
+            try_tree_sitter_chunk_source_with_budget(
                 Path::new("defs.bzl"),
                 &src,
                 "starlark",
                 &lines,
-                std::time::Duration::ZERO,
+                &ParseBudget::with_operation_limit(0),
                 &mut SourceTrees::default(),
             )
             .is_none()
