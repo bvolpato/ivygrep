@@ -942,7 +942,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     // The guarded `*_distinct_hot` benches use 50K distinct seeded vectors; the
     // earlier `*_hot` names measured a fixture with only 97 distinct values, so
     // their history is not comparable. `vector_search_in_50k_distinct_hot`
-    // measures the sparse hash-tier graph and
+    // measures the hash-tier graph and
     // `neural_vector_search_in_50k_distinct_hot` the default-parameter graph
     // used by neural stores.
     let ann_fixture = OnceCell::new();
