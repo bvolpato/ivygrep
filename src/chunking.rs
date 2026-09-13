@@ -708,6 +708,21 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
         .map(|(start_line, _)| leading_doc_start(*start_line, &language, &lines))
         .collect::<Vec<_>>();
     let mut chunks = Vec::new();
+    // Imports, package names, and options before the first declaration.
+    if let Some(preamble_end) = chunk_starts.first().map(|start| start.saturating_sub(1))
+        && preamble_end > 0
+    {
+        push_bounded_structural_chunks(
+            &mut chunks,
+            rel_path,
+            &lines,
+            (1, preamble_end),
+            &language,
+            &ChunkKind::Module,
+            lines[0].trim(),
+            None,
+        );
+    }
     for (idx, (definition_start, kind)) in signatures.iter().enumerate() {
         let start = chunk_starts[idx];
         let end = chunk_starts
@@ -1173,6 +1188,30 @@ fn try_tree_sitter_chunk_source_with_timeout(
     })
 }
 
+/// Stored chunk text starts with a path comment, optionally followed by a
+/// continuation or documentation-include line, then a blank line. Previews
+/// must drop all of it so the first line matches `start_line`.
+pub(crate) fn strip_chunk_header<'a>(text: &'a str, rel_path: &Path) -> &'a str {
+    let path = rel_path.to_string_lossy();
+    let Some(rest) = text
+        .strip_prefix("// ")
+        .and_then(|rest| rest.strip_prefix(path.as_ref()))
+        .and_then(|rest| rest.strip_prefix('\n'))
+    else {
+        return text;
+    };
+    let rest = match rest.split_once('\n') {
+        Some((line, body))
+            if line.starts_with("// continuation of ")
+                || line.starts_with("// Rust documentation included from ") =>
+        {
+            body
+        }
+        _ => rest,
+    };
+    rest.strip_prefix('\n').unwrap_or(text)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_bounded_structural_chunks(
     chunks: &mut Vec<Chunk>,
@@ -1616,9 +1655,16 @@ fn captured_definition_ranges(
         {
             owners.push((node.end_byte(), owner));
         }
+        // Python decorators, including multi-line calls, belong to the definition.
+        let start_row = node
+            .parent()
+            .filter(|parent| language == "python" && parent.kind() == "decorated_definition")
+            .map_or(node.start_position().row, |parent| {
+                parent.start_position().row
+            });
         // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
         ranges.push((
-            node.start_position().row + 1,
+            start_row + 1,
             node.end_position().row + 1,
             kind,
             definitions,
@@ -1745,6 +1791,13 @@ fn parsed_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> Pa
             .filter(|name| name.kind() == "identifier")
             .map(text)
             .unwrap_or(ParsedName::Unknown),
+        // `export const Button = () => ...` binds a function to a module name.
+        "lexical_declaration" if matches!(language, "javascript" | "typescript") => {
+            first_named_child(node, Some("variable_declarator"))
+                .and_then(|declarator| declarator.child_by_field_name("name"))
+                .map(text)
+                .unwrap_or(ParsedName::Unknown)
+        }
         "variable_declaration" if language == "zig" => first_named_child(node, Some("identifier"))
             .map(text)
             .unwrap_or(ParsedName::Unknown),
@@ -1936,6 +1989,16 @@ thread_local! {
         std::cell::RefCell::new(tree_sitter::Parser::new());
 }
 
+/// Module-level `const name = () => ...` and `export const name = function ...`
+/// bindings are the usual way JS/TS code declares components and helpers.
+/// Nested bindings stay inside their enclosing function's chunk.
+macro_rules! module_function_binding_query {
+    () => {
+        "(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)])) @fn) \
+         (export_statement declaration: (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)])) @fn)"
+    };
+}
+
 /// Compiled queries are immutable and grammar-specific, so compile each one
 /// once rather than once per file on large initial indexes. Source inspection
 /// can still use the grammar when a chunk-capture query is unavailable.
@@ -1961,7 +2024,7 @@ fn tree_sitter_query(
         "rust" => cached_query!(
             RUST_QUERY,
             tree_sitter_rust::LANGUAGE,
-            "(function_item) @fn (impl_item) @class (trait_item) @class (inner_attribute_item) @doc_include (attribute_item) @doc_include"
+            "(function_item) @fn (macro_definition) @fn (impl_item) @class (trait_item) @class (inner_attribute_item) @doc_include (attribute_item) @doc_include"
         ),
         "python" => cached_query!(
             PYTHON_QUERY,
@@ -1976,7 +2039,10 @@ fn tree_sitter_query(
         "javascript" => cached_query!(
             JAVASCRIPT_QUERY,
             tree_sitter_javascript::LANGUAGE,
-            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class"
+            concat!(
+                "(function_declaration) @fn (method_definition) @fn (class_declaration) @class ",
+                module_function_binding_query!()
+            )
         ),
         "typescript"
             if rel_path
@@ -1987,18 +2053,24 @@ fn tree_sitter_query(
             cached_query!(
                 TSX_QUERY,
                 tree_sitter_typescript::LANGUAGE_TSX,
-                "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (abstract_class_declaration) @class (interface_declaration) @class (type_alias_declaration) @class (enum_declaration) @class"
+                concat!(
+                    "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (abstract_class_declaration) @class (interface_declaration) @class (type_alias_declaration) @class (enum_declaration) @class ",
+                    module_function_binding_query!()
+                )
             )
         }
         "typescript" => cached_query!(
             TYPESCRIPT_QUERY,
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
-            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (abstract_class_declaration) @class (interface_declaration) @class (type_alias_declaration) @class (enum_declaration) @class"
+            concat!(
+                "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (abstract_class_declaration) @class (interface_declaration) @class (type_alias_declaration) @class (enum_declaration) @class ",
+                module_function_binding_query!()
+            )
         ),
         "java" => cached_query!(
             JAVA_QUERY,
             tree_sitter_java::LANGUAGE,
-            "(class_declaration) @class (interface_declaration) @class (enum_declaration) @class (annotation_type_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
+            "(class_declaration) @class (interface_declaration) @class (enum_declaration) @class (record_declaration) @class (annotation_type_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
         ),
         "csharp" => cached_query!(
             CSHARP_QUERY,
@@ -2846,6 +2918,115 @@ mod tests {
     }
 
     #[test]
+    fn parser_resolves_records_module_function_bindings_and_macros() {
+        assert_eq!(
+            parsed_definitions(
+                "src/Point.java",
+                "package demo;\npublic record PointRecord(int x, int y) {}\n",
+            ),
+            pairs(&[("PointRecord", None)])
+        );
+        for path in ["web/Button.js", "web/Button.ts", "web/Button.tsx"] {
+            assert_eq!(
+                parsed_definitions(
+                    path,
+                    "import x from \"x\";\nexport const FancyButton = () => {\n  const nested = () => 1;\n  return nested();\n};\nconst helper = function () {\n  return 2;\n};\nconst LIMIT = 3;\n",
+                ),
+                pairs(&[("FancyButton", None), ("helper", None)]),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            parsed_definitions(
+                "src/macros.rs",
+                "macro_rules! zebra_macro {\n    () => {};\n}\n"
+            ),
+            pairs(&[("zebra_macro", None)])
+        );
+    }
+
+    #[test]
+    fn fallback_chunks_keep_preamble_before_first_declaration() {
+        let source = "syntax = \"proto3\";\npackage acme.billing.v1;\noption go_package = \"github.com/acme/billing\";\n\nmessage User {\n  string id = 1;\n}\n";
+        let chunks = chunk_source(Path::new("proto/api.proto"), source);
+        let preamble = chunks
+            .iter()
+            .find(|chunk| chunk.start_line == 1)
+            .expect("preamble chunk");
+        assert!(preamble.text.contains("go_package"), "{chunks:?}");
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("message User"))
+        );
+    }
+
+    #[test]
+    fn python_multiline_decorators_stay_with_their_definition() {
+        let source = "import router\n\n\n@router.get(\n    \"/users/{id}\",\n    response_model=User,\n)\ndef get_user():\n    return 1\n\n\n@dataclass(\n    frozen=True,\n)\nclass Point:\n    x: int\n";
+        let chunks = chunk_source(Path::new("app/users.py"), source);
+        let function = chunks
+            .iter()
+            .find(|chunk| chunk.text.contains("def get_user"))
+            .expect("function chunk");
+        assert_eq!(function.start_line, 4, "{chunks:?}");
+        assert!(function.text.contains("response_model=User"));
+        let class = chunks
+            .iter()
+            .find(|chunk| chunk.text.contains("class Point"))
+            .expect("class chunk");
+        assert_eq!(class.start_line, 12, "{chunks:?}");
+        assert!(class.text.contains("frozen=True"));
+    }
+
+    #[test]
+    fn strip_chunk_header_removes_every_stored_header_form() {
+        let path = Path::new("src/big.rs");
+        assert_eq!(
+            strip_chunk_header("// src/big.rs\n\nfn a() {}", path),
+            "fn a() {}"
+        );
+        assert_eq!(
+            strip_chunk_header(
+                "// src/big.rs\n// continuation of pub fn a() {\n\n    b();",
+                path
+            ),
+            "    b();"
+        );
+        assert_eq!(
+            strip_chunk_header(
+                "// src/big.rs\n// Rust documentation included from README.md\n\n# Title",
+                path
+            ),
+            "# Title"
+        );
+        assert_eq!(
+            strip_chunk_header("// other.rs\n\nfn a() {}", path),
+            "// other.rs\n\nfn a() {}"
+        );
+        assert_eq!(strip_chunk_header("fn a() {}", path), "fn a() {}");
+
+        let body = (0..400)
+            .map(|index| format!("    let value_{index} = {index};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!("pub fn giant_function() {{\n{body}\n}}\n");
+        let source_lines = source.lines().collect::<Vec<_>>();
+        let chunks = chunk_source(path, &source);
+        assert!(chunks.len() > 1, "expected continuation windows");
+        for chunk in chunks {
+            let preview = strip_chunk_header(&chunk.text, path);
+            assert_eq!(
+                preview.lines().collect::<Vec<_>>(),
+                source_lines[chunk.start_line - 1..chunk.end_line],
+                "{}-{}",
+                chunk.start_line,
+                chunk.end_line
+            );
+        }
+    }
+
+    #[test]
     fn all_supported_tree_sitter_capture_queries_compile() {
         let cases = [
             ("file.rs", "rust"),
@@ -3332,9 +3513,23 @@ pub fn calculate_total(amount: f64) -> f64 {
 
         let chunks = chunk_source(Path::new("src/reconcile.nim"), &source);
         assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| chunk.end_line - chunk.start_line
-            < MAX_STRUCTURAL_CHUNK_LINES
-            && chunk.text.contains("reconcileAll")));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.end_line - chunk.start_line < MAX_STRUCTURAL_CHUNK_LINES)
+        );
+        // The module comment above the first declaration is indexed separately.
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("Reconcile every record safely"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.kind != ChunkKind::Module)
+                .all(|chunk| chunk.text.contains("reconcileAll"))
+        );
         assert!(
             chunks
                 .iter()
@@ -3372,9 +3567,15 @@ pub fn calculate_total(amount: f64) -> f64 {
 
         assert!(chunks.len() >= 60);
         assert!(
-            chunks[0].text.contains("generated purpose 0"),
-            "first generated chunk should keep its own doc comment: {:?}",
+            chunks[0].kind == ChunkKind::Module
+                && chunks[0].text.contains("Deterministic generated module"),
+            "module docs before the first item should stay indexed: {:?}",
             chunks[0].text
+        );
+        assert!(
+            chunks[1].text.contains("generated purpose 0"),
+            "first generated chunk should keep its own doc comment: {:?}",
+            chunks[1].text
         );
         assert!(
             chunks

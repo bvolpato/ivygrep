@@ -30,6 +30,10 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Fallback-chunked languages index lines before the first declaration, such as Protobuf `package` and `option` lines. Python multi-line decorators stay in their definition's chunk.
+- Java records, module-level JavaScript and TypeScript `const name = () => ...` bindings, and Rust `macro_rules!` macros produce symbol definitions.
+- Symbol, caller, and context previews drop the stored chunk header, including continuation headers, so the first preview line matches the reported start line.
+- Index format v30 rebuilds existing indexes once to pick up the chunking and symbol changes above.
 - Literal and regex searches match files containing invalid UTF-8, as indexing already did, and regex context expansion and previews decode those files lossily instead of dropping them.
 - Literal search folds case for all Unicode letters, one character at a time, so word-final Greek sigma and other context-sensitive letters still match inside longer words.
 - Regex coverage caching remembers workspaces with too many unindexed files, so later regex queries skip the repeated walk.

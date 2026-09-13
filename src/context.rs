@@ -498,12 +498,7 @@ fn context_seed_hit(root: &Path, seed: &ContextSeed, task: &str) -> Result<Optio
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
     let chunk = chunks.remove(0);
-    let path_header = format!("// {}\n\n", seed.file_path.display());
-    let preview = chunk
-        .text
-        .strip_prefix(&path_header)
-        .unwrap_or(&chunk.text)
-        .to_string();
+    let preview = crate::chunking::strip_chunk_header(&chunk.text, &seed.file_path).to_string();
     Ok(Some(SearchHit {
         file_path: seed.file_path.clone(),
         start_line: chunk.start_line,
@@ -792,8 +787,8 @@ fn focus_hit_on_symbol(
 }
 
 fn strip_path_header(hit: &mut SearchHit) {
-    let path_header = format!("// {}\n\n", hit.file_path.display());
-    if let Some(preview) = hit.preview.strip_prefix(&path_header) {
+    let preview = crate::chunking::strip_chunk_header(&hit.preview, &hit.file_path);
+    if preview.len() != hit.preview.len() {
         hit.preview = preview.to_string();
     }
 }

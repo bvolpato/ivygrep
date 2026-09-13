@@ -573,12 +573,8 @@ impl SearchContext {
                 .then_with(|| left.start_line.cmp(&right.start_line))
         });
         let chunk = chunks.remove(0);
-        let path_header = format!("// {}\n\n", chunk.file_path.display());
-        let preview = chunk
-            .text
-            .strip_prefix(&path_header)
-            .unwrap_or(&chunk.text)
-            .to_string();
+        let preview =
+            crate::chunking::strip_chunk_header(&chunk.text, &chunk.file_path).to_string();
         Ok(Some(SearchHit {
             file_path: chunk.file_path,
             start_line: chunk.start_line,
