@@ -100,7 +100,7 @@ jobs:
           python3 scripts/benchmark_guard.py \
             --baseline-ref "$BENCHMARK_BASE_REF" \
             --bench-target indexer_bench \
-            --bench-name critical_journeys/vector_search_in_50k_distinct_hot \
+            --bench-name critical_journeys/hash_vector_search_in_50k_distinct_hot \
             --threshold 1.20 \
             --output "$PAIRED_BENCHMARK_DIR/vector-search-hot.json"
           python3 scripts/benchmark_guard.py \

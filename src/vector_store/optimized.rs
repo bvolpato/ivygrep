@@ -12,8 +12,8 @@ use usearch::{Index, IndexOptions, MetricKind};
 
 use super::{ScalarKind, VectorMatch, VectorTier, top_vector_matches};
 
-const HASH_CONNECTIVITY: usize = 2;
-const HASH_EXPANSION_ADD: usize = 8;
+const HASH_CONNECTIVITY: usize = 8;
+const HASH_EXPANSION_ADD: usize = 32;
 const HASH_EXPANSION_SEARCH: usize = 64;
 const SERIALIZED_DIMENSIONS_BYTES: u64 = 8;
 const SERIALIZED_HEADER_BYTES: u64 = 64;
@@ -158,9 +158,11 @@ fn create_index(dimensions: usize, quantization: ScalarKind, tier: VectorTier) -
     };
 
     // Hash vectors provide first results before neural enhancement. A smaller
-    // graph reduces background build cost; neural vectors retain quality
-    // defaults. Select by tier only: the default neural profile shares the
-    // hash store's 256-dimensional F16 shape, so shape cannot identify tier.
+    // graph bounds background build cost, but connectivity 2 returned
+    // near-random neighbors at 50K+ vectors, so keep enough edges for useful
+    // recall. Neural vectors retain quality defaults. Select by tier only: the
+    // default neural profile shares the hash store's 256-dimensional F16
+    // shape, so shape cannot identify tier.
     if tier == VectorTier::Hash {
         options.connectivity = HASH_CONNECTIVITY;
         options.expansion_add = HASH_EXPANSION_ADD;
@@ -1354,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_tier_uses_sparse_graph_and_neural_tier_keeps_defaults_for_same_shape() {
+    fn hash_tier_uses_its_graph_profile_and_neural_tier_keeps_defaults_for_same_shape() {
         let tmp = tempfile::tempdir().unwrap();
         // The default neural profile shares the hash store's 256-d F16 shape.
         let hash = VectorStore::open(

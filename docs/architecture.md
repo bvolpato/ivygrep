@@ -193,10 +193,10 @@ returns a contextual error instead of being treated as source text.
 Tantivy is the lexical candidate store. SQLite remains authoritative for rich
 chunk metadata and graph relationships. USearch stores F16 vectors and validates
 headers, dimensions, and file bounds before native loading. Callers open every
-vector store with an explicit `VectorTier`: the hash tier uses a sparse HNSW
-graph for cheap background builds, and the neural tier keeps USearch quality
-defaults. Vector shape cannot select the tier because the default neural profile
-shares the hash store's 256-dimensional F16 layout.
+vector store with an explicit `VectorTier`: the hash tier uses a smaller HNSW
+graph to bound background build cost, and the neural tier keeps USearch quality
+defaults. Vector shape cannot select the tier because the default neural
+profile shares the hash store's 256-dimensional F16 layout.
 
 Neural metadata is optional for literal and hash retrieval. Unreadable identity
 or profile metadata is reported but does not prevent those modes from loading
