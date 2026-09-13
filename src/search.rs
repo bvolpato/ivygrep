@@ -794,7 +794,11 @@ fn fold_literal_case(text: &str) -> String {
     if text.is_ascii() {
         text.to_ascii_lowercase()
     } else {
-        text.chars().flat_map(char::to_lowercase).collect()
+        // Unicode simple case folding also maps word-final sigma to sigma.
+        text.chars()
+            .flat_map(char::to_lowercase)
+            .map(|character| if character == 'ς' { 'σ' } else { character })
+            .collect()
     }
 }
 
@@ -6405,7 +6409,7 @@ mod tests {
         assert_eq!(hits[0].file_path, PathBuf::from("latin1.py"));
         assert!(hits[0].preview.contains("rotate_latin1_secret"));
 
-        for query in ["café_marker", "ΛΟΓΟΣ", "λογοσ"] {
+        for query in ["café_marker", "ΛΟΓΟΣ", "λογοσ", "λογος"] {
             let hits = literal_search(&workspace, query, &SearchOptions::default()).unwrap();
             assert_eq!(hits.len(), 1, "{query}");
             assert_eq!(hits[0].file_path, PathBuf::from("unicode.rs"), "{query}");
