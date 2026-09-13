@@ -40,7 +40,7 @@ cuda = ["neural", "candle-core/cuda", "candle_embed/cuda"]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 colored = "3.1"
-dirs = "6.0"
+dirs = "7.0"
 fs2 = "0.4.3"
 grep-matcher = "0.1"
 grep-regex = "0.1"
@@ -105,7 +105,7 @@ tree-sitter-elixir = "0.3.5"
 tree-sitter-zig = "1.1.2"
 streaming-iterator = "0.1.9"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-zstd = "0.13"
+zstd = "0.14"
 candle_embed = { package = "ivygrep-candle-embed", path = "vendor/candle_embed", version = "=0.1.4-ivygrep.2", default-features = false, optional = true }
 candle-core = { version = "0.11.0", optional = true }
 hf-hub = { package = "ivygrep-hf-hub", path = "vendor/hf-hub", version = "=0.3.2-ivygrep.2", optional = true }
