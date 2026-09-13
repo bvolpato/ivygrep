@@ -184,12 +184,18 @@ def render_html(report: dict) -> str:
         for task, values in integrated["tasks"].items()
     )
     gate = "PASS" if integrated["gate"]["passed"] else "FAIL"
+    version = str(report.get("binary", {}).get("version", "")).removeprefix("ivygrep ").strip()
+    evidence_label = (
+        f"Historical regression evidence (v{version})" if version else "Historical regression evidence"
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Public learned reranker - ivygrep</title>
+  <meta name="description" content="Historical learned-reranker regression results on public-core CoIR tasks.">
+  <link rel="canonical" href="https://bvolpato.github.io/ivygrep/benchmarks/public-reranker.html">
   <link rel="stylesheet" href="../style.css">
   <link rel="stylesheet" href="report.css">
   <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
@@ -197,7 +203,7 @@ def render_html(report: dict) -> str:
 <body class="report-page">
   <main class="report-shell relative z-10">
     <nav class="report-nav"><a class="report-brand" href="index.html"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a><div class="report-links"><a href="index.html">Reports</a><a href="public-reranker-results.json">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep">GitHub</a></div></nav>
-    <section class="report-hero"><div class="report-eyebrow">Held-out public evidence</div><h1>Bounded Learned Reranker</h1><p>A 41-feature linear model trained from pinned public traces, embedded in the binary with a deterministic fallback.</p></section>
+    <section class="report-hero"><div class="report-eyebrow">{escape(evidence_label)}</div><h1>Bounded Learned Reranker</h1><p>A 41-feature linear model trained from pinned public traces, embedded in the binary with a deterministic fallback.</p></section>
     <section class="report-grid">
       <article class="report-card"><h2>nDCG@10</h2><div class="metric-value">{percent(metrics['ndcg_at_10']['relative_delta'])}</div><p>{metrics['ndcg_at_10']['deterministic']:.4f} -> {metrics['ndcg_at_10']['learned']:.4f}</p></article>
       <article class="report-card"><h2>MRR@10</h2><div class="metric-value">{percent(metrics['mrr_at_10']['relative_delta'])}</div><p>{metrics['mrr_at_10']['deterministic']:.4f} -> {metrics['mrr_at_10']['learned']:.4f}</p></article>

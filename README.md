@@ -41,7 +41,7 @@ Abridged output:
 
 ```text
 # ivygrep context
-Budget: 7,642 / 8,000 estimated tokens
+Budget: 7642 / 8000 estimated tokens
 Coverage: 7 files | 2 primary | 1 definitions | 1 dependencies | 0 dependents | 2 callers | 0 references | 1 tests | 0 config | 0 docs
 Candidates: 31 retrieved | 14 selected
 ## Evidence
@@ -74,7 +74,7 @@ winget install --id BrunoVolpato.ivygrep --exact
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
+Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. GPU builds only speed up transformer profiles (`IVYGREP_MODEL_PROFILE=code|code-hq|general`); the default `static-retrieval-v1` profile runs on CPU. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
 
 Build from source on macOS or Linux:
 
@@ -119,7 +119,7 @@ ig --add ~/notes --wait-for-enhancement
 ig -n 20 "what did we decide about cache invalidation?" ~/notes
 ```
 
-Public [MemoryQuest results](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html): 74.9% recall@20 at 87.63 ms warm p95. Benchmark measures retrieval only; answer accuracy is outside scope.
+Public [MemoryQuest results](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html) (v1.2.7): 74.9% recall@20 at 87.63 ms warm p95. Benchmark measures retrieval only; answer accuracy is outside scope.
 
 ## Connect coding agents
 
@@ -190,7 +190,7 @@ reuse base index and store only divergent chunks and tombstones. Partial
 workspace failures return warnings with valid hits; complete failure errors.
 
 ivygrep supports 45 language and file types. Twenty-four use Tree-sitter AST chunking:
-Rust, Python, Go, JavaScript, TypeScript, Java, C/C++, C#, Kotlin, Scala, PHP,
+Rust, Python, Go, JavaScript, TypeScript, Java, C, C++, C#, Kotlin, Scala, PHP,
 Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, and Starlark.
 
 Read [architecture](docs/architecture.md) for storage, commit order, retrieval,
@@ -200,7 +200,7 @@ worktrees, protocols, security boundaries, and module ownership.
 
 On the deterministic synthetic one-million-chunk CC0 corpus, v1.2.7 median hash-only warm CLI p95 is 6.19 ms, controlled indexing reaches 150,576 chunks/s, and the final index is 0.42 GiB across three sequential trials. This is a scale and footprint measurement, not semantic quality or agent-task performance. Hardware, repository shape, index state, and load affect absolute results.
 
-[Current-release evidence](https://bvolpato.github.io/ivygrep/benchmarks/public-million-current.json) · [Million-chunk methodology and historical paired study](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
+[Latest measured release (v1.2.7)](https://bvolpato.github.io/ivygrep/benchmarks/public-million-current.json) · [Million-chunk methodology and historical paired study](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
 
 ## Local and private
 
@@ -212,6 +212,37 @@ populated. Use `--hash`, `./build.sh --hash-only`, or
 `ig --web` binds to loopback by default. A non-loopback listener prints an authenticated URL but still uses plain HTTP. Use a trusted network, Tailscale, or an encrypted tunnel, and never expose the listener directly to the internet. File contents, including non-ignored dotfiles, can appear in the local index and snippets.
 
 Report vulnerabilities through a [private security advisory](SECURITY.md). Release archives include checksums, SBOMs, and provenance.
+
+## Data and configuration
+
+Indexes and daemon state live in `~/.local/share/ivygrep` on every OS (under `%USERPROFILE%` on Windows).
+`IVYGREP_HOME` overrides that path; otherwise a non-empty `XDG_DATA_HOME` selects `$XDG_DATA_HOME/ivygrep`.
+Model assets use the Hugging Face cache (`HF_HOME`, default `~/.cache/huggingface`), which other tools may share.
+
+There is no configuration file. Use CLI flags and the [environment variables](docs/architecture.md#environment-variables).
+
+```bash
+ig --status          # tracked workspaces, index health, vector coverage, disk usage
+ig --rm ~/notes      # remove a saved index; defaults to current directory
+```
+
+## Troubleshooting, upgrade, and uninstall
+
+```bash
+ig --doctor          # diagnose index, daemon, watcher, and model health
+ig --doctor --fix    # repair a broken or stale index
+ig --add . --force   # rebuild current workspace index from scratch
+ig hardware          # inspect detected hardware and matching build
+```
+
+Upgrade through the channel you installed from: `brew upgrade ivygrep`,
+`winget upgrade --id BrunoVolpato.ivygrep --exact`, or rerun the installer. The
+next command restarts a daemon from an older build; index format changes rebuild
+existing indexes once on first use.
+
+To uninstall, run `brew uninstall ivygrep` or `winget uninstall --id BrunoVolpato.ivygrep --exact`,
+or delete `ig` from the installer directory (`~/.local/bin` or `%LOCALAPPDATA%\ivygrep\bin` unless
+`IVYGREP_INSTALL_DIR` was set). Then stop any running `ig --daemon` process and delete the data directory.
 
 ## Contribute
 

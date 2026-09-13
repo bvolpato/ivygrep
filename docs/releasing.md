@@ -19,7 +19,7 @@ PR is not a published release.
    uv run scripts/run_current_head_benchmark.py \
      --binary target/release/ig --require-neural
    uv run scripts/render_evidence_dashboard.py
-   uv run scripts/check_release_readiness.py --tag v1.2.14
+   uv run scripts/check_release_readiness.py --tag vX.Y.Z
    ```
 
 4. Commit the evidence, rerun checks, and inspect the final diff. Do not copy
@@ -44,10 +44,15 @@ flowchart LR
 ```
 
 GitHub Release creation requires both archive acceptance and the public-core
-gate. The same reusable matrix runs scheduled/manual public evaluations; tag
-pushes no longer launch a second independent copy that can fail after release
-publication. The passing matrix JSON and HTML ship with the initial release
-assets. Missing evidence prevents publication.
+gate. Tag pushes run the reusable public matrix once, as a gate before
+publication; scheduled and manual evaluations use the same matrix. The passing
+matrix JSON and HTML ship with the initial release assets. Missing evidence
+prevents publication.
+
+After the GitHub Release exists, `release.yml` publishes MCP Registry metadata
+(`server.json`, through GitHub OIDC) and updates the formula in
+`bvolpato/homebrew-tap` (requires the `HOMEBREW_TAP_TOKEN` secret). The tag
+workflow does not publish WinGet manifests or crates.io packages.
 
 If a gate fails, diagnose and fix it without weakening the thresholds or
 marking a skipped backend as tested. Do not move an already published tag to
@@ -56,12 +61,12 @@ existing release, but it is not the normal publication gate.
 
 ## Package and hardware scope
 
-`publish-crates.yml` separately checks exact tag identity and publishes vendored
-forks in dependency order. The new `ivygrep-usearch` fork from #322 must be
-published before the root crate version that requires it. GitHub release
-archives do not prove that crates.io publication succeeded.
+`publish-crates.yml` is a manual workflow. It checks exact tag identity and
+publishes vendored forks in dependency order. Publish any new or bumped fork
+before the root crate version that requires it. GitHub release archives do not
+prove that crates.io publication succeeded.
 
-CUDA compilation or CPU fallback is not GPU execution evidence. This campaign
-has no CUDA device/runner result; do not advertise one. The strict Metal job
-must name the actual Metal backend. QEMU/musl, native Windows, and native ARM
-checks should refer to the final source, not an earlier release binary.
+CUDA compilation or CPU fallback is not GPU execution evidence. Do not advertise
+CUDA execution without a result from a CUDA device or runner. The strict Metal
+job must name the actual Metal backend. QEMU/musl, native Windows, and native
+ARM checks should refer to the final source, not an earlier release binary.

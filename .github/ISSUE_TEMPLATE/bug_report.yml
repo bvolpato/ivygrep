@@ -14,7 +14,7 @@ body:
     attributes:
       label: ivygrep version
       description: Run `ig --version` and paste its output.
-      placeholder: ivygrep 1.1.19
+      placeholder: ivygrep 1.2.14
     validations:
       required: true
 
@@ -24,6 +24,7 @@ body:
       label: Installation method
       options:
         - Homebrew
+        - WinGet
         - Shell installer
         - PowerShell installer
         - GitHub release archive

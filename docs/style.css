@@ -337,7 +337,7 @@ h1 {
     margin-bottom: 1rem;
 }
 
-.section-spacing { padding: 5rem 0; scroll-margin-top: 90px; }
+.section-spacing { padding-block: 5rem; scroll-margin-top: 90px; }
 
 .section-title {
     font-family: var(--font-heading);
@@ -556,7 +556,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
     padding: 0.6rem 0.75rem; padding-right: 3.5rem;
     border-radius: 6px; font-family: var(--font-code);
     font-size: 0.78rem; color: rgba(255,255,255,0.8);
-    word-break: break-all; line-height: 1.5;
+    overflow-wrap: anywhere; line-height: 1.5;
 }
 .agent-cmd code { font-family: inherit; font-size: inherit; color: inherit; background: none; padding: 0; }
 
@@ -610,6 +610,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 .install-card { }
 .install-title { margin-bottom: 1rem; font-size: 1.1rem; font-weight: 700; }
 .install-code { position: relative; }
+.install-code .code-block { padding-right: 4.5rem; }
 
 /* ─── Quick Start ─── */
 .quickstart-panel { padding: 2rem; }

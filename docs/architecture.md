@@ -232,6 +232,15 @@ is trusted as a fallback, even when the source snapshot itself is unchanged.
 Direct indexed-source APIs reject incompatible local or inherited base formats
 until that rebuild completes.
 
+Format v28 rebuilds existing indexes once so Rust `crate::` and library-name
+imports resolve within the owning Cargo package and target, replacing stale
+cross-package dependency edges.
+
+Format v29 rebuilds once more to retain resolved import specifications.
+Incremental runs use them to refresh unchanged importers when a newly added file
+takes precedence over an existing target, and Python package initializers take
+precedence over same-named modules.
+
 ## Search pipeline
 
 ### Workspace selection
@@ -477,8 +486,10 @@ active jobs, stalled work, watcher health, and compaction recommendations.
 
 Daemon uses a versioned JSON-line request envelope. Protocol version 6 added
 request IDs and explicit cancellation for hybrid, literal, and regex searches;
-version 7 adds the fire-and-forget `StartIndex` request (answered with
-`IndexStarted`) and the `index_in_flight` runtime-status field. Cancellation
+version 7 added the fire-and-forget `StartIndex` request (answered with
+`IndexStarted`) and the `index_in_flight` runtime-status field; version 8 adds
+`EnsureWatcher`, which re-registers missing watchers instead of restarting the
+daemon. `DAEMON_PROTOCOL_VERSION` in `src/protocol.rs` holds the current value. Cancellation
 also removes queued searches from daemon CPU backpressure. Existing requests
 cover version/status, indexing, Web startup, workspace removal, watcher
 recovery (`EnsureWatcher`), restart, progress, and structured errors. A client that reaches a daemon speaking an
@@ -549,6 +560,34 @@ digest form the neural identity. A mismatch prevents incompatible vectors from
 being reused. Model-backed profiles download pinned assets on first use unless
 the Hugging Face cache is already populated.
 
+## Environment variables
+
+ivygrep has no configuration file. Flags control per-command behavior; these
+variables tune runtime defaults. "Set" means present with any value, including
+`0`. Invalid numeric values fall back to the default.
+
+| Variable | Effect |
+| --- | --- |
+| `IVYGREP_HOME` | Data directory for indexes. Default `~/.local/share/ivygrep` on every OS, or `$XDG_DATA_HOME/ivygrep` when `XDG_DATA_HOME` is set. Empty values are ignored. |
+| `IVYGREP_MODEL_PROFILE` | Neural profile: `static-retrieval-v1` (default, 256 dimensions, CPU), `potion-code-16m-v1`, or transformer profiles `general`, `code`, and `code-hq` (384 dimensions). CUDA and Metal builds accelerate only transformer profiles. Unknown values use the default. Vectors from another profile are not reused. |
+| `IVYGREP_RERANKER` | `learned` (default; also `auto`) or `deterministic` (also `disabled`, `off`). Unknown values report an error in status and use `learned`. |
+| `IVYGREP_SEARCH_DEADLINE_SECS` | Server-side daemon search deadline. Default `60`; `0` disables it. Hits gathered before the deadline return with a warning. |
+| `IVYGREP_MCP_INDEX_WAIT_SECS` | Time an MCP call waits for a first index before returning `status: indexing`. Default `20`; `0` returns immediately. |
+| `IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT` | Set to disable background hash and neural enhancement. `--wait-for-enhancement` fails. |
+| `IVYGREP_NO_AUTOSPAWN` | Set to prevent daemon auto-start. Also disables background enhancement, so `--wait-for-enhancement` fails. |
+| `IVYGREP_INDEX_THREADS` | Indexing worker threads. Default: physical cores, capped at logical cores. |
+| `IVYGREP_NEURAL_THREADS` | Neural inference threads. Default: logical cores capped at 8 for foreground work; a quarter of logical cores (1 to 8) for background work. Maximum 32. |
+| `IVYGREP_NEURAL_BATCH_SIZE` | Chunks per background neural enhancement batch. Default depends on backend (static, CPU, Metal, or CUDA); maximum 4096. |
+| `IVYGREP_NEURAL_MEMORY_MB` | Memory budget that sizes transformer worker pools. Default: a quarter of available memory. |
+| `IVYGREP_DISABLE_QUERY_CACHE` | Set to disable the daemon query-result cache. |
+| `IVYGREP_ENHANCE_ON_BATTERY` | `1`, `true`, `yes`, or `on` keeps neural enhancement running on battery power (macOS). The hash tier never pauses for battery. |
+| `IVYGREP_ENHANCE_MAX_LOAD_RATIO` | Load-average multiple of CPU count that pauses background enhancement on macOS and Linux. Default `2.0`; `0` or below disables the check. |
+| `IVYGREP_WEB_EDITOR`, `IVYGREP_EDITOR` | Command the Web UI uses to open files, checked in that order before `EDITOR`, `VISUAL` (terminal editors skipped), and detected GUI editors. The TUI uses `EDITOR` or `VISUAL`. |
+| `IVYGREP_NO_BROWSER` | Set to stop `ig --web` from opening a browser. |
+
+Installers also read `IVYGREP_INSTALL_DIR` and `IVYGREP_VERSION`; `install.sh`
+additionally reads `IVYGREP_ACCELERATOR`.
+
 ## Module ownership
 
 | Concern | Modules |
@@ -557,12 +596,23 @@ the Hugging Face cache is already populated.
 | Walking and chunking | `walker.rs`, `chunking.rs`, `text.rs` |
 | Index orchestration | `indexer.rs` |
 | Index storage concerns | `src/indexer/compression.rs`, `src/indexer/git_state.rs`, `src/indexer/resources.rs`, `src/indexer/staging.rs`, `src/indexer/storage.rs` |
+| Background enhancement | `src/indexer/enhancement.rs`: vector-writer lock and publication into the captured store incarnation |
+| Job state | `jobs.rs`: background job ledger and status records |
 | Change detection | `merkle.rs` |
+| Contained source reads | `workspace_file.rs`: live reads beneath a selected workspace root, rejecting symlinks and non-regular files |
 | Embeddings and vectors | `embedding.rs`, `vector_store.rs`, `vector_store/` |
+| Neural metadata | `neural_metadata.rs`: read and atomically publish neural model identity files |
 | Hybrid search | `search.rs`, `search_execution.rs`, `search_fusion.rs`, `search_presentation.rs`, `search_routing.rs`, `search_service.rs` |
+| Search constraints | `search_eligibility.rs`: ignore, type, scope, glob, hidden-path, and key filters applied before bounded candidate heaps; `search_boolean.rs`: explicit `AND`/`OR`/`NOT` parsing and candidate pools; `search_semantic_visibility.rs`: exact-score refill when filters reject ANN hits; `path_glob.rs`: `--include`/`--exclude` glob matching |
+| Query expansion | `query_aliases.rs`: token and phrase aliases generated from `assets/query_aliases.toml` |
+| Learned reranking | `reranker.rs`: embedded linear model, deterministic fallback, and native capture records |
+| Preview cache | `search_file_cache.rs`: byte-bounded LRU of file previews shared by search contexts |
 | Exact and symbol search | `regex_search.rs`, `symbols.rs` |
 | Context packs | `context_input.rs`, `context_graph.rs`, `context.rs` |
 | Runtime surfaces | `cli.rs`, `daemon.rs`, `mcp.rs`, `tui.rs`, `web.rs`, `protocol.rs`, `ipc.rs` |
+| Agent setup | `agent.rs`: `ig agent install` and `ig agent doctor` client configuration |
+| Health and hardware | `doctor.rs`: `ig --doctor` inspection and `--fix` repair; `hardware.rs`: `ig hardware` report; `system_resources.rs`: available-memory probes |
+| Editor and browser launch | `launcher.rs`: TUI and Web editor commands and browser opening |
 | Frontend | `web/src/main.ts` plus focused API, type, rendering, viewer, icon, clipboard, and UI modules |
 
 Several orchestration modules remain large because they encode coupled ranking,
