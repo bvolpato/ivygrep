@@ -243,6 +243,13 @@ Incremental runs use them to refresh unchanged importers when a newly added file
 takes precedence over an existing target, and Python package initializers take
 precedence over same-named modules.
 
+Format v30 rebuilds once so fallback-chunked files index lines before their
+first declaration; Python decorators, decorators before a JavaScript or
+TypeScript `export class`, and TypeScript member decorators stay in their
+definition's chunk; signatures skip multi-line annotations; and Java records,
+module-level JavaScript and TypeScript function bindings, and Rust
+`macro_rules!` macros register symbols.
+
 ## Search pipeline
 
 ### Workspace selection
@@ -262,6 +269,11 @@ tombstones and shadowed paths.
 budgets. Relevant signals include exact identifiers, literals, paths, natural
 language, code-like syntax, note-like results, filters, and stored vector
 availability.
+
+A hybrid query whose letters and digits are all non-ASCII, such as CJK or
+Cyrillic text, has none of the ASCII code tokens that lexical, path, and hash
+signals use. Unless neural retrieval is forced, it runs exact substring
+matching, the only pass that can find it.
 
 `src/search_execution.rs` coordinates applicable retrieval passes:
 
@@ -309,6 +321,14 @@ Unsupported structured queries, including phrases requiring unindexed positions,
 fail explicitly. Quoted or escaped operator words and ordinary natural-language
 input keep their existing expansion behavior.
 
+Multi-line queries, usually pasted source, a stack trace, or a multi-paragraph
+prompt, score lexical matches without the boosted signature field. Each pasted
+identifier would otherwise add a near-maximal bonus to every one-line definition
+signature containing it and bury the snippet's body evidence. Signature text
+stays searchable through the body field, and an explicit `signature:` clause
+keeps its boost. `owner.member` text inside a multi-line query does not become
+an exact-symbol lookup.
+
 `src/search_error_text.rs` recognizes pasted error output by line-leading error
 labels (`Error:`, `Caused by:`, `ValueError:`, `java.lang.IllegalStateException:`,
 `Uncaught TypeError:`), `[ERROR]` lines, traceback headers, `(os error N)`
@@ -341,6 +361,14 @@ workspace. Pasted source without error framing is not affected.
 `src/search_fusion.rs` combines candidates, source provenance, path and role
 signals, literal coverage, and deterministic reranking. Fusion remains one
 module because ordering and score interactions form one relevance contract.
+
+A hash-vector match on a candidate that lexical, literal, path, or symbol search
+already found hashes the same words BM25 scored. For one-line queries it gets no
+fusion vote unless the query names secondary sources such as tests, docs, or
+examples. Multi-line queries keep a vote, because hash overlap on pasted
+identifiers still separates the matching snippet. When hash votes are
+discounted, neural corroboration votes from the neural tier's own rank, and
+semantic-only discoveries keep full weight.
 
 `src/search_presentation.rs` selects representative spans, loads source text,
 and builds explanations. Output records source signals and whether neural
@@ -471,6 +499,18 @@ refresh affected owners. Missing an edge does not prove no relationship exists.
 Python imports and Objective-C quoted local `#import`/`#include` directives are
 extracted from parsed syntax. Strings, docstrings, and comments do not create
 dependency facts; Objective-C++ also excludes directives inside C++ raw strings.
+
+Rust `self::` and `super::` imports follow the module tree, not the directory
+tree: `super::Config` in `src/a/b.rs` resolves to `src/a.rs` or `src/a/mod.rs`.
+The line scanner cannot see inline module scope, so indented declarations such
+as `use super::helper` inside `mod tests` create no edge. Files without a
+conventional parent module file, such as `#[path]` modules, get no `self::` or
+`super::` edges either; `self::` in a `mod.rs` still resolves beside the file.
+
+Stack-trace frames under `node_modules`, `site-packages`, `dist-packages`, the
+Cargo registry, or the Go module cache map only by their package-relative path,
+and `rustc` toolchain frames are ignored. `--since` accepts one commit-ish, such
+as `HEAD~3` or `@{upstream}`, and rejects ranges and negated references.
 
 ## Worktree overlays
 
@@ -688,7 +728,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_MCP_INDEX_WAIT_SECS` | Time an MCP call waits for a first index before returning `status: indexing`. Default `20`; `0` returns immediately. |
 | `IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT` | Set to disable background hash and neural enhancement. `--wait-for-enhancement` fails. |
 | `IVYGREP_NO_AUTOSPAWN` | Set to prevent daemon auto-start. Also disables background enhancement, so `--wait-for-enhancement` fails. |
-| `IVYGREP_INDEX_THREADS` | Indexing worker threads. Default: physical cores, capped at logical cores. |
+| `IVYGREP_INDEX_THREADS` | Indexing worker threads. Default: physical cores, capped at logical cores. Background hash and neural enhancement insert vectors through at most four of these threads; `1`, or a store under 1,024 vectors, inserts serially. |
 | `IVYGREP_NEURAL_THREADS` | Neural inference threads. Default: logical cores capped at 8 for foreground work; a quarter of logical cores (1 to 8) for background work. Maximum 32. |
 | `IVYGREP_NEURAL_BATCH_SIZE` | Chunks per background neural enhancement batch. Default depends on backend (static, CPU, Metal, or CUDA); maximum 4096. |
 | `IVYGREP_NEURAL_MEMORY_MB` | Memory budget that sizes transformer worker pools. Default: a quarter of available memory. |

@@ -54,7 +54,8 @@ Search answers where. Context answers what an agent needs to change safely.
 
 The context command combines task anchors with commits since the branch point, staged and dirty files,
 issue or trace paths, and indexed relationships. It returns one bounded Markdown pack with path, lines,
-role, reason, and retrieval signals. `--since` requires a Git worktree; omit it for non-Git directories.
+role, reason, and retrieval signals. `--since` takes a branch or revision such as `main`, `HEAD~3`, or
+`@{upstream}` and requires a Git worktree; omit it for non-Git directories.
 
 ## Install
 
@@ -105,6 +106,12 @@ Useful controls include `-n` for result files, `-C` for context lines, `--type`
 for language, `--include`/`--exclude` path globs, `--lexical-only`, `--hash`, and `--json`. `--hash`
 uses lightweight local embeddings for faster startup and no model download,
 with lower semantic quality. Run `ig --help` for full reference.
+
+Multi-line queries are ranked as pasted source, so the code that contains the snippet ranks above
+one-line definition signatures that share a few of its identifiers. For pasted error output, such as
+a traceback, a `Caused by:` chain, or a `panicked at` line, ranking ignores runtime values such as
+paths outside the workspace, ids, and timestamps, and matches the static message text against the
+code that raises it.
 
 On macOS laptops, background neural enhancement pauses on battery power (`ig --status`
 shows `Paused: Battery Power`); set `IVYGREP_ENHANCE_ON_BATTERY=1` to keep it running.
@@ -235,6 +242,8 @@ ig --add . --force   # rebuild current workspace index from scratch
 ig hardware          # inspect detected hardware and matching build
 ```
 
+Open the URL `ig --web` prints: a bare `http://127.0.0.1:4747/` returns 401 until
+the browser has the session cookie that URL sets.
 If `ig --web` opens a page that cannot load its redirect file, as snap-packaged
 browsers on Ubuntu do for files under hidden directories, open the URL it prints.
 Under WSL, a Windows browser can load the redirect file only through an opener
