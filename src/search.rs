@@ -9323,7 +9323,9 @@ export function registerCommands(p: Plugin) {
     #[test]
     fn hash_corroboration_weight_drops_votes_for_one_line_prose() {
         use super::execution::hash_direct_weight;
-        let prose = "python change array dtype to int";
+        // Keep one-line fixtures short: the benchmark leakage check rejects
+        // production sources that contain public benchmark query text.
+        let prose = "reload watcher settings";
         assert_eq!(hash_direct_weight(prose, false), 0.0);
         assert_eq!(hash_direct_weight(prose, true), 0.0);
         let snippet = "for i in range(n):\n    total += values[i]";
