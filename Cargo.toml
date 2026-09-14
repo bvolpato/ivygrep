@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "1.2.15"
+version = "1.2.16"
 edition = "2024"
 description = "Local semantic search for code, notes, and memories with context packs for coding agents"
 license = "MIT"
@@ -146,6 +146,9 @@ windows-sys = { version = "0.61", features = [
 debug = false
 lto = "thin"
 strip = "symbols"
+# One codegen unit lets LLVM optimize across the crate: release binaries are
+# about 4% smaller, keeping the CUDA Linux build under its 81 MiB size budget.
+codegen-units = 1
 
 # gemm-f16 0.19.0's ARM FP16 helpers need inlining inside their runtime-
 # dispatched target-feature functions. Keep application debug builds portable

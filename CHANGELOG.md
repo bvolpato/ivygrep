@@ -4,12 +4,13 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [1.2.15] - 2026-09-14
+## [1.2.16] - 2026-09-14
 
 ### Upgrade notes
 
 - Existing indexes rebuild once on first use for index format v30.
 - The Web UI requires the session token on loopback listeners too. Open the URL that `ig --web` prints; a bare `http://127.0.0.1:4747/` returns 401.
+- v1.2.15 was tagged but not published: its CUDA Linux binary exceeded the release size budget. This release includes every change listed here.
 
 ### Security
 
@@ -24,6 +25,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Changed
 
+- Release binaries build with one codegen unit instead of Cargo's default of 16, shrinking them by about 4%. A local x86_64 Linux release build goes from 73.88 MiB to 70.63 MiB. The CUDA Linux binary grew to 81.64 MiB in v1.2.15, above its 81 MiB budget, and fits again.
 - Query expansion no longer maps phrases to identifiers from ivygrep's own source or the Linux kernel relevance fixture (`cpu_permits`, `vector_store`, `daemon_request`, `daemon_response`, `indexable`, `doctor`, `block_io`, `workqueue`). Two phrase aliases that tokenization could never match are removed. Self-repository relevance gate floors are lowered to match. Many remaining phrase aliases still come from the same fixture-fitting history and are candidates for corpus-derived expansion.
 
 ### Fixed
