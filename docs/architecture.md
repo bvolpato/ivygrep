@@ -321,15 +321,20 @@ pasted source therefore do not count. Only the first 200 lines are classified;
 later lines stay in the retrieval text unchanged. For detected queries,
 lexical, path, hash-vector, fusion, and learned reranking signals use the text
 with runtime values removed: absolute paths outside the workspace, URLs, hex
-ids, and numbers. Absolute paths inside the
-workspace keep their workspace-relative form. The static message text between
-those values, split at quoted values, `: ` chain separators, bracketed groups,
-and sentence ends, joins the exact-substring pass, so code containing the
-format string ranks first. When a file's best chunk has no exact match but
-another chunk of that file does, fusion shows that chunk for the file instead,
-keeping the file's score. Neural query vectors keep the original text because
-the daemon embeds the query before it resolves a workspace. Pasted source
-without error framing is not affected.
+ids, numbers, and timestamps, including the values of `key=value` pairs, whose
+keys stay. A quoted absolute path containing spaces, such as
+`"/home/Jane Doe/app.lock"`, is one value. Absolute paths inside the workspace
+keep their workspace-relative form. The static message text between those
+values, split at quoted values, `key=value` pairs, `: ` chain separators,
+bracketed groups, and sentence ends, joins the exact-substring pass, so code
+containing the format string ranks first. Leading timestamps and bracketed
+severities such as `[ERROR]` are not part of that text. At most eight runs are
+kept: runs from message lines (a counted label, an error severity, or a cause
+under `Caused by:`) first, then the longest. When a file's best chunk has no
+exact match but another chunk of that file does, fusion shows that chunk for
+the file instead, keeping the file's score. Neural query vectors keep the
+original text because the daemon embeds the query before it resolves a
+workspace. Pasted source without error framing is not affected.
 
 ### Fusion and presentation
 
