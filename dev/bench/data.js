@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789352106963,
+  "lastUpdate": 1789356071873,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -62118,6 +62118,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2121.43,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "96574a82d4fd614ad335c7d2012198d311443f04",
+          "message": "[search] Rank the code that raises pasted error output first (#375)\n\n* [search] Rank the code that raises pasted error output first\n\nPasted error output mixes static message text with runtime values such as\nabsolute paths, hex ids and numbers. Those values name the user's machine, so\n`/home/dev/.local/share/ivygrep/indexes/...` fed `home`, `share` and\n`ivygrep` into lexical, path, hash-vector, fusion and reranker signals, and\nfiles named after the app outranked the `format!` that produced the message.\n\nDetect error output by line-leading labels (`Error:`, `Caused by:`,\n`ValueError:`, JVM and Node exception labels), `[ERROR]` lines, traceback\nheaders, `(os error N)` and `panicked at`. A label other than `Caused by:`\ncounts only when its line reads as a message, so struct and interface fields,\nobject and YAML keys and docstring `Raises:` entries in pasted source don't.\nFor detected queries, token signals use the text without runtime values\n(workspace paths stay workspace-relative), the static message runs join the\nexact-substring pass, and fusion previews the chunk that contains the message.\n\nOn a pasted-error benchmark generated from 11 pinned public repositories,\nhash-mode MRR@10 rises from .409 to .656 on the held-out half. The self\ngate is unchanged, the paired complex-phrase guard measured 1.03x, and warm\nlatency for pasted errors drops from 174 ms to 25 ms on this repository.\n\n* [search] Strip key=value values, quoted paths and severity prefixes from pasted errors\n\nReview follow-ups for pasted error output:\n\n- `key=value` pairs (`path=/home/...`, `request_id=7c41e0a9d2f3`,\n  `status=500`) classify the value on its own, drop volatile values and keep\n  the key. Each pair ends a message run, and quoted prose values become their\n  own run.\n- A quote followed by an absolute-path start runs to its closing quote, so\n  `\"/home/Jane Doe/.local/share/...\"` is one value.\n- Leading timestamps and bracketed severities such as `[ERROR]` are stripped\n  before message runs are collected.\n- Runs from message lines sort ahead of source excerpts and log prose before\n  truncation to eight.\n\nOn the pasted-error benchmark, development hash MRR@10 moves from .662 to\n.669 and no held-out query changes.\n\n* [docs] Avoid a spaced code span in the pasted error architecture notes\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-13T22:48:22-04:00",
+          "tree_id": "41ec4ada965c4e07fd0040692a59ef9b7d25efcc",
+          "url": "https://github.com/bvolpato/ivygrep/commit/96574a82d4fd614ad335c7d2012198d311443f04"
+        },
+        "date": 1789356070980,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 82125.72,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7651.1,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 125726.63,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 287626.06,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 8.79,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1337.89,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1068.56,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 1427.96,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 1766.63,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.2,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 99.79,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4011.03,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1500.95,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1499.72,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 2559.94,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 2913.82,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3406.98,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 414.13,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1451.26,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 279408.55,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 82.81,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 378602.72,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 51920.63,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 318789.28,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 113.49,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 1727.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 243.32,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 617.86,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 4665.87,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 80.14,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 513,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2462.58,
             "unit": "µs"
           }
         ]
