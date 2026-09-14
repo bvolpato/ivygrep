@@ -24,6 +24,7 @@ All notable changes to ivygrep are documented in this file.
 - Million-chunk query phases use disjoint query sets, so CLI warm and concurrent latency no longer replay cached daemon answers. Paired comparisons fail when peak indexing RSS or disk use exceeds 1.25 times the baseline.
 - The self-repository relevance fixture adds two multi-line queries that paste source snippets, so the gate covers multi-line ranking.
 - The daemon soak budgets anonymous RSS growth at 32 MiB and total RSS growth at 96 MiB per process epoch, and records anonymous and file-backed RSS in every sample. Total RSS includes mapped index segments that continuous reindexing replaces, which moved by up to 60 MiB within one epoch while anonymous RSS grew 4-10 MiB. The two-minute PR soak failed 4 of its last 40 runs on total RSS growth of 34-38 MiB against the old 32 MiB total budget.
+- The public relevance gate compares metric means with their floors using a 1e-9 tolerance. Three cosqa neural runs averaging exactly 175 of 500 queries came out as `0.3499999999999999` and failed the `0.35` recall@20 floor.
 
 ### Changed
 

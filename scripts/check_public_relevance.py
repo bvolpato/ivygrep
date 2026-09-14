@@ -15,6 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GATES = ROOT / "benchmarks" / "public" / "relevance_gates.json"
+# Means over repetitions carry float error: three runs averaging exactly 0.35
+# come out as 0.3499999999999999. Floors use a few decimals, so this tolerance
+# only absorbs rounding.
+FLOOR_TOLERANCE = 1e-9
 
 
 def validate_matrix(matrix: dict, gates: dict, raw_results: Path) -> list[str]:
@@ -51,7 +55,7 @@ def validate_matrix(matrix: dict, gates: dict, raw_results: Path) -> list[str]:
                     isinstance(value, bool)
                     or not isinstance(value, (int, float))
                     or not math.isfinite(value)
-                    or value < minimum
+                    or value < minimum - FLOOR_TOLERANCE
                 ):
                     errors.append(f"{dataset}/{mode}: {metric}={value!r} < {minimum}")
 
