@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import statistics
 import tempfile
 import unittest
 
@@ -85,6 +86,30 @@ class PublicRelevanceGateTest(unittest.TestCase):
                 root,
             )
             self.assertTrue(any("public-task/hybrid: ndcg_at_10" in error for error in errors))
+
+    def test_accepts_repetition_mean_at_the_floor_despite_float_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_details(
+                root,
+                [
+                    {"query_id": "q1", "recall_at_20": 1.0},
+                    {"query_id": "q2", "recall_at_20": 1.0},
+                ],
+            )
+            self.gates["datasets"]["public-task"]["minimum_recall_at_20"] = 0.35
+            hybrid = self.matrix["task_summary"]["public-task"]["hybrid"]
+            # 176, 174 and 175 of 500 queries average exactly to the floor.
+            mean = statistics.fmean([0.352, 0.348, 0.35])
+            self.assertLess(mean, 0.35)
+            hybrid["recall_at_20"]["mean"] = mean
+            self.assertEqual(
+                check_public_relevance.validate_matrix(self.matrix, self.gates, root),
+                [],
+            )
+            hybrid["recall_at_20"]["mean"] = 0.348
+            errors = check_public_relevance.validate_matrix(self.matrix, self.gates, root)
+            self.assertTrue(any("public-task/hybrid: recall_at_20" in error for error in errors))
 
     def test_rejects_previously_successful_query_despite_healthy_aggregate(self):
         with tempfile.TemporaryDirectory() as temporary:
