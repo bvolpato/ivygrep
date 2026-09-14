@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789347151571,
+  "lastUpdate": 1789349812678,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -61750,6 +61750,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2173.74,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "22cdbc8568777ebe6d5b7092df78b9f498768751",
+          "message": "[fix] Singularize plurals correctly and keep signature rules consistent (#371)\n\n* [fix] Singularize plurals correctly and keep signature rules consistent\n\nThe query singularizer stripped \"es\" after every \"-che\" and \"-ze\" word and\n\"s\" from every word ending in \"s\", so `caches` became `cach`, `sizes`\nbecame `siz`, `cookies` became `cooky`, and `alias`, `bias`, and `series`\nlost their last letter. \"es\" is now stripped only after sibilant endings,\nwith a small table for \"-che\"/\"-ie\" nouns, singulars ending in \"s\", and\ninvariant plurals. Query expansion, ranking boosts, and hash embeddings use\nthe corrected forms.\n\nMulti-line queries leave the signature field out of the default fields on\nboth the Boolean and non-Boolean paths, and the field keeps its 5x boost so\nan explicit `signature:` clause scores the same on any query shape.\n\nThe self-repository relevance fixture gains three multi-line queries: two\npasted source snippets and a pasted error chain.\n\n* [test] Drop the pasted error-chain query from the relevance fixture\n\nThe error chain ranks src/indexer.rs 7th to 12th because the pasted lock\npath (`/home/dev/.local/share/ivygrep/...`) pulls in files named after the\nrepository. As a known miss it drags current-head neural MRR to .896, below\nthe .90 floor, without gating anything the pasted source queries don't\nalready gate. Pasted error ranking needs its own fix and benchmark.\n\n* [docs] Regenerate current-head relevance evidence for the 25-query fixture\n\nThe fixture now has 25 queries, so the committed report's fixture hash and\nquery counts no longer matched. Measured with a static-profile neural release\nbuild of this branch: foreground and hash-enriched MRR .925, nDCG@10 .899;\nneural MRR .905, nDCG@10 .884. The evidence dashboard is re-rendered from it.\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-13T20:44:19-04:00",
+          "tree_id": "a6cb3c8cc547b6dfbe4d7e0d0b404ef155752d20",
+          "url": "https://github.com/bvolpato/ivygrep/commit/22cdbc8568777ebe6d5b7092df78b9f498768751"
+        },
+        "date": 1789349811782,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 71262.7,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 4213.35,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 95548.73,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 291184.93,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 12.99,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1963.94,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1606.58,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 3164.05,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 3031.56,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 2.01,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 124.46,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 6459.27,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 2344.55,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 2349.71,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3572.73,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 4051.38,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 4830.63,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 750,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 2249.75,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 459325.46,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 176.88,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 467543.89,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 53301.98,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 118140.1,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 326.47,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2650.27,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 315.47,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 650.33,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 4150.39,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 94.8,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 478.13,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2135,
             "unit": "µs"
           }
         ]
