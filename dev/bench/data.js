@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789365678436,
+  "lastUpdate": 1789378567142,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -62670,6 +62670,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 1506.59,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "80a86edd12cf978c51b8489b3d321b3f3810cccb",
+          "message": "[search] Drop hash votes on direct candidates for one-line queries (#378)\n\n* [search] Drop hash votes on direct candidates for one-line queries\n\nThe pinned public matrix on main fails `cosqa/neural: recall_at_20=0.3487 <\n0.35`. Bisect points at the hash tier's new graph (#366): hash ANN now returns\nreal neighbors, and hash vectors bag the same tokens BM25 already scored, so a\nhash match on a candidate lexical search already found counts that evidence\ntwice, at full weight whenever neural retrieval ran. On cosqa those votes pull\nclusters of near-duplicate, term-dense functions into the rerank window above\nthe relevant one.\n\nApply the hash direct weight to hash-only corroboration even when neural\nretrieval runs, and make it 0 for one-line retrieval text. Multi-line queries\n(pasted source and pasted errors) keep main's weights, since hash overlap on\nmany identifiers still separates the matching snippet. Neural corroboration\nand semantic-only discovery keep full strength.\n\ncosqa recall@20 over 3 runs: neural .3487 to .3520, hash .3587 to .3640,\nhybrid .3580 to .3647, blended .3527 to .3560. codefeedback-st,\ncodetrans-contest and codetrans-dl gain or lose no query in any mode, and the\npaired complex-phrase guard measured 0.996x.\n\n* [search] Vote neural corroboration from the neural rank on one-line queries\n\nReview follow-up. merge_semantic_candidates keeps the best score across tiers,\nso a direct candidate that hash ranked first and neural ranked low took the\nhash-derived merged rank, and the neural source alone restored the full vote\nthis change removes for one-line queries.\n\nCarry the neural tier's own adjusted score per semantic candidate. When hash\nvotes on direct candidates are discounted, a neural-corroborated direct\ncandidate votes from its rank among neural hits. Multi-line queries,\nsemantic-only discovery, and builds without neural vectors keep the merged\nrank.\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-14T04:55:38-04:00",
+          "tree_id": "47f30a50f17e05eb884765bd30c96fd1bbd5342f",
+          "url": "https://github.com/bvolpato/ivygrep/commit/80a86edd12cf978c51b8489b3d321b3f3810cccb"
+        },
+        "date": 1789378566705,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 47295.71,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 4333.3,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 64613.37,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 206763.45,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 13.62,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 2070.85,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1666.96,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 3224.07,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 3174.78,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 2.1,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 135.83,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 6872.19,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 2480.74,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 2447.63,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3760.74,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 4318.35,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 5232.27,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 778.08,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 2325.91,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 469027.94,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 188.97,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 487168.04,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 18321.14,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 97253.7,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 343.79,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2828.21,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 325.26,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 681.46,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 4643.66,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 101.61,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 507.39,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2339.26,
             "unit": "µs"
           }
         ]
