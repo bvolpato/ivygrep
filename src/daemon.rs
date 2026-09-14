@@ -11431,7 +11431,10 @@ mod tests {
         drop(publication_failure);
         std::fs::write(workspace.metadata_path(), metadata).unwrap();
         let mut recovered = false;
-        for _ in 0..60 {
+        // The retry backs off and then reindexes the workspace. On a loaded
+        // Windows runner that took longer than 6 s while still indexing, so
+        // allow 30 s; the loop exits as soon as the update is visible.
+        for _ in 0..300 {
             if workspace.read_metadata().unwrap().unwrap().index_generation > generation
                 && indexed_literal_visible(&workspace, "recovered_watch_marker") == Some(true)
             {
