@@ -22,7 +22,7 @@ pub(super) fn fuse_rrf_with_context(
     ctx: Option<&SearchContext>,
     candidates: FusionCandidates,
     direct_ids: Option<HashSet<u64>>,
-    semantic_direct_weight: f32,
+    hash_direct_weight: f32,
     query: &FusionQuery<'_>,
     routing: QueryRouting,
     limit: Option<usize>,
@@ -108,14 +108,15 @@ pub(super) fn fuse_rrf_with_context(
     }
 
     for (rank, (chunk, semantic_score, semantic_sources)) in semantic.into_iter().enumerate() {
-        // Hash vectors are a cheap provisional recall tier. Keep full strength
-        // for semantic-only discovery, but do not let hash collisions overrule
-        // direct evidence. Neural vectors use semantic_direct_weight=1.0.
+        // Hash vectors hash the same tokens BM25 already scored, so a hash-only
+        // match on a direct candidate repeats lexical evidence and uses
+        // `hash_direct_weight` even when neural retrieval also ran. Neural
+        // corroboration and semantic-only discovery keep full strength.
         let has_direct_evidence = direct_ids.contains(&chunk.vector_key);
-        let direct_weight = if has_direct_evidence {
-            semantic_direct_weight
-        } else {
+        let direct_weight = if !has_direct_evidence || semantic_sources.contains("neural") {
             1.0
+        } else {
+            hash_direct_weight
         };
         let semantic_source_mask = semantic_sources
             .into_iter()

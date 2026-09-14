@@ -731,11 +731,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             symbols: symbol_chunks,
         },
         Some(direct_ids),
-        if neural_available || query_targets_secondary_sources(trimmed) {
-            1.0
-        } else {
-            0.25
-        },
+        hash_direct_weight(trimmed, neural_available),
         &fusion_query,
         routing,
         bounded_limit,
@@ -805,4 +801,21 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     );
 
     Ok(hits.into_iter().map(PreparedHit::into_hit).collect())
+}
+
+/// Fusion weight for a hash-vector match on a candidate that direct search
+/// already found. Hash vectors bag the query's tokens, so for a one-line prose
+/// query they repeat common words that BM25 already weighs by rarity. Pasted
+/// source bags many specific identifier segments, where hash overlap still
+/// separates the matching snippet, so multi-line queries keep their vote.
+pub(super) fn hash_direct_weight(query_text: &str, neural_available: bool) -> f32 {
+    if query_targets_secondary_sources(query_text) {
+        1.0
+    } else if !is_multiline_query(query_text) {
+        0.0
+    } else if neural_available {
+        1.0
+    } else {
+        0.25
+    }
 }

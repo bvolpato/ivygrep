@@ -4404,7 +4404,7 @@ fn promote_literal_spans(ranked: &mut [RankedCandidate]) {
 #[cfg(test)]
 fn fuse_rrf(
     candidates: FusionCandidates,
-    semantic_direct_weight: f32,
+    hash_direct_weight: f32,
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
@@ -4414,7 +4414,7 @@ fn fuse_rrf(
         None,
         candidates,
         None,
-        semantic_direct_weight,
+        hash_direct_weight,
         &query,
         routing,
         limit,
@@ -9197,6 +9197,55 @@ export function registerCommands(p: Plugin) {
             Some(10),
         );
         assert_eq!(ranked[0].0.chunk_id, "direct", "{ranked:#?}");
+    }
+
+    #[test]
+    #[serial]
+    fn hash_only_corroboration_keeps_hash_weight_beside_neural_corroboration() {
+        let corroborated_score = |source: &'static str| {
+            let corroborated = make_chunk_with_path(
+                "corroborated",
+                "src/b.rs",
+                "fn b() { /* parse config file */ }",
+            );
+            let ranked = fuse_rrf(
+                FusionCandidates {
+                    lexical: vec![(corroborated.clone(), 20.0)],
+                    semantic: vec![(corroborated, 0.9, HashSet::from([source]))],
+                    literal: vec![],
+                    path: vec![],
+                    path_weight: 1.5,
+                    symbols: vec![],
+                },
+                0.25,
+                "parse config file",
+                Some(10),
+            );
+            ranked
+                .iter()
+                .find(|(chunk, _, _)| chunk.chunk_id == "corroborated")
+                .map(|(_, score, _)| *score)
+                .expect("corroborated candidate is ranked")
+        };
+
+        let hash = corroborated_score("hash");
+        let neural = corroborated_score("neural");
+        assert!(
+            neural > hash,
+            "neural corroboration should keep full weight while hash-only corroboration uses the hash weight: neural={neural} hash={hash}"
+        );
+    }
+
+    #[test]
+    fn hash_corroboration_weight_drops_votes_for_one_line_prose() {
+        use super::execution::hash_direct_weight;
+        let prose = "python change array dtype to int";
+        assert_eq!(hash_direct_weight(prose, false), 0.0);
+        assert_eq!(hash_direct_weight(prose, true), 0.0);
+        let snippet = "for i in range(n):\n    total += values[i]";
+        assert_eq!(hash_direct_weight(snippet, false), 0.25);
+        assert_eq!(hash_direct_weight(snippet, true), 1.0);
+        assert_eq!(hash_direct_weight("parse config tests", false), 1.0);
     }
 
     #[test]
