@@ -29,6 +29,8 @@ use crate::protocol::SearchHit;
 mod boolean;
 #[path = "search_eligibility.rs"]
 mod eligibility;
+#[path = "search_error_text.rs"]
+mod error_text;
 #[path = "search_execution.rs"]
 mod execution;
 #[path = "search_file_cache.rs"]
@@ -4082,6 +4084,8 @@ struct FusionQuery<'a> {
     location_intent: bool,
     secondary_intent: bool,
     compact_candidate_text: bool,
+    /// Pasted error output, whose literal matches mark where the message is raised.
+    pasted_error: bool,
 }
 
 impl<'a> FusionQuery<'a> {
@@ -4124,6 +4128,7 @@ impl<'a> FusionQuery<'a> {
             token_compacts,
             alias_token_compacts,
             compact_candidate_text,
+            pasted_error: false,
         }
     }
 }
@@ -4368,6 +4373,31 @@ fn promote_qualified_symbol_span(ranked: &mut [RankedCandidate], query_text: &st
         let (first, rest) = ranked.split_at_mut(best_index);
         std::mem::swap(&mut first[0].chunk, &mut rest[0].chunk);
         return;
+    }
+}
+
+/// For pasted error output, the chunk that contains the message text is the
+/// evidence to show. When a file's best-scored chunk has no literal match but
+/// a lower chunk of the same file does, that chunk and its sources represent
+/// the file instead. Scores stay in place, so file order does not change.
+fn promote_literal_spans(ranked: &mut [RankedCandidate]) {
+    // file -> (index of its best chunk, index of its best literal chunk)
+    let mut files: HashMap<u64, (usize, Option<usize>)> = HashMap::new();
+    for (index, item) in ranked.iter().enumerate() {
+        let entry = files
+            .entry(path_key(&item.chunk.file_path))
+            .or_insert((index, None));
+        if entry.1.is_none() && item.sources & SOURCE_LITERAL != 0 {
+            entry.1 = Some(index);
+        }
+    }
+    for (best, literal) in files.into_values() {
+        let Some(literal) = literal.filter(|literal| *literal != best) else {
+            continue;
+        };
+        let (first, rest) = ranked.split_at_mut(literal);
+        std::mem::swap(&mut first[best].chunk, &mut rest[0].chunk);
+        std::mem::swap(&mut first[best].sources, &mut rest[0].sources);
     }
 }
 
@@ -8894,6 +8924,71 @@ export function registerCommands(p: Plugin) {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    #[serial]
+    fn pasted_error_output_ranks_the_raising_code_above_environment_path_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/storage.rs"),
+            "pub fn open_store(lock_path: &Path) -> Result<File> {\n    let file = File::create(lock_path)?;\n    file.try_lock_exclusive()\n        .with_context(|| format!(\"failed to acquire index lock {}\", lock_path.display()))?;\n    Ok(file)\n}\n",
+        )
+        .unwrap();
+        // Files named after the machine-specific directories in the pasted
+        // lock path, as packaging manifests and install scripts usually are.
+        for (path, body) in [
+            (
+                "packaging/orbit/share/orbit.manifest",
+                "name = orbit\nshare = local\n",
+            ),
+            (
+                "packaging/orbit/local/orbit.desktop",
+                "Exec=orbit\nIcon=orbit\n",
+            ),
+            (
+                "scripts/home/install_orbit.sh",
+                "mkdir -p \"$HOME/.local/share/orbit\"\n",
+            ),
+            ("scripts/dev/orbit_indexes.sh", "orbit --add . --indexes\n"),
+            (
+                "assets/orbit/indexes/icon.svg",
+                "<svg><title>orbit</title></svg>\n",
+            ),
+        ] {
+            let full = tmp.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "Error: failed to acquire index lock /home/dev/.local/share/orbit/indexes/7c41e0a9d2f3/index.lock\n\nCaused by:\n    Resource temporarily unavailable (os error 11)",
+            None,
+            &SearchOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            hits.first().map(|hit| hit.file_path.clone()),
+            Some(PathBuf::from("src/storage.rs")),
+            "pasted error output should rank the code that raises it first, got: {:?}",
+            hits.iter()
+                .take(5)
+                .map(|hit| hit.file_path.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

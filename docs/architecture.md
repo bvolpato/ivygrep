@@ -309,6 +309,28 @@ Unsupported structured queries, including phrases requiring unindexed positions,
 fail explicitly. Quoted or escaped operator words and ordinary natural-language
 input keep their existing expansion behavior.
 
+`src/search_error_text.rs` recognizes pasted error output by line-leading error
+labels (`Error:`, `Caused by:`, `ValueError:`, `java.lang.IllegalStateException:`,
+`Uncaught TypeError:`), `[ERROR]` lines, traceback headers, `(os error N)`
+causes, and `panicked at`. A label other than `Caused by:` counts only when the
+line reads as a message: at least two words with letters, no trailing `,`, `;`,
+`{`, `(`, `[` or `=`, no bare operator such as `|` or `=`, not a lone quoted
+string, and not nested under a line ending in `:`, `{`, `(` or `[`. Struct and
+interface fields, object keys, YAML keys, and docstring `Raises:` entries in
+pasted source therefore do not count. Only the first 200 lines are classified;
+later lines stay in the retrieval text unchanged. For detected queries,
+lexical, path, hash-vector, fusion, and learned reranking signals use the text
+with runtime values removed: absolute paths outside the workspace, URLs, hex
+ids, and numbers. Absolute paths inside the
+workspace keep their workspace-relative form. The static message text between
+those values, split at quoted values, `: ` chain separators, bracketed groups,
+and sentence ends, joins the exact-substring pass, so code containing the
+format string ranks first. When a file's best chunk has no exact match but
+another chunk of that file does, fusion shows that chunk for the file instead,
+keeping the file's score. Neural query vectors keep the original text because
+the daemon embeds the query before it resolves a workspace. Pasted source
+without error framing is not affected.
+
 ### Fusion and presentation
 
 `src/search_fusion.rs` combines candidates, source provenance, path and role

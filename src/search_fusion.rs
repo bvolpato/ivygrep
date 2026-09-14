@@ -14,8 +14,8 @@ use super::{
     is_definition_kind, is_precise_lookup_query_with_tokens, literal_match_boost_with_query,
     location_intent_boost, normalize_lexical_score, normalize_semantic_score,
     path_exact_match_boost_with_query, path_key, path_segment_boost, primary_file_stem_multiplier,
-    promote_qualified_symbol_span, promote_representative_span, rerank_candidate_limit_for_routing,
-    should_run_literal_pass, source_bit, term_coverage_boost,
+    promote_literal_spans, promote_qualified_symbol_span, promote_representative_span,
+    rerank_candidate_limit_for_routing, should_run_literal_pass, source_bit, term_coverage_boost,
 };
 
 pub(super) fn fuse_rrf_with_context(
@@ -454,6 +454,9 @@ pub(super) fn fuse_rrf_with_context(
     // Keep the winning file and score, but center its preview on the exact
     // member instead of a nearby helper with stronger prose overlap.
     promote_qualified_symbol_span(&mut ranked, query.text);
+    if query.pasted_error {
+        promote_literal_spans(&mut ranked);
+    }
     // "How" queries are architecture-oriented; term-dense prose can be less
     // useful than the implementation span already selected by the ranker.
     if matches!(
