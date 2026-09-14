@@ -325,7 +325,7 @@ ids, numbers, and timestamps, including the values of `key=value` pairs, whose
 keys stay. A quoted absolute path containing spaces, such as
 `"/home/Jane Doe/app.lock"`, is one value. Absolute paths inside the workspace
 keep their workspace-relative form. The static message text between those
-values, split at quoted values, `key=value` pairs, `: ` chain separators,
+values, split at quoted values, `key=value` pairs, colon chain separators,
 bracketed groups, and sentence ends, joins the exact-substring pass, so code
 containing the format string ranks first. Leading timestamps and bracketed
 severities such as `[ERROR]` are not part of that text. At most eight runs are
