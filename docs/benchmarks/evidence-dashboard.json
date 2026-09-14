@@ -8,13 +8,13 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "09ab56bbca0a8e94980a067a42526108ae941d3027e164d2b321ec5c608b7717",
-      "source_commit": "b548a1b7d909580db51e3d1fd0912b154326e8e9",
+      "sha256": "f97d51655809a2a7a8068af707d4bd6e7db26ee1b7aacbcc98df7b40dde81853",
+      "source_commit": "f481e7f14ee00b7137eaece5f51273b0b484c080",
       "summary": {
-        "binary_sha256": "0df08293659eeffa57c4a3bfecf770731e7c5655c80aee9ef41d80ae3857f0f6",
+        "binary_sha256": "5a6ceda707974c39a5ee9dc96f59dd78ff613a678306a0e08e973ae99bdfb1fd",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
-          "sha256": "40e5b778fd620a4315b0e405def180527ffbfa7254c63f5bd4525b8ef6b1fb7e"
+          "sha256": "6b877037ff957ca5ee5093e0aa55472a5cd40163c50741f37664e1daabeb8654"
         },
         "harness": {
           "path": "scripts/eval_relevance.py",
@@ -26,68 +26,70 @@
               "after_filtering": 0,
               "before_fusion": 0,
               "candidate_budget": 0,
-              "first_useful_low": 2,
+              "first_useful_low": 3,
               "no_primary_judgment": 0,
               "not_audited": 0,
-              "satisfied": 21
+              "satisfied": 22
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 1397.8949198499322,
+            "elapsed_ms": 24849.64462183416,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
-              "daemon-watch"
+              "daemon-watch",
+              "doctor-health"
             ],
-            "mean_candidate_recall": 0.9782608695652174,
-            "mean_hybrid_deep_recall": 0.9782608695652174,
-            "mean_mrr": 0.9565217391304348,
-            "mean_ndcg10": 0.9215862093892343,
-            "mean_p1": 0.9130434782608695,
-            "mean_p5": 0.21739130434782608,
-            "mean_recall5": 0.9565217391304348,
+            "mean_candidate_recall": 0.98,
+            "mean_hybrid_deep_recall": 0.98,
+            "mean_mrr": 0.925,
+            "mean_ndcg10": 0.8990189646290027,
+            "mean_p1": 0.88,
+            "mean_p5": 0.20800000000000002,
+            "mean_recall5": 0.92,
             "mode": "foreground",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
             "neural_queries_with_results": 0,
             "no_hit_queries": 0,
-            "queries": 23,
+            "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.9130434782608695
+            "satisfaction_rate": 0.88
           },
           "hash-enriched": {
             "audit_stage_counts": {
               "after_filtering": 0,
               "before_fusion": 0,
               "candidate_budget": 0,
-              "first_useful_low": 2,
+              "first_useful_low": 3,
               "no_primary_judgment": 0,
               "not_audited": 0,
-              "satisfied": 21
+              "satisfied": 22
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 1413.8960670679808,
+            "elapsed_ms": 28423.165555112064,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
-              "daemon-watch"
+              "daemon-watch",
+              "doctor-health"
             ],
-            "mean_candidate_recall": 0.9782608695652174,
-            "mean_hybrid_deep_recall": 0.9782608695652174,
-            "mean_mrr": 0.9565217391304348,
-            "mean_ndcg10": 0.9215862093892343,
-            "mean_p1": 0.9130434782608695,
-            "mean_p5": 0.21739130434782608,
-            "mean_recall5": 0.9565217391304348,
+            "mean_candidate_recall": 0.98,
+            "mean_hybrid_deep_recall": 0.98,
+            "mean_mrr": 0.925,
+            "mean_ndcg10": 0.8990189646290027,
+            "mean_p1": 0.88,
+            "mean_p5": 0.20800000000000002,
+            "mean_recall5": 0.92,
             "mode": "hash-enriched",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
             "neural_queries_with_results": 0,
             "no_hit_queries": 0,
-            "queries": 23,
+            "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.9130434782608695
+            "satisfaction_rate": 0.88
           },
           "neural": {
             "audit_stage_counts": {
@@ -96,34 +98,34 @@
               "candidate_budget": 0,
               "first_useful_low": 0,
               "no_primary_judgment": 0,
-              "not_audited": 2,
+              "not_audited": 4,
               "satisfied": 21
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 1687.1902216225863,
+            "elapsed_ms": 10219.04218243435,
             "filter_misses": [],
             "low_rank_misses": [],
-            "mean_candidate_recall": 0.9782608695652174,
+            "mean_candidate_recall": 0.98,
             "mean_hybrid_deep_recall": 0.0,
-            "mean_mrr": 0.9565217391304348,
-            "mean_ndcg10": 0.9208033720289349,
-            "mean_p1": 0.9130434782608695,
-            "mean_p5": 0.21739130434782608,
-            "mean_recall5": 0.9565217391304348,
+            "mean_mrr": 0.905,
+            "mean_ndcg10": 0.884256154771861,
+            "mean_p1": 0.84,
+            "mean_p5": 0.20800000000000002,
+            "mean_recall5": 0.92,
             "mode": "neural",
-            "neural_queries_executed": 23,
+            "neural_queries_executed": 25,
             "neural_queries_unobservable": 0,
             "neural_queries_with_results": 17,
             "no_hit_queries": 0,
-            "queries": 23,
+            "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.9130434782608695
+            "satisfaction_rate": 0.84
           }
         },
         "runtime": {
           "machine": "x86_64",
-          "release": "6.17.0-1025-oem",
+          "release": "6.8.0-1061-aws",
           "system": "Linux"
         },
         "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing and verified neural execution. This is not a public-code, million-chunk, or agent-task benchmark.",

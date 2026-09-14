@@ -163,7 +163,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // identifiers. Scored as a separate boosted field, each one adds a
     // near-maximal bonus to every one-line definition signature that shares it,
     // burying the snippet's body evidence. Signature text remains searchable
-    // through the body field. Explicit Boolean queries keep the default fields.
+    // through the body field. Explicit Boolean queries follow the same rule, and
+    // explicit `signature:` clauses keep their boost.
     let lexical_fields = if is_multiline_query(trimmed) {
         TantivyFields {
             signature: None,
@@ -172,7 +173,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     } else {
         ctx.fields.clone()
     };
-    let parser = lexical_query_parser(ctx, &lexical_fields, conjunctive_numeric_query);
+    let parser = lexical_query_parser(ctx, trimmed, conjunctive_numeric_query);
 
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();

@@ -8868,26 +8868,32 @@ export function registerCommands(p: Plugin) {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits = hybrid_search(
-            &workspace,
+        // Explicit Boolean operators do not change the multi-line rule.
+        for query in [
             "values = load(source)\ntotals = summarize(values)\nreport = render(totals)\npublish(report)",
-            None,
-            &SearchOptions {
-                limit: Some(20),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+            "values OR load OR source\nOR totals OR summarize\nOR report OR render OR publish",
+        ] {
+            let hits = hybrid_search(
+                &workspace,
+                query,
+                None,
+                &SearchOptions {
+                    limit: Some(20),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
-        assert_eq!(
-            hits.first().map(|hit| hit.file_path.clone()),
-            Some(PathBuf::from("target.py")),
-            "pasted source should rank the body that contains it first, got: {:?}",
-            hits.iter()
-                .take(5)
-                .map(|hit| hit.file_path.clone())
-                .collect::<Vec<_>>()
-        );
+            assert_eq!(
+                hits.first().map(|hit| hit.file_path.clone()),
+                Some(PathBuf::from("target.py")),
+                "multi-line query {query:?} should rank the body that contains it first, got: {:?}",
+                hits.iter()
+                    .take(5)
+                    .map(|hit| hit.file_path.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

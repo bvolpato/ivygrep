@@ -219,6 +219,24 @@
         { "pattern": "src/walker.rs", "grade": 2 }
       ],
       "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "pasted-snapshot-diff",
+      "query": "match old_path.cmp(new_path) {\n    std::cmp::Ordering::Less => {\n        deleted.push(PathBuf::from(old_path.as_str()));\n        old.next();\n    }\n    std::cmp::Ordering::Equal => {\n        if old_hash != new_hash {\n            added_or_modified\n                .push((PathBuf::from(new_path.as_str()), new_hash.ends_with(\"-1\")));\n        }",
+      "intent": "Pasted source: Merkle snapshot diff.",
+      "judgments": [
+        { "pattern": "src/merkle.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "pasted-literal-matcher-setup",
+      "query": "let lexical_queries = build_lexical_queries(trimmed);\nlet literal_queries = build_literal_queries(trimmed, &lexical_queries);\nlet symbol_candidate_limit = output_limit.clamp(20, routing.symbol_limit);\nlet literal_matcher = if !literal_queries.is_empty() {\n    Some(LiteralMatcher::from_queries(\n        literal_queries.iter().map(String::as_str),\n        true,\n    )?)\n} else {\n    None\n};",
+      "intent": "Pasted source that calls helpers defined elsewhere: hybrid search execution.",
+      "judgments": [
+        { "pattern": "src/search_execution.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
     }
   ]
 }

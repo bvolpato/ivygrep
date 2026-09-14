@@ -418,7 +418,9 @@ pub fn singularize_token(token: &str) -> String {
         return format!("{stem}y");
     }
 
-    for suffix in ["ches", "shes", "sses", "xes", "zes"] {
+    // Sibilant endings add "es". Other "-es" plurals, such as `sizes`, only
+    // add "s" and fall through to the rule below.
+    for suffix in ["ches", "shes", "sses", "xes", "zzes", "tzes"] {
         if let Some(stem) = token.strip_suffix(suffix)
             && stem.len() >= 2
         {
@@ -440,9 +442,7 @@ pub fn singularize_token(token: &str) -> String {
 
 fn irregular_singular(token: &str) -> Option<&'static str> {
     match token {
-        "aliases" => Some("alias"),
         "analyses" => Some("analysis"),
-        "buses" => Some("bus"),
         "children" => Some("child"),
         "criteria" => Some("criterion"),
         "feet" => Some("foot"),
@@ -452,10 +452,30 @@ fn irregular_singular(token: &str) -> Option<&'static str> {
         "men" => Some("man"),
         "mice" => Some("mouse"),
         "people" => Some("person"),
-        "statuses" => Some("status"),
+        "quizzes" => Some("quiz"),
         "teeth" => Some("tooth"),
         "vertices" => Some("vertex"),
         "women" => Some("woman"),
+        // Singulars ending in "s" keep it, and their plurals add "es".
+        "alias" | "aliases" => Some("alias"),
+        "atlas" | "atlases" => Some("atlas"),
+        "bias" | "biases" => Some("bias"),
+        "bonuses" => Some("bonus"),
+        "buses" => Some("bus"),
+        "canvas" | "canvases" => Some("canvas"),
+        "focuses" => Some("focus"),
+        "lens" | "lenses" => Some("lens"),
+        "statuses" => Some("status"),
+        "viruses" => Some("virus"),
+        // Nouns ending in "-che" or "-ie" add only "s".
+        "caches" => Some("cache"),
+        "cookies" => Some("cookie"),
+        "movies" => Some("movie"),
+        "niches" => Some("niche"),
+        "zombies" => Some("zombie"),
+        // Invariant plurals.
+        "series" => Some("series"),
+        "species" => Some("species"),
         _ => None,
     }
 }
@@ -807,6 +827,48 @@ mod tests {
         assert_eq!(singularize_token("indices"), "index");
         assert_eq!(singularize_token("statuses"), "status");
         assert_eq!(singularize_token("aliases"), "alias");
+    }
+
+    #[test]
+    fn singularize_common_plurals_and_singular_words() {
+        for (token, expected) in [
+            ("caches", "cache"),
+            ("niches", "niche"),
+            ("matches", "match"),
+            ("hashes", "hash"),
+            ("boxes", "box"),
+            ("indexes", "index"),
+            ("classes", "class"),
+            ("processes", "process"),
+            ("addresses", "address"),
+            ("buzzes", "buzz"),
+            ("waltzes", "waltz"),
+            ("quizzes", "quiz"),
+            ("sizes", "size"),
+            ("normalizes", "normalize"),
+            ("statuses", "status"),
+            ("buses", "bus"),
+            ("viruses", "virus"),
+            ("aliases", "alias"),
+            ("biases", "bias"),
+            ("responses", "response"),
+            ("databases", "database"),
+            ("policies", "policy"),
+            ("cookies", "cookie"),
+            ("movies", "movie"),
+            // Singular words and invariant plurals stay unchanged.
+            ("alias", "alias"),
+            ("bias", "bias"),
+            ("canvas", "canvas"),
+            ("series", "series"),
+            ("species", "species"),
+            ("cache", "cache"),
+            ("process", "process"),
+            ("redis", "redis"),
+            ("utf8", "utf8"),
+        ] {
+            assert_eq!(singularize_token(token), expected, "{token}");
+        }
     }
 
     #[test]
