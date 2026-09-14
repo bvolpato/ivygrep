@@ -4,31 +4,12 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-### Added
+## [1.2.15] - 2026-09-14
 
-- **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
+### Upgrade notes
 
-### Performance
-
-- Static embedding profiles convert the model matrix in bounded row blocks instead of whole-tensor copies, lowering peak memory while loading the model from 298 MiB to 154 MiB for static-retrieval-v1 and from 186 MiB to 107 MiB for potion-code-16m-v2. Loaded embeddings are bit-identical.
-- Daemon status, literal, and regex requests reuse the cached workspace resolution that hybrid search already uses, and lease acquisition takes a linked worktree's main checkout root from that cached resolution instead of running `git worktree list`. On a warm linked worktree, daemon Git subprocesses per request drop from 2 to 0 for hybrid search and from 4 to 0 for literal and regex searches. Replaced checkouts, linked worktrees converted to standalone checkouts, and retargeted Git pointers still refresh workspace identity. A CLI process on a linked worktree still runs 2 Git subprocesses to resolve it.
-- Context packs reuse their loaded search context across relationship anchors instead of reopening index stores for each anchor's callers and references. Definition lookups, relationship definition languages, and file-edge loading also use the context's SQLite connections. A pack with three anchor symbols now opens SQLite 2 times instead of 10 on a main checkout, and 3 times instead of 33 on a linked worktree. Packs are byte-identical.
-- Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
-- Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
-- Background hash and neural enhancement insert vectors through at most four concurrent lanes instead of one at a time, keeping neural recall@10 within 0.5 points of serial builds. On a 179K-chunk repository, hash enhancement runs 2.0x faster and neural enhancement 2.4x faster. Stores under 1,024 vectors keep serial inserts, and `IVYGREP_INDEX_THREADS=1` restores them everywhere.
-- Indexing reuses the chunker's Tree-sitter parse for Python and Objective-C import scanning instead of parsing each file again. Objective-C++ files also reuse the chunker's C++ parse.
-
-### Testing
-
-- Criterion benchmarks return their fixtures so temporary-directory cleanup stays outside timed samples. The ANN fixture uses 50,000 distinct seeded vectors instead of 97 repeated values, and its guarded benches are renamed `*_distinct_hot` because earlier results are not comparable. The benchmark guard records the head measurement and passes when the baseline ref has no such bench.
-- Million-chunk query phases use disjoint query sets, so CLI warm and concurrent latency no longer replay cached daemon answers. Paired comparisons fail when peak indexing RSS or disk use exceeds 1.25 times the baseline.
-- The self-repository relevance fixture adds two multi-line queries that paste source snippets, so the gate covers multi-line ranking.
-- The daemon soak budgets anonymous RSS growth at 32 MiB and total RSS growth at 96 MiB per process epoch, and records anonymous and file-backed RSS in every sample. Total RSS includes mapped index segments that continuous reindexing replaces, which moved by up to 60 MiB within one epoch while anonymous RSS grew 4-10 MiB. The two-minute PR soak failed 4 of its last 40 runs on total RSS growth of 34-38 MiB against the old 32 MiB total budget.
-- The public relevance gate compares metric means with their floors using a 1e-9 tolerance. Three cosqa neural runs averaging exactly 175 of 500 queries came out as `0.3499999999999999` and failed the `0.35` recall@20 floor.
-
-### Changed
-
-- Query expansion no longer maps phrases to identifiers from ivygrep's own source or the Linux kernel relevance fixture (`cpu_permits`, `vector_store`, `daemon_request`, `daemon_response`, `indexable`, `doctor`, `block_io`, `workqueue`). Two phrase aliases that tokenization could never match are removed. Self-repository relevance gate floors are lowered to match. Many remaining phrase aliases still come from the same fixture-fitting history and are candidates for corpus-derived expansion.
+- Existing indexes rebuild once on first use for index format v30.
+- The Web UI requires the session token on loopback listeners too. Open the URL that `ig --web` prints; a bare `http://127.0.0.1:4747/` returns 401.
 
 ### Security
 
@@ -36,6 +17,14 @@ All notable changes to ivygrep are documented in this file.
 - `ig --web` opens the browser through an owner-only HTML redirect file under the ivygrep app home instead of passing the tokenized URL to `xdg-open`, `open`, or `ShellExecuteW`, so the token no longer appears in process arguments other local users can read. On Unix the file is mode 0600 in a 0700 `browser/` directory; a later launch removes files older than two minutes. `IVYGREP_NO_BROWSER=1` skips the launch and the file.
 - The token URL answers with a same-origin page that sets the HttpOnly `SameSite=Strict` cookie and refreshes to the app without the token. A redirect lost the cookie when the URL was opened from a local file, as the launcher's redirect page does. The cookie is named per listener port (`ivygrep_session_<port>`), so daemons on different ports keep separate sessions.
 - Model downloads use rustls 0.23.45, which fixes RUSTSEC-2026-0285: rustls accepted TLS 1.3 handshake messages sent at the wrong encryption level when they followed a key-changing message in the same record. The handshake transcript stays authenticated, so an attacker could not alter or complete a handshake.
+
+### Added
+
+- **Optional PotionCode v2 static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code-v2` runs the revision-pinned `minishlab/potion-code-16M-v2` Model2Vec profile (256 dimensions, float16 weights widened to f32, unweighted token mean). The default profile is unchanged.
+
+### Changed
+
+- Query expansion no longer maps phrases to identifiers from ivygrep's own source or the Linux kernel relevance fixture (`cpu_permits`, `vector_store`, `daemon_request`, `daemon_response`, `indexable`, `doctor`, `block_io`, `workqueue`). Two phrase aliases that tokenization could never match are removed. Self-repository relevance gate floors are lowered to match. Many remaining phrase aliases still come from the same fixture-fitting history and are candidates for corpus-derived expansion.
 
 ### Fixed
 
@@ -83,6 +72,24 @@ All notable changes to ivygrep are documented in this file.
 - Literal search also matches files the lexical index stores without chunks, such as minified bundles, using the file list from the last completed index publication instead of a separate walk. Files hidden by ignore rules or Git excludes, including external linked-worktree excludes, stay out of literal results. Regex search reuses that file list, still finds files the index never recorded, such as files over 16 MiB or files created since the last publication, and hides those files again as soon as an ignore rule excludes them.
 - The Windows daemon reads the loopback token handshake in each connection's own task instead of the accept loop. A client that connected without sending the token previously held up every other client for up to 1 s per connection. The token check is unchanged.
 - The daemon serves at most 512 client connections at once. Idle connections previously accumulated without a bound: 4,000 idle connections grew the daemon by 59 MiB, and now by 10 MiB. A connection past the cap waits up to 2 s for a slot, then gets a busy error. CLI, TUI, and MCP searches fall back to local search on that error, and index, status, and `--web` requests report it. Version probes still get an answer, so clients do not restart a busy daemon. Past 64 waiting connections, new connections are closed without a reply.
+
+### Performance
+
+- Static embedding profiles convert the model matrix in bounded row blocks instead of whole-tensor copies, lowering peak memory while loading the model from 298 MiB to 154 MiB for static-retrieval-v1 and from 186 MiB to 107 MiB for potion-code-16m-v2. Loaded embeddings are bit-identical.
+- Daemon status, literal, and regex requests reuse the cached workspace resolution that hybrid search already uses, and lease acquisition takes a linked worktree's main checkout root from that cached resolution instead of running `git worktree list`. On a warm linked worktree, daemon Git subprocesses per request drop from 2 to 0 for hybrid search and from 4 to 0 for literal and regex searches. Replaced checkouts, linked worktrees converted to standalone checkouts, and retargeted Git pointers still refresh workspace identity. A CLI process on a linked worktree still runs 2 Git subprocesses to resolve it.
+- Context packs reuse their loaded search context across relationship anchors instead of reopening index stores for each anchor's callers and references. Definition lookups, relationship definition languages, and file-edge loading also use the context's SQLite connections. A pack with three anchor symbols now opens SQLite 2 times instead of 10 on a main checkout, and 3 times instead of 33 on a linked worktree. Packs are byte-identical.
+- Stored chunk decompression reuses a thread-local zstd context for single sized frames instead of building a stream decoder per chunk.
+- Web file, tree, and open requests read tracked roots from the registry instead of sizing every index.
+- Background hash and neural enhancement insert vectors through at most four concurrent lanes instead of one at a time, keeping neural recall@10 within 0.5 points of serial builds. On a 179K-chunk repository, hash enhancement runs 2.0x faster and neural enhancement 2.4x faster. Stores under 1,024 vectors keep serial inserts, and `IVYGREP_INDEX_THREADS=1` restores them everywhere.
+- Indexing reuses the chunker's Tree-sitter parse for Python and Objective-C import scanning instead of parsing each file again. Objective-C++ files also reuse the chunker's C++ parse.
+
+### Testing
+
+- Criterion benchmarks return their fixtures so temporary-directory cleanup stays outside timed samples. The ANN fixture uses 50,000 distinct seeded vectors instead of 97 repeated values, and its guarded benches are renamed `*_distinct_hot` because earlier results are not comparable. The benchmark guard records the head measurement and passes when the baseline ref has no such bench.
+- Million-chunk query phases use disjoint query sets, so CLI warm and concurrent latency no longer replay cached daemon answers. Paired comparisons fail when peak indexing RSS or disk use exceeds 1.25 times the baseline.
+- The self-repository relevance fixture adds two multi-line queries that paste source snippets, so the gate covers multi-line ranking.
+- The daemon soak budgets anonymous RSS growth at 32 MiB and total RSS growth at 96 MiB per process epoch, and records anonymous and file-backed RSS in every sample. Total RSS includes mapped index segments that continuous reindexing replaces, which moved by up to 60 MiB within one epoch while anonymous RSS grew 4-10 MiB. The two-minute PR soak failed 4 of its last 40 runs on total RSS growth of 34-38 MiB against the old 32 MiB total budget.
+- The public relevance gate compares metric means with their floors using a 1e-9 tolerance. Three cosqa neural runs averaging exactly 175 of 500 queries came out as `0.3499999999999999` and failed the `0.35` recall@20 floor.
 
 ## [1.2.14] - 2026-09-10
 

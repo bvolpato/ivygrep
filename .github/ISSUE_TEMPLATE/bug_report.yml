@@ -14,7 +14,7 @@ body:
     attributes:
       label: ivygrep version
       description: Run `ig --version` and paste its output.
-      placeholder: ivygrep 1.2.14
+      placeholder: ivygrep 1.2.15
     validations:
       required: true
 
