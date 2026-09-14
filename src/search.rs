@@ -243,7 +243,9 @@ pub struct SearchContext {
     glob_path_filters: RefCell<HashMap<GlobPathFilterCacheKey, GlobPathQueryFilter>>,
 }
 
-type SemanticCandidatesById = HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>)>;
+/// Semantic candidates by vector key: the chunk, its best adjusted score across
+/// tiers, the tiers that returned it, and the neural tier's own adjusted score.
+type SemanticCandidatesById = HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>, Option<f32>)>;
 
 pub(crate) enum NeuralQueryVectorJob {
     Ready(Vec<f32>),
@@ -3958,17 +3960,19 @@ fn collect_unfiltered_semantic_candidates_with_refill(
 ) -> Result<SemanticCandidatesById> {
     debug_assert!(!has_semantic_filters(options));
 
-    let mut by_key = HashMap::<u64, (f32, HashSet<&'static str>)>::new();
+    let mut by_key = HashMap::<u64, (f32, HashSet<&'static str>, Option<f32>)>::new();
     for (matches, multiplier, source) in &sources {
         for vector_match in matches {
             let adjusted = vector_match.score * *multiplier;
+            let neural_score = (*source == "neural").then_some(adjusted);
             by_key
                 .entry(vector_match.key)
-                .and_modify(|(score, source_set)| {
+                .and_modify(|(score, source_set, best_neural_score)| {
                     *score = score.max(adjusted);
                     source_set.insert(*source);
+                    keep_best_neural_score(best_neural_score, neural_score);
                 })
-                .or_insert_with(|| (adjusted, HashSet::from([*source])));
+                .or_insert_with(|| (adjusted, HashSet::from([*source]), neural_score));
         }
     }
 
@@ -3996,9 +4000,10 @@ fn collect_unfiltered_semantic_candidates_with_refill(
     }
     Ok(by_key
         .into_iter()
-        .filter_map(|(key, (score, sources))| {
+        .filter_map(|(key, (score, sources, neural_score))| {
             let chunk = chunks.get(&key)?.clone();
-            (options.skip_gitignore || !chunk.is_ignored).then_some((key, (chunk, score, sources)))
+            (options.skip_gitignore || !chunk.is_ignored)
+                .then_some((key, (chunk, score, sources, neural_score)))
         })
         .collect())
 }
@@ -4061,13 +4066,21 @@ fn merge_semantic_candidates(
 ) {
     for (chunk, score) in hits {
         let adjusted = score * score_multiplier;
+        let neural_score = (source == "neural").then_some(adjusted);
         semantic_by_id
             .entry(chunk.vector_key)
-            .and_modify(|(_, best_score, sources)| {
+            .and_modify(|(_, best_score, sources, best_neural_score)| {
                 *best_score = best_score.max(adjusted);
                 sources.insert(source);
+                keep_best_neural_score(best_neural_score, neural_score);
             })
-            .or_insert_with(|| (chunk, adjusted, HashSet::from([source])));
+            .or_insert_with(|| (chunk, adjusted, HashSet::from([source]), neural_score));
+    }
+}
+
+fn keep_best_neural_score(best: &mut Option<f32>, candidate: Option<f32>) {
+    if let Some(candidate) = candidate {
+        *best = Some(best.map_or(candidate, |current| current.max(candidate)));
     }
 }
 
@@ -4135,7 +4148,7 @@ impl<'a> FusionQuery<'a> {
 
 struct FusionCandidates {
     lexical: Vec<(IndexedChunk, f32)>,
-    semantic: Vec<(IndexedChunk, f32, HashSet<&'static str>)>,
+    semantic: Vec<(IndexedChunk, f32, HashSet<&'static str>, Option<f32>)>,
     literal: Vec<(IndexedChunk, f32)>,
     path: Vec<(IndexedChunk, f32)>,
     path_weight: f32,
@@ -4404,7 +4417,7 @@ fn promote_literal_spans(ranked: &mut [RankedCandidate]) {
 #[cfg(test)]
 fn fuse_rrf(
     candidates: FusionCandidates,
-    semantic_direct_weight: f32,
+    hash_direct_weight: f32,
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
@@ -4414,7 +4427,7 @@ fn fuse_rrf(
         None,
         candidates,
         None,
-        semantic_direct_weight,
+        hash_direct_weight,
         &query,
         routing,
         limit,
@@ -6492,8 +6505,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(shared.len(), separate.len());
-        for (key, (separate_chunk, separate_score, separate_sources)) in separate {
-            let (shared_chunk, shared_score, shared_sources) = shared
+        for (key, (separate_chunk, separate_score, separate_sources, separate_neural_score)) in
+            separate
+        {
+            let (shared_chunk, shared_score, shared_sources, shared_neural_score) = shared
                 .get(&key)
                 .expect("shared hydration must preserve every key");
             assert_eq!(shared_chunk.chunk_id, separate_chunk.chunk_id);
@@ -6507,6 +6522,7 @@ mod tests {
             );
             assert_eq!(*shared_score, separate_score);
             assert_eq!(shared_sources, &separate_sources);
+            assert_eq!(*shared_neural_score, separate_neural_score);
         }
     }
 
@@ -9186,7 +9202,7 @@ export function registerCommands(p: Plugin) {
         let ranked = fuse_rrf(
             FusionCandidates {
                 lexical: vec![(direct, 20.0), (related.clone(), 5.0)],
-                semantic: vec![(related, 1.0, HashSet::from(["neural"]))],
+                semantic: vec![(related, 1.0, HashSet::from(["neural"]), Some(1.0))],
                 literal: vec![],
                 path: vec![],
                 path_weight: 1.5,
@@ -9197,6 +9213,123 @@ export function registerCommands(p: Plugin) {
             Some(10),
         );
         assert_eq!(ranked[0].0.chunk_id, "direct", "{ranked:#?}");
+    }
+
+    #[test]
+    #[serial]
+    fn hash_only_corroboration_keeps_hash_weight_beside_neural_corroboration() {
+        let corroborated_score = |source: &'static str| {
+            let corroborated = make_chunk_with_path(
+                "corroborated",
+                "src/b.rs",
+                "fn b() { /* parse config file */ }",
+            );
+            let ranked = fuse_rrf(
+                FusionCandidates {
+                    lexical: vec![(corroborated.clone(), 20.0)],
+                    semantic: vec![(
+                        corroborated,
+                        0.9,
+                        HashSet::from([source]),
+                        (source == "neural").then_some(0.9),
+                    )],
+                    literal: vec![],
+                    path: vec![],
+                    path_weight: 1.5,
+                    symbols: vec![],
+                },
+                0.25,
+                "parse config file",
+                Some(10),
+            );
+            ranked
+                .iter()
+                .find(|(chunk, _, _)| chunk.chunk_id == "corroborated")
+                .map(|(_, score, _)| *score)
+                .expect("corroborated candidate is ranked")
+        };
+
+        let hash = corroborated_score("hash");
+        let neural = corroborated_score("neural");
+        assert!(
+            neural > hash,
+            "neural corroboration should keep full weight while hash-only corroboration uses the hash weight: neural={neural} hash={hash}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn neural_corroboration_votes_from_neural_rank_when_hash_votes_are_discounted() {
+        let direct = || {
+            make_chunk_with_path(
+                "direct",
+                "src/direct.rs",
+                "fn direct() { /* parse config file */ }",
+            )
+        };
+        let neural_neighbors = || {
+            [0.8, 0.7, 0.6]
+                .into_iter()
+                .enumerate()
+                .map(|(index, score)| {
+                    (
+                        make_chunk_with_path(
+                            &format!("neighbor-{index}"),
+                            &format!("src/neighbor_{index}.rs"),
+                            "fn neighbor() {}",
+                        ),
+                        score,
+                        HashSet::from(["neural"]),
+                        Some(score),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let direct_score = |semantic| {
+            fuse_rrf(
+                FusionCandidates {
+                    lexical: vec![(direct(), 20.0)],
+                    semantic,
+                    literal: vec![],
+                    path: vec![],
+                    path_weight: 1.5,
+                    symbols: vec![],
+                },
+                0.0,
+                "parse config file",
+                Some(10),
+            )
+            .iter()
+            .find(|(chunk, _, _)| chunk.chunk_id == "direct")
+            .map(|(_, score, _)| *score)
+            .expect("direct candidate is ranked")
+        };
+
+        // Hash ranks the direct candidate first; the neural tier ranks it fourth.
+        let mut hash_first = vec![(direct(), 0.9, HashSet::from(["hash", "neural"]), Some(0.2))];
+        hash_first.extend(neural_neighbors());
+        // The same neural evidence without the hash match.
+        let mut neural_only = neural_neighbors();
+        neural_only.push((direct(), 0.2, HashSet::from(["neural"]), Some(0.2)));
+
+        let hash_first = direct_score(hash_first);
+        let neural_only = direct_score(neural_only);
+        assert!(
+            (hash_first - neural_only).abs() < 1e-6,
+            "a neural hit on a direct candidate should vote from its neural rank, not the merged rank: hash_first={hash_first} neural_only={neural_only}"
+        );
+    }
+
+    #[test]
+    fn hash_corroboration_weight_drops_votes_for_one_line_prose() {
+        use super::execution::hash_direct_weight;
+        let prose = "python change array dtype to int";
+        assert_eq!(hash_direct_weight(prose, false), 0.0);
+        assert_eq!(hash_direct_weight(prose, true), 0.0);
+        let snippet = "for i in range(n):\n    total += values[i]";
+        assert_eq!(hash_direct_weight(snippet, false), 0.25);
+        assert_eq!(hash_direct_weight(snippet, true), 1.0);
+        assert_eq!(hash_direct_weight("parse config tests", false), 1.0);
     }
 
     #[test]
