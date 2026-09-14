@@ -1,7 +1,7 @@
 {
   "binary": {
-    "sha256": "5a6ceda707974c39a5ee9dc96f59dd78ff613a678306a0e08e973ae99bdfb1fd",
-    "version": "ivygrep 1.2.14"
+    "sha256": "5b809bf7cc40371f56157c37ad78644400f4a2db37365b8b1786b824a9120938",
+    "version": "ivygrep 1.2.15"
   },
   "fixture": {
     "path": "tests/fixtures/ivygrep_relevance_queries.json",
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "f481e7f14ee00b7137eaece5f51273b0b484c080",
+  "ivygrep_commit": "0ec517a17d44269fffa69efc0a4426f5b2c56d99",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -25,7 +25,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 24849.64462183416,
+      "elapsed_ms": 23907.155900262296,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -60,7 +60,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 28423.165555112064,
+      "elapsed_ms": 24609.593348111957,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -90,29 +90,29 @@
         "candidate_budget": 0,
         "first_useful_low": 0,
         "no_primary_judgment": 0,
-        "not_audited": 4,
-        "satisfied": 21
+        "not_audited": 3,
+        "satisfied": 22
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 10219.04218243435,
+      "elapsed_ms": 9338.027158752084,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.905,
-      "mean_ndcg10": 0.884256154771861,
-      "mean_p1": 0.84,
+      "mean_mrr": 0.925,
+      "mean_ndcg10": 0.8990189646290027,
+      "mean_p1": 0.88,
       "mean_p5": 0.20800000000000002,
       "mean_recall5": 0.92,
       "mode": "neural",
       "neural_queries_executed": 25,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 17,
+      "neural_queries_with_results": 15,
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.84
+      "satisfaction_rate": 0.88
     }
   },
   "runtime": {
@@ -134,6 +134,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "92c2e44b710d3be6aaa459160790646132d1fa4f49bc769042888572ed299255"
+    "sha256": "cf6bbd7dbd2b58e883f4d3a01a5cd69873e01e59af9b89ffac13b507b18745aa"
   }
 }
