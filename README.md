@@ -109,9 +109,10 @@ with lower semantic quality. Run `ig --help` for full reference.
 
 Multi-line queries are ranked as pasted source, so the code that contains the snippet ranks above
 one-line definition signatures that share a few of its identifiers. For pasted error output, such as
-a traceback, a `Caused by:` chain, or a `panicked at` line, ranking ignores runtime values such as
-paths outside the workspace, ids, and timestamps, and matches the static message text against the
-code that raises it.
+a traceback, a `Caused by:` chain, or a `panicked at` line, lexical, path, hash-vector, and reranking
+signals ignore runtime values such as paths outside the workspace, ids, and timestamps, and the static
+message text is matched against the code that raises it. Neural query vectors still embed the original
+text.
 
 On macOS laptops, background neural enhancement pauses on battery power (`ig --status`
 shows `Paused: Battery Power`); set `IVYGREP_ENHANCE_ON_BATTERY=1` to keep it running.

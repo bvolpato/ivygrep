@@ -247,8 +247,9 @@ Format v30 rebuilds once so fallback-chunked files index lines before their
 first declaration; Python decorators, decorators before a JavaScript or
 TypeScript `export class`, and TypeScript member decorators stay in their
 definition's chunk; signatures skip multi-line annotations; and Java records,
-module-level JavaScript and TypeScript function bindings, and Rust
-`macro_rules!` macros register symbols.
+module-level JavaScript and TypeScript function bindings, and module-level Rust
+`macro_rules!` macros register symbols. A macro declared inside a function stays
+in that function's chunk and does not register a definition.
 
 ## Search pipeline
 
@@ -326,8 +327,9 @@ prompt, score lexical matches without the boosted signature field. Each pasted
 identifier would otherwise add a near-maximal bonus to every one-line definition
 signature containing it and bury the snippet's body evidence. Signature text
 stays searchable through the body field, and an explicit `signature:` clause
-keeps its boost. `owner.member` text inside a multi-line query does not become
-an exact-symbol lookup.
+keeps its boost. The dotted `owner.member` heuristic does not create
+exact-symbol lookups for multi-line queries, but mixed-case identifiers inside
+them, such as `sendFile`, can still become exact-symbol candidates.
 
 `src/search_error_text.rs` recognizes pasted error output by line-leading error
 labels (`Error:`, `Caused by:`, `ValueError:`, `java.lang.IllegalStateException:`,
