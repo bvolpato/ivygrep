@@ -9,7 +9,7 @@ use tantivy::directory::{
     Directory, DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
 };
 use tantivy::schema::{
-    Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
+    FAST, Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
 };
 
 use crate::text::{
@@ -429,7 +429,9 @@ fn build_schema() -> Schema {
     let boosted_aux_text_opts = TextOptions::default().set_indexing_options(boosted_aux_indexing);
 
     let mut schema = Schema::builder();
-    schema.add_u64_field("vector_key", STORED);
+    // A fast column lets candidate collection order equal scores by chunk key
+    // without reading stored documents.
+    schema.add_u64_field("vector_key", STORED | FAST);
     schema.add_text_field("file_path", STRING | STORED);
     schema.add_u64_field("start_line", STORED);
     schema.add_u64_field("end_line", STORED);

@@ -221,10 +221,28 @@ mod tests {
                 ranked.iter().take(7).any(|(_, address)| ignored(*address)),
                 term == "needle"
             );
-            let eligible = ranked
+            let key = |address| {
+                searcher
+                    .doc::<TantivyDocument>(address)
+                    .unwrap()
+                    .get_first(fields.vector_key)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap()
+            };
+            // Candidates report bucket scores and order equal buckets by chunk
+            // key rather than by document address.
+            let mut eligible = ranked
                 .into_iter()
                 .filter(|(_, address)| !ignored(*address))
+                .map(|(score, address)| (candidate_bucket_score(score), address))
                 .collect::<Vec<_>>();
+            eligible.sort_by(|left, right| {
+                right
+                    .0
+                    .total_cmp(&left.0)
+                    .then_with(|| key(left.1).cmp(&key(right.1)))
+            });
             for limit in [1, 7, 100] {
                 let expected = eligible.iter().copied().take(limit).collect::<Vec<_>>();
                 let actual = collect_top_docs_with_eligibility(

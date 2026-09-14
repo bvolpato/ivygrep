@@ -9,8 +9,7 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
-use tantivy::collector::sort_key::NaturalComparator;
-use tantivy::collector::{Collector, SegmentCollector, TopDocs, TopNComputer};
+use tantivy::collector::{Collector, SegmentCollector, TopDocs};
 use tantivy::query::{
     BooleanQuery, BoostQuery, Occur, Query, QueryParser, RegexQuery, TermQuery, TermSetQuery,
 };
@@ -2807,6 +2806,10 @@ fn collect_top_docs_with_glob_filter(
     )
 }
 
+/// Top `limit` eligible documents, selected and ordered independently of
+/// segment layout. Scores compare by bucket (see
+/// [`CANDIDATE_SCORE_IGNORED_BITS`]) and equal buckets by chunk key, and the
+/// reported scores are bucket values.
 fn collect_top_docs_with_eligibility(
     searcher: &tantivy::Searcher,
     query: &dyn Query,
@@ -2828,7 +2831,14 @@ fn collect_top_docs_with_eligibility(
         // discard this probe and refill with eligibility before heap admission.
         // Native traversal keeps the ordinary path's pre/post cancellation;
         // the filtered fallback below checks cancellation per posting.
-        let docs = searcher.search(query, &TopDocs::with_limit(limit).order_by_score())?;
+        let docs = searcher.search(
+            query,
+            &CandidateCollector {
+                limit,
+                fields: fields.clone(),
+                admission: None,
+            },
+        )?;
         if is_cancelled() {
             return Ok(Vec::new());
         }
@@ -2854,41 +2864,120 @@ fn collect_top_docs_with_eligibility(
     }
     Ok(searcher.search(
         query,
-        &EligibilityCollector {
+        &CandidateCollector {
             limit,
             fields: fields.clone(),
-            matcher: filter.residual_matcher.as_ref(),
-            eligibility,
-            cancel_token,
+            admission: Some(CandidateAdmission {
+                matcher: filter.residual_matcher.as_ref(),
+                eligibility,
+                cancel_token,
+            }),
         },
     )?)
 }
 
-struct EligibilityCollector<'a> {
+/// Low f32 mantissa bits that candidate cutoffs ignore when comparing scores.
+///
+/// Block-WAND adds term scores in posting traversal order, so one document can
+/// score a few ULPs apart (up to 4e-7 relative) between segment layouts of the
+/// same corpus. Comparing the top 13 of 23 mantissa bits groups scores within
+/// 6e-5 to 1.2e-4 of each other, which absorbs that drift.
+const CANDIDATE_SCORE_IGNORED_BITS: u32 = 10;
+
+fn candidate_score_bucket(score: f32) -> i64 {
+    if score.is_nan() {
+        return i64::MIN;
+    }
+    let magnitude = i64::from(score.abs().to_bits() >> CANDIDATE_SCORE_IGNORED_BITS);
+    if score < 0.0 {
+        -magnitude - 1
+    } else {
+        magnitude
+    }
+}
+
+/// A candidate's reported score is its bucket value, so equal evidence enters
+/// fusion with bit-identical scores on every layout.
+fn candidate_bucket_score(score: f32) -> f32 {
+    if score.is_nan() {
+        return score;
+    }
+    f32::from_bits(score.to_bits() & !((1 << CANDIDATE_SCORE_IGNORED_BITS) - 1))
+}
+
+/// ULPs between a kept bucket's floor and its pruning threshold. Block-WAND
+/// skips blocks whose summed upper bounds do not exceed the threshold, and sums
+/// them in a different order than document scores. Without this margin, a
+/// document scoring exactly at the floor could be skipped on one layout and
+/// scored on another.
+const CANDIDATE_PRUNING_MARGIN_ULPS: u32 = 64;
+
+/// Pruning threshold that still evaluates every document able to tie with or
+/// beat `bucket`.
+fn candidate_bucket_threshold(bucket: i64) -> f32 {
+    match u32::try_from(bucket) {
+        Ok(bucket) if bucket > 0 => {
+            f32::from_bits((bucket << CANDIDATE_SCORE_IGNORED_BITS) - CANDIDATE_PRUNING_MARGIN_ULPS)
+        }
+        _ => f32::MIN,
+    }
+}
+
+/// Candidate order: higher score bucket, then smaller chunk key. Tantivy breaks
+/// equal scores by document address, which depends on how indexing threads and
+/// merges laid out segments. The address only separates documents without a
+/// key column, such as indexes written before the key became a fast field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CandidateRank {
+    bucket: i64,
+    key: std::cmp::Reverse<u64>,
+    address: std::cmp::Reverse<tantivy::DocAddress>,
+}
+
+/// Bounded top-k by [`CandidateRank`] in one Block-WAND traversal. Native
+/// requests admit every match; filtered requests read stored metadata, but only
+/// for documents that would enter the heap.
+struct CandidateCollector<'a> {
     limit: usize,
     fields: TantivyFields,
+    admission: Option<CandidateAdmission<'a>>,
+}
+
+struct CandidateAdmission<'a> {
     matcher: Option<&'a PathGlobMatcher>,
     eligibility: CandidateEligibility,
     cancel_token: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
 }
 
-impl Collector for EligibilityCollector<'_> {
+impl Collector for CandidateCollector<'_> {
     type Fruit = Vec<(f32, tantivy::DocAddress)>;
-    type Child = EligibilitySegmentCollector;
+    type Child = CandidateSegmentCollector;
 
     fn for_segment(
         &self,
         segment_ord: u32,
         reader: &tantivy::SegmentReader,
     ) -> tantivy::Result<Self::Child> {
-        Ok(EligibilitySegmentCollector {
-            top_docs: TopNComputer::new_with_comparator(self.limit, NaturalComparator),
+        let admission = match &self.admission {
+            Some(admission) => Some(SegmentAdmission {
+                store: reader.get_store_reader(1)?,
+                fields: self.fields.clone(),
+                matcher: admission.matcher.cloned(),
+                eligibility: admission.eligibility.clone(),
+                cancel_token: admission.cancel_token.cloned(),
+            }),
+            None => None,
+        };
+        Ok(CandidateSegmentCollector {
+            limit: self.limit,
             segment_ord,
-            store: reader.get_store_reader(1)?,
-            fields: self.fields.clone(),
-            matcher: self.matcher.cloned(),
-            eligibility: self.eligibility.clone(),
-            cancel_token: self.cancel_token.cloned(),
+            keys: reader
+                .fast_fields()
+                .u64(reader.schema().get_field_name(self.fields.vector_key))
+                .ok(),
+            heap: std::collections::BinaryHeap::with_capacity(self.limit.min(4_096)),
+            threshold: f32::MIN,
+            admission,
             error: None,
         })
     }
@@ -2901,21 +2990,15 @@ impl Collector for EligibilityCollector<'_> {
         &self,
         fruits: Vec<<Self::Child as SegmentCollector>::Fruit>,
     ) -> tantivy::Result<Self::Fruit> {
-        let mut fruits = fruits.into_iter().collect::<tantivy::Result<Vec<_>>>()?;
-        // TopNComputer requires ascending addresses for deterministic ties.
-        // Sort only the bounded segment results before merging into its heap.
-        fruits.sort_unstable_by_key(|docs| docs.first().map(|(_, doc)| doc.segment_ord));
-        let mut top_docs = TopNComputer::new_with_comparator(self.limit, NaturalComparator);
-        for mut docs in fruits {
-            docs.sort_unstable_by_key(|(_, address)| *address);
-            for (score, address) in docs {
-                top_docs.push(score, address);
-            }
+        let mut candidates = Vec::new();
+        for fruit in fruits {
+            candidates.extend(fruit?);
         }
-        Ok(top_docs
-            .into_sorted_vec()
+        candidates.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.0));
+        candidates.truncate(self.limit);
+        Ok(candidates
             .into_iter()
-            .map(|doc| (doc.sort_key, doc.doc))
+            .map(|(rank, score)| (candidate_bucket_score(score), rank.address.0))
             .collect())
     }
 
@@ -2927,12 +3010,16 @@ impl Collector for EligibilityCollector<'_> {
     ) -> tantivy::Result<<Self::Child as SegmentCollector>::Fruit> {
         let mut collector = self.for_segment(segment_ord, reader)?;
         let alive = reader.alive_bitset();
-        if self.cancel_token.is_some() {
+        if self
+            .admission
+            .as_ref()
+            .is_some_and(|admission| admission.cancel_token.is_some())
+        {
             // Tantivy's generic for_each_pruning keeps advancing after the
             // callback raises its threshold to MAX. Own the scorer loop when
-            // a token is present so even noncompetitive postings can stop.
-            // Stored reads still respect the top-k score threshold, but this
-            // cancellable path cannot use native Block-WAND block skipping.
+            // a filtered request has a token so even noncompetitive postings
+            // can stop. Stored reads still respect the top-k threshold, but
+            // this cancellable path cannot use native Block-WAND block skipping.
             if !collector.is_cancelled() {
                 let mut scorer = weight.scorer(reader, 1.0)?;
                 while !collector.is_cancelled() && collector.error.is_none() {
@@ -2942,7 +3029,7 @@ impl Collector for EligibilityCollector<'_> {
                     }
                     if alive.is_none_or(|alive| alive.is_alive(doc)) {
                         let score = scorer.score();
-                        if score > collector.top_docs.threshold.unwrap_or(f32::MIN) {
+                        if score > collector.threshold {
                             collector.collect(doc, score);
                         }
                     }
@@ -2954,9 +3041,10 @@ impl Collector for EligibilityCollector<'_> {
             }
             return Ok(collector.harvest());
         }
-        // Without a cancellation token, retain native Block-WAND traversal.
-        // Only eligible documents raise the threshold. Rejected high scores
-        // must never prune lower-scoring visible matches.
+        // Retain native Block-WAND traversal. The threshold stays just below
+        // the worst kept bucket, so equal-bucket documents with smaller keys
+        // still reach the heap. Only admitted documents raise it; rejected high
+        // scores must never prune lower-scoring visible matches.
         weight.for_each_pruning(f32::MIN, reader, &mut |doc, score| {
             if alive.is_none_or(|alive| alive.is_alive(doc)) {
                 collector.collect(doc, score);
@@ -2964,59 +3052,96 @@ impl Collector for EligibilityCollector<'_> {
             if collector.error.is_some() || collector.is_cancelled() {
                 f32::MAX
             } else {
-                collector.top_docs.threshold.unwrap_or(f32::MIN)
+                collector.threshold
             }
         })?;
         Ok(collector.harvest())
     }
 }
 
-struct EligibilitySegmentCollector {
-    top_docs: TopNComputer<f32, u32, NaturalComparator>,
+struct CandidateSegmentCollector {
+    limit: usize,
     segment_ord: u32,
+    keys: Option<tantivy::columnar::Column<u64>>,
+    /// Min-heap of the best `limit` candidates; its top is the worst one kept.
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(CandidateRank, u32)>>,
+    threshold: f32,
+    admission: Option<SegmentAdmission>,
+    error: Option<tantivy::TantivyError>,
+}
+
+struct SegmentAdmission {
     store: tantivy::store::StoreReader,
     fields: TantivyFields,
     matcher: Option<PathGlobMatcher>,
     eligibility: CandidateEligibility,
     cancel_token: Option<Arc<std::sync::atomic::AtomicBool>>,
-    error: Option<tantivy::TantivyError>,
 }
 
-impl EligibilitySegmentCollector {
+impl SegmentAdmission {
+    fn admits(&self, document: &TantivyDocument) -> bool {
+        self.eligibility.matches_document(document, &self.fields)
+            && self.matcher.as_ref().is_none_or(|matcher| {
+                document
+                    .get_first(self.fields.file_path)
+                    .and_then(|value| tantivy::schema::Value::as_str(&value))
+                    .is_some_and(|path| matcher.matches(Path::new(path)))
+            })
+    }
+}
+
+impl CandidateSegmentCollector {
     fn is_cancelled(&self) -> bool {
-        self.cancel_token
+        self.admission
             .as_ref()
+            .and_then(|admission| admission.cancel_token.as_ref())
             .is_some_and(|token| token.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
-impl SegmentCollector for EligibilitySegmentCollector {
-    type Fruit = tantivy::Result<Vec<(f32, tantivy::DocAddress)>>;
+impl SegmentCollector for CandidateSegmentCollector {
+    type Fruit = tantivy::Result<Vec<(CandidateRank, f32)>>;
 
     fn collect(&mut self, doc: u32, score: f32) {
-        if self.error.is_some()
-            || self.is_cancelled()
-            || self
-                .top_docs
-                .threshold
-                .is_some_and(|threshold| score <= threshold)
-        {
+        if self.error.is_some() || score <= self.threshold || self.is_cancelled() {
             return;
         }
-        match self.store.get::<TantivyDocument>(doc) {
-            Ok(document) => {
-                if self.eligibility.matches_document(&document, &self.fields)
-                    && self.matcher.as_ref().is_none_or(|matcher| {
-                        document
-                            .get_first(self.fields.file_path)
-                            .and_then(|value| tantivy::schema::Value::as_str(&value))
-                            .is_some_and(|path| matcher.matches(Path::new(path)))
-                    })
-                {
-                    self.top_docs.push(score, doc);
+        let rank = CandidateRank {
+            bucket: candidate_score_bucket(score),
+            key: std::cmp::Reverse(
+                self.keys
+                    .as_ref()
+                    .and_then(|keys| keys.first(doc))
+                    .unwrap_or(u64::MAX),
+            ),
+            address: std::cmp::Reverse(tantivy::DocAddress::new(self.segment_ord, doc)),
+        };
+        let full = self.heap.len() >= self.limit;
+        if full && self.heap.peek().is_some_and(|worst| rank <= worst.0.0) {
+            return;
+        }
+        if let Some(admission) = &self.admission {
+            match admission.store.get::<TantivyDocument>(doc) {
+                Ok(document) if admission.admits(&document) => {}
+                Ok(_) => return,
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
                 }
             }
-            Err(error) => self.error = Some(error),
+        }
+        let entry = std::cmp::Reverse((rank, score.to_bits()));
+        if full {
+            if let Some(mut worst) = self.heap.peek_mut() {
+                *worst = entry;
+            }
+        } else {
+            self.heap.push(entry);
+        }
+        if self.heap.len() >= self.limit
+            && let Some(worst) = self.heap.peek()
+        {
+            self.threshold = candidate_bucket_threshold(worst.0.0.bucket);
         }
     }
 
@@ -3027,15 +3152,9 @@ impl SegmentCollector for EligibilitySegmentCollector {
             Ok(Vec::new())
         } else {
             Ok(self
-                .top_docs
-                .into_sorted_vec()
+                .heap
                 .into_iter()
-                .map(|doc| {
-                    (
-                        doc.sort_key,
-                        tantivy::DocAddress::new(self.segment_ord, doc.doc),
-                    )
-                })
+                .map(|std::cmp::Reverse((rank, score))| (rank, f32::from_bits(score)))
                 .collect())
         }
     }
@@ -7027,12 +7146,14 @@ mod tests {
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(pre_cancelled));
             let advances = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let matcher = PathGlobMatcher::new(&[pattern.to_string()], &[]).unwrap();
-            let collector = EligibilityCollector {
+            let collector = CandidateCollector {
                 limit: 1,
                 fields: fields.clone(),
-                matcher: Some(&matcher),
-                eligibility: CandidateEligibility::default(),
-                cancel_token: Some(&cancelled),
+                admission: Some(CandidateAdmission {
+                    matcher: Some(&matcher),
+                    eligibility: CandidateEligibility::default(),
+                    cancel_token: Some(&cancelled),
+                }),
             };
             let weight = CountingWeight {
                 advances: advances.clone(),
@@ -7115,6 +7236,9 @@ mod tests {
                     .unwrap();
                 matcher.matches(Path::new(path))
             })
+            // These documents have no chunk key, so equal buckets keep address
+            // order; reported scores are bucket values.
+            .map(|(score, address)| (candidate_bucket_score(score), address))
             .collect::<Vec<_>>();
         let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
         for cancel_token in [None, Some(&active)] {
@@ -7144,6 +7268,82 @@ mod tests {
             .unwrap()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn candidate_ties_ignore_insertion_and_segment_order() {
+        let collect = |order: &[usize], segment_size: usize| {
+            let root = tempfile::tempdir().unwrap();
+            let (index, fields) = open_tantivy_index(root.path()).unwrap();
+            let mut writer = index
+                .writer_with_num_threads::<TantivyDocument>(1, 15_000_000)
+                .unwrap();
+            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+            for (position, ordinal) in order.iter().enumerate() {
+                let text = if ordinal % 7 == 0 {
+                    "needle needle stronger"
+                } else {
+                    "needle equal"
+                };
+                writer
+                    .add_document(tantivy::doc!(
+                        fields.file_path => format!("src/file_{ordinal:02}.rs"),
+                        fields.vector_key => *ordinal as u64,
+                        fields.text => text
+                    ))
+                    .unwrap();
+                if (position + 1) % segment_size == 0 {
+                    writer.commit().unwrap();
+                }
+            }
+            writer.commit().unwrap();
+            let searcher = index.reader().unwrap().searcher();
+            let query = TermQuery::new(
+                tantivy::Term::from_field_text(fields.text, "needle"),
+                IndexRecordOption::WithFreqs,
+            );
+            collect_top_docs_with_eligibility(
+                &searcher,
+                &query,
+                &fields,
+                &GlobPathQueryFilter::default(),
+                CandidateEligibility::default(),
+                10,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(_, address)| {
+                searcher
+                    .doc::<TantivyDocument>(address)
+                    .unwrap()
+                    .get_first(fields.file_path)
+                    .and_then(|value| tantivy::schema::Value::as_str(&value))
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+        };
+
+        let forward = (0..40).collect::<Vec<_>>();
+        let reversed = forward.iter().rev().copied().collect::<Vec<_>>();
+        let expected = [0, 7, 14, 21, 28, 35, 1, 2, 3, 4]
+            .map(|ordinal| format!("src/file_{ordinal:02}.rs"))
+            .to_vec();
+        // Equal scores at the cutoff must not fall back to document addresses,
+        // which vary with indexing threads and segment merges.
+        for (order, segment_size) in [
+            (&forward, 40),
+            (&reversed, 40),
+            (&reversed, 7),
+            (&forward, 3),
+        ] {
+            assert_eq!(
+                collect(order, segment_size),
+                expected,
+                "segment size {segment_size}"
+            );
+        }
     }
 
     #[test]
