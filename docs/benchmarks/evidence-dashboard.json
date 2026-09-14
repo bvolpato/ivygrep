@@ -8,10 +8,10 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "f97d51655809a2a7a8068af707d4bd6e7db26ee1b7aacbcc98df7b40dde81853",
-      "source_commit": "f481e7f14ee00b7137eaece5f51273b0b484c080",
+      "sha256": "e39903113b4bbbd5ee2052ebb4bdbb986418191a64086c05d867b0717df47f0b",
+      "source_commit": "0ec517a17d44269fffa69efc0a4426f5b2c56d99",
       "summary": {
-        "binary_sha256": "5a6ceda707974c39a5ee9dc96f59dd78ff613a678306a0e08e973ae99bdfb1fd",
+        "binary_sha256": "5b809bf7cc40371f56157c37ad78644400f4a2db37365b8b1786b824a9120938",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "6b877037ff957ca5ee5093e0aa55472a5cd40163c50741f37664e1daabeb8654"
@@ -33,7 +33,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 24849.64462183416,
+            "elapsed_ms": 23907.155900262296,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -68,7 +68,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 28423.165555112064,
+            "elapsed_ms": 24609.593348111957,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -98,29 +98,29 @@
               "candidate_budget": 0,
               "first_useful_low": 0,
               "no_primary_judgment": 0,
-              "not_audited": 4,
-              "satisfied": 21
+              "not_audited": 3,
+              "satisfied": 22
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 10219.04218243435,
+            "elapsed_ms": 9338.027158752084,
             "filter_misses": [],
             "low_rank_misses": [],
             "mean_candidate_recall": 0.98,
             "mean_hybrid_deep_recall": 0.0,
-            "mean_mrr": 0.905,
-            "mean_ndcg10": 0.884256154771861,
-            "mean_p1": 0.84,
+            "mean_mrr": 0.925,
+            "mean_ndcg10": 0.8990189646290027,
+            "mean_p1": 0.88,
             "mean_p5": 0.20800000000000002,
             "mean_recall5": 0.92,
             "mode": "neural",
             "neural_queries_executed": 25,
             "neural_queries_unobservable": 0,
-            "neural_queries_with_results": 17,
+            "neural_queries_with_results": 15,
             "no_hit_queries": 0,
             "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.84
+            "satisfaction_rate": 0.88
           }
         },
         "runtime": {
@@ -129,7 +129,7 @@
           "system": "Linux"
         },
         "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing and verified neural execution. This is not a public-code, million-chunk, or agent-task benchmark.",
-        "version": "ivygrep 1.2.14"
+        "version": "ivygrep 1.2.15"
       }
     },
     {
@@ -1223,7 +1223,7 @@
       "current-head-relevance": {
         "status": "historical",
         "versions": [
-          "1.2.14"
+          "1.2.15"
         ]
       },
       "million-scale-current": {
@@ -1257,7 +1257,7 @@
         ]
       }
     },
-    "package_version": "1.2.14"
+    "package_version": "1.2.15"
   },
   "histories": {
     "archive_size": [
