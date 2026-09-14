@@ -107,17 +107,53 @@ pub(super) fn fuse_rrf_with_context(
         );
     }
 
-    for (rank, (chunk, semantic_score, semantic_sources)) in semantic.into_iter().enumerate() {
+    // The merged semantic rank orders candidates by their best score across
+    // tiers, so it can come from the hash tier alone. When hash votes on direct
+    // candidates are discounted, neural corroboration votes from the neural
+    // tier's own rank and score instead.
+    let neural_ranks = if hash_direct_weight < 1.0 {
+        let mut neural_hits = semantic
+            .iter()
+            .filter_map(|(chunk, _, _, neural_score)| {
+                neural_score.map(|score| (chunk.vector_key, score))
+            })
+            .collect::<Vec<_>>();
+        neural_hits.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        neural_hits
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (vector_key, _))| (vector_key, rank))
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+
+    for (rank, (chunk, semantic_score, semantic_sources, neural_score)) in
+        semantic.into_iter().enumerate()
+    {
         // Hash vectors hash the same tokens BM25 already scored, so a hash-only
         // match on a direct candidate repeats lexical evidence and uses
         // `hash_direct_weight` even when neural retrieval also ran. Neural
         // corroboration and semantic-only discovery keep full strength.
         let has_direct_evidence = direct_ids.contains(&chunk.vector_key);
-        let direct_weight = if !has_direct_evidence || semantic_sources.contains("neural") {
-            1.0
-        } else {
-            hash_direct_weight
-        };
+        let neural_vote = neural_ranks
+            .get(&chunk.vector_key)
+            .copied()
+            .zip(neural_score)
+            .filter(|_| has_direct_evidence);
+        let (rank, semantic_score, direct_weight) =
+            if let Some((neural_rank, neural_score)) = neural_vote {
+                (neural_rank, neural_score, 1.0)
+            } else if !has_direct_evidence || semantic_sources.contains("neural") {
+                (rank, semantic_score, 1.0)
+            } else {
+                (rank, semantic_score, hash_direct_weight)
+            };
         let semantic_source_mask = semantic_sources
             .into_iter()
             .fold(source_bit("semantic"), |mask, source| {
