@@ -35,6 +35,15 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         return literal_search_with_context(ctx, workspace, query_text, &literal_options);
     }
 
+    // Pasted error output: runtime values such as absolute paths and ids are
+    // weak evidence, so token-based signals use the text without them, and the
+    // static message text joins the exact-substring pass. Neural query vectors
+    // keep the original text; the daemon embeds it before resolving a workspace.
+    let pasted_error = super::error_text::PastedError::parse(query_text, &workspace.root);
+    let retrieval_text = pasted_error
+        .as_ref()
+        .map_or(query_text, |error| error.retrieval_text.as_str());
+
     let t0 = std::time::Instant::now();
     let bounded_limit = options.bounded_limit();
     let output_limit = bounded_limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
@@ -103,10 +112,20 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // surface even when tokenization splits them differently.
     // Build a regex alternation of the original query plus snake_case/camelCase
     // variants so "hybrid search" also matches "hybrid_search" and "hybridSearch".
-    let trimmed = query_text;
+    let trimmed = retrieval_text;
     // Compute once — used by literal pass, lexical pass, and path-match pass.
     let lexical_queries = build_lexical_queries(trimmed);
-    let literal_queries = build_literal_queries(trimmed, &lexical_queries);
+    let mut literal_queries = build_literal_queries(trimmed, &lexical_queries);
+    if let Some(error) = &pasted_error {
+        for fragment in &error.fragments {
+            if !literal_queries
+                .iter()
+                .any(|query| query.eq_ignore_ascii_case(fragment))
+            {
+                literal_queries.push(fragment.clone());
+            }
+        }
+    }
     let symbol_candidate_limit = output_limit.clamp(20, routing.symbol_limit);
     let literal_matcher = if !literal_queries.is_empty() {
         Some(LiteralMatcher::from_queries(
@@ -699,7 +718,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         return Ok(Vec::new());
     }
 
-    let fusion_query = FusionQuery::new(query_text);
+    let mut fusion_query = FusionQuery::new(trimmed);
+    fusion_query.pasted_error = pasted_error.is_some();
     let merged = fuse_rrf_with_context(
         Some(ctx),
         FusionCandidates {
@@ -711,7 +731,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             symbols: symbol_chunks,
         },
         Some(direct_ids),
-        if neural_available || query_targets_secondary_sources(query_text) {
+        if neural_available || query_targets_secondary_sources(trimmed) {
             1.0
         } else {
             0.25
@@ -773,7 +793,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             .iter()
             .position(|hit| hit.hit.sources.iter().any(|source| source == "backfill"))
             .unwrap_or(hits.len());
-        crate::reranker::rerank_hits(query_text, &mut hits[..accepted_len]);
+        crate::reranker::rerank_hits(trimmed, &mut hits[..accepted_len]);
     } else {
         crate::reranker::capture_skipped(query_text, "route-not-learned");
     }
