@@ -60,7 +60,11 @@ def process_sample(pid: int) -> dict[str, int]:
     proc = Path("/proc") / str(pid)
     status = (proc / "status").read_text()
     fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
-    sample = {"rss_bytes": int(fields["VmRSS"].split()[0]) * 1024,
+
+    def kib(name: str) -> int:
+        return int(fields[name].split()[0]) * 1024
+
+    sample = {"rss_bytes": kib("VmRSS"), "rss_anon_bytes": kib("RssAnon"), "rss_file_bytes": kib("RssFile"),
               "fds": len(list((proc / "fd").iterdir())), "threads": int(fields["Threads"])}
     if min(sample.values()) <= 0:
         raise RuntimeError(f"invalid process sample: {sample}")
@@ -82,6 +86,19 @@ def resource_gate(samples: list[dict[str, Any]], budgets: dict[str, int]) -> dic
                              "peak": max(sample[resource] for sample in samples)}
     return {"passed": all(metric["passed"] for metric in metrics.values()),
             "sample_count": len(samples), "metrics": metrics}
+
+
+def resource_budgets(*, rss_growth_mib: float, total_rss_growth_mib: float, fd_growth: int,
+                     thread_growth: int) -> dict[str, int]:
+    """Growth budgets per daemon epoch.
+
+    Anonymous RSS is the leak signal. File-backed RSS comes from mapped index
+    segments that reindexing replaces and the kernel reclaims, so total RSS
+    swings by tens of MiB within one epoch and gets a looser budget.
+    """
+    mib = 1024 * 1024
+    return {"rss_anon_bytes": int(rss_growth_mib * mib), "rss_bytes": int(total_rss_growth_mib * mib),
+            "fds": fd_growth, "threads": thread_growth}
 
 
 def copy_repo(source: Path, destination: Path) -> None:
@@ -135,7 +152,10 @@ def main() -> None:
     parser.add_argument("--warmup", type=float, default=30.0,
                         help="run the same mutation/query workload before sampling each PID")
     parser.add_argument("--restarts", type=int, default=2)
-    parser.add_argument("--rss-growth-mib", type=float, default=32.0)
+    parser.add_argument("--rss-growth-mib", type=float, default=32.0,
+                        help="anonymous RSS growth budget per daemon epoch")
+    parser.add_argument("--total-rss-growth-mib", type=float, default=96.0,
+                        help="total RSS growth budget per daemon epoch, including mapped index files")
     parser.add_argument("--fd-growth", type=int, default=8)
     parser.add_argument("--thread-growth", type=int, default=4)
     parser.add_argument("--output", type=Path, required=True)
@@ -143,19 +163,19 @@ def main() -> None:
     if not Path("/proc/self/status").is_file() or not hasattr(os, "killpg"):
         parser.error("daemon soak requires Linux /proc and process groups")
     numeric = (args.duration, args.mutation_interval, args.check_interval, args.cooldown, args.warmup,
-               args.rss_growth_mib)
+               args.rss_growth_mib, args.total_rss_growth_mib)
     if not all(math.isfinite(value) for value in numeric):
         parser.error("numeric arguments must be finite")
     if args.restarts < 0 or args.workers < 1 or args.duration / (args.restarts + 1) < 30:
         parser.error("positive workers and at least 30 loaded seconds per daemon epoch are required")
-    if min(args.mutation_interval, args.check_interval) <= 0 or min(args.cooldown, args.warmup, args.rss_growth_mib, args.fd_growth, args.thread_growth) < 0:
+    if min(args.mutation_interval, args.check_interval) <= 0 or min(args.cooldown, args.warmup, args.rss_growth_mib, args.total_rss_growth_mib, args.fd_growth, args.thread_growth) < 0:
         parser.error("intervals must be positive and budgets/cooldown nonnegative")
     binary, source = args.binary.resolve(), args.repo.resolve()
     env = os.environ.copy()
-    budgets = {"rss_bytes": int(args.rss_growth_mib * 1024 * 1024),
-               "fds": args.fd_growth, "threads": args.thread_growth}
+    budgets = resource_budgets(rss_growth_mib=args.rss_growth_mib, total_rss_growth_mib=args.total_rss_growth_mib,
+                               fd_growth=args.fd_growth, thread_growth=args.thread_growth)
     report: dict[str, Any] = {
-        "schema_version": 2, "generated_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": 3, "generated_at": datetime.now(timezone.utc).isoformat(),
         "platform": platform.platform(), "machine": platform.machine(),
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "binary_sha256": sha256_file(binary), "binary_version": run([str(binary), "--version"], source, env).strip(),

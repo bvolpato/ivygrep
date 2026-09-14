@@ -36,10 +36,12 @@ class DaemonSoakTest(unittest.TestCase):
                 soak.watcher_observed_probe(Path("home"), Path("repo"), expected)
 
     def test_resource_gates_reject_rss_fd_and_thread_growth(self):
-        budgets = {"rss_bytes": 32 * 1024**2, "fds": 8, "threads": 4}
-        stable = [{"rss_bytes": 100 * 1024**2, "fds": 50, "threads": 16} for _ in range(100)]
+        budgets = soak.resource_budgets(rss_growth_mib=32, total_rss_growth_mib=96, fd_growth=8, thread_growth=4)
+        stable = [{"rss_bytes": 100 * 1024**2, "rss_anon_bytes": 60 * 1024**2, "fds": 50, "threads": 16}
+                  for _ in range(100)]
         self.assertTrue(soak.resource_gate(stable, budgets)["passed"])
-        for resource, increase in (("rss_bytes", 1024**2), ("fds", 1), ("threads", 1)):
+        for resource, increase in (("rss_anon_bytes", 1024**2), ("rss_bytes", 2 * 1024**2), ("fds", 1),
+                                   ("threads", 1)):
             growing = [{**sample, resource: sample[resource] + index * increase}
                        for index, sample in enumerate(stable)]
             gate = soak.resource_gate(growing, budgets)
@@ -47,6 +49,18 @@ class DaemonSoakTest(unittest.TestCase):
             self.assertFalse(gate["metrics"][resource]["passed"])
         with self.assertRaisesRegex(ValueError, "20 load samples"):
             soak.resource_gate(stable[:10], budgets)
+
+    def test_mapped_index_page_swings_do_not_look_like_a_leak(self):
+        # Reindexing replaces mapped segments, so file-backed RSS can move by
+        # tens of MiB between windows while anonymous memory stays flat.
+        budgets = soak.resource_budgets(rss_growth_mib=32, total_rss_growth_mib=96, fd_growth=8, thread_growth=4)
+        anon = 55 * 1024**2
+        samples = [{"rss_bytes": anon + (30 if index < 24 else 80) * 1024**2, "rss_anon_bytes": anon,
+                    "fds": 30, "threads": 20} for index in range(40)]
+        gate = soak.resource_gate(samples, budgets)
+        self.assertTrue(gate["passed"], gate)
+        self.assertEqual(gate["metrics"]["rss_bytes"]["growth"], 50 * 1024**2)
+        self.assertEqual(gate["metrics"]["rss_anon_bytes"]["growth"], 0)
 
     def test_resource_warmup_and_transient_peak_do_not_look_like_a_leak(self):
         samples = [{"rss_bytes": 10 if index < 20 else 100} for index in range(100)]

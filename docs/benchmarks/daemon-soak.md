@@ -15,8 +15,12 @@ Every process epoch first runs the same query/mutation workload for 30 seconds t
 initialize lazy thread pools, then gets independent resource samples for its share
 of the requested loaded duration. After discarding the first
 20% for warmup, the medians of the first and last quarters of the remaining
-samples must stay within these growth budgets: 32 MiB RSS, eight file descriptors,
-and four threads. The report includes peaks and cooldown samples separately.
+samples must stay within these growth budgets: 32 MiB anonymous RSS, 96 MiB total
+RSS, eight file descriptors, and four threads. Anonymous RSS is the leak signal.
+Total RSS also counts mapped index segments: continuous reindexing replaces them
+and the kernel reclaims their pages, so file-backed RSS moves by tens of MiB
+within one epoch in both directions. Samples record total, anonymous, and
+file-backed RSS. The report includes peaks and cooldown samples separately.
 These are bounded-growth gates, not a proof that arbitrarily slow leaks cannot
 exist. A restart cannot hide a failed epoch. Missing samples, failed queries,
 stale content, insufficient samples, or a budget violation fail the run.
