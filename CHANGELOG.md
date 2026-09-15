@@ -15,6 +15,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- The public benchmark matrix runner resolves the Git revision of the checkout that assembles the matrix before any retrieval run. Run from a copy without Git history, it had finished every run and then failed while writing the matrix, even with `--source-commit`.
 - Public benchmark dataset exports retry Hugging Face HTTP 429 and 5xx responses up to four times, waiting 30, 60, 120, and 240 seconds. The routing-matrix relevance check had failed twice with `429 Too Many Requests` (`maximum queue size reached`) before a delayed rerun passed. Other errors still fail immediately.
 
 ## [1.2.16] - 2026-09-14

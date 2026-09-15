@@ -424,6 +424,10 @@ def main() -> int:
 
     results = []
     execution_source = benchmark_revision(root, args.source_commit)
+    # The assembling checkout's revision ignores --source-commit. Resolve it
+    # before any run, so a copy without Git history fails at startup instead of
+    # after every retrieval run has finished.
+    aggregation_source = benchmark_revision(root, None)
     runtime = eval_code_retrieval.runtime_metadata()
     harness = contracts.execution_harness(root)
     dataset_content = {
@@ -489,7 +493,7 @@ def main() -> int:
     if args.require_fit_disjoint and not contracts.verified_fit_disjoint(fit_query_audit):
         raise ValueError("fit-disjoint validation requires zero overlap and matching executed-model checksum attestation")
     aggregation = {
-        "source_commit": benchmark_revision(root, None),
+        "source_commit": aggregation_source,
         "runtime": eval_code_retrieval.runtime_metadata(),
         "harness_sha256": contracts.execution_harness(root),
         "generated_at": datetime.now(timezone.utc).isoformat(),
