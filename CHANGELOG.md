@@ -7,6 +7,8 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 
 - The daemon closes a connection that sends no complete request line within 10 seconds. Connections that never sent a request, or sent bytes without a newline, held their slot until the client closed them, so 512 of them locked other clients out with busy errors. Running requests, such as long searches and indexing, have no such bound.
+- The MCP server keeps reading stdin while a tool call runs. `ping` gets an answer right away, and `notifications/cancelled` drops a queued request or stops a running hybrid, literal, or regex search (including those in a context pack), daemon search, or first-index wait, with no response for the cancelled request. Previously the server read the next message only after the current request finished, so a ping during a first index waited for the whole call (18.4 s in a local run) and cancellations had no effect. Requests still run one at a time in arrival order, and requests already read still run after stdin closes.
+- A newline-delimited MCP message over 16 MiB gets a `-32700` parse error with a null id, and the session continues with the next line. Previously it ended the session. Malformed `Content-Length` framing still ends the session.
 
 ### Documentation
 
