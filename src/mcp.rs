@@ -337,7 +337,7 @@ fn search_tool_schema() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Natural-language or keyword query."},
+                "query": {"type": "string", "description": "Natural-language or keyword query. Uppercase AND, OR, and NOT between terms are Boolean operators (NOT excludes matches); write them in lowercase or wrap them in backticks to search them as words."},
                 "path": {"type": "string", "description": "Workspace path, subdirectory, or file path. Defaults to current directory."},
                 "output": {
                     "type": "string",
