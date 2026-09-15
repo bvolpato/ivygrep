@@ -18,7 +18,7 @@
     {
       "id": "public-retrieval-current",
       "kind": "quality",
-      "label": "Historical public retrieval matrix (v1.1.9)",
+      "label": "Public retrieval matrix (v1.2.16)",
       "path": "docs/benchmarks/public-code-retrieval-results.json",
       "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70"
     },
