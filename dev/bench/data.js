@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789473694946,
+  "lastUpdate": 1789475888752,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -65246,6 +65246,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 1717.73,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3dd34497b4c710e1c741bb9eeb0963f81ccc26ee",
+          "message": "[fix] Keep MCP stdio responsive while a tool call runs (#391)\n\n* [fix] Keep MCP stdio responsive while a tool call runs\n\nserve_stdio read one message, ran it to completion, then read the next. While\na tools/call ran, the server could not answer ping, never saw\nnotifications/cancelled, and ended the session on an oversized JSON line.\n\nRead stdin on the calling thread and run requests on one worker thread in\narrival order. The reader answers ping and undecodable messages at once and\napplies cancellations as they arrive. A request cancelled while queued never\nstarts; a running request trips its cancel token, which stops local hybrid,\nliteral, and regex searches, sends CancelSearch for its daemon search, and ends\nthe first-index wait. Cancelled requests get no response. A newline-delimited\nmessage over 16 MiB gets a -32700 parse error and the session continues.\nRequests already read still run after stdin closes, and at most 64 requests\nwait for the worker.\n\n* [fix] Bound queued MCP batches and end the session on a failed write\n\nReview follow-ups for the concurrent MCP server.\n\nA JSON-RPC batch took one of the 64 queue slots however many members it had,\nso 64 large frames could retain over 1 GiB while the worker was busy. The\nreader now reserves a cost before queuing each payload: one request per batch\nmember plus its raw bytes. At most 64 requests and 16 MiB of payload wait for\nthe worker, and an empty queue still takes one payload of any size.\n\nIf the worker failed to write a reply while stdin stayed open, the reader stayed\nblocked on stdin and serve never returned. The read loop now runs on its own\nthread, and serve returns as soon as either thread stops on an error, without\nwaiting for stdin. EOF still runs the requests already read before returning.\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-15T07:50:09-04:00",
+          "tree_id": "59d298de56c35eddd62ea9b91a045f55949c82b4",
+          "url": "https://github.com/bvolpato/ivygrep/commit/3dd34497b4c710e1c741bb9eeb0963f81ccc26ee"
+        },
+        "date": 1789475888088,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 39929.28,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3413.02,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 53243.33,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 194716.7,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 10.7,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1615.79,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1286.33,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 1442.22,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 1503.92,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.48,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 113.92,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4651.14,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1664.23,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1690.29,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 2922.89,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3377.3,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3792.57,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 461.9,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1689.08,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 331783.41,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 103.36,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 484371.91,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 28084.24,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 170931.8,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 151.53,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2001.11,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 310.08,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 686.82,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 5133.89,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 95.88,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 584.66,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2683.33,
             "unit": "µs"
           }
         ]
