@@ -16,9 +16,46 @@ import json
 from pathlib import Path
 import random
 import shutil
-from typing import Iterable
+import sys
+import time
+from typing import Callable, Iterable
 
 import public_retrieval_contracts as contracts
+
+
+# Hugging Face throttles shared CI runners with HTTP 429 ("maximum queue size
+# reached") and occasionally answers 5xx. Retry those; anything else fails fast.
+RETRYABLE_HUB_STATUS = frozenset({429, 500, 502, 503, 504})
+HUB_RETRY_DELAYS_SECONDS = (30, 60, 120, 240)
+
+
+def retryable_hub_error(error: BaseException) -> bool:
+    response = getattr(error, "response", None)
+    return getattr(response, "status_code", None) in RETRYABLE_HUB_STATUS
+
+
+def load_pinned_dataset(
+    repo: str,
+    revision: str,
+    loader: Callable[..., object] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+):
+    """Load a revision-pinned dataset, retrying throttled or failing Hub requests."""
+    if loader is None:
+        from datasets import load_dataset as loader
+    for attempt, delay in enumerate((*HUB_RETRY_DELAYS_SECONDS, None), start=1):
+        try:
+            return loader(repo, revision=revision)
+        except Exception as error:
+            if delay is None or not retryable_hub_error(error):
+                raise
+            status = error.response.status_code
+            print(
+                f"{repo}@{revision}: Hugging Face returned HTTP {status}; "
+                f"retrying in {delay}s (attempt {attempt + 1}/{len(HUB_RETRY_DELAYS_SECONDS) + 1})",
+                file=sys.stderr,
+            )
+            sleep(delay)
 
 
 LANGUAGE_EXTENSIONS = {
@@ -154,17 +191,15 @@ def export_task(
     seed: int,
     query_partition: dict | None = None,
 ) -> dict:
-    from datasets import load_dataset
-
     query_corpus_repo = f"CoIR-Retrieval/{task_name}-queries-corpus"
     qrels_repo = f"CoIR-Retrieval/{task_name}-qrels"
-    query_corpus = load_dataset(
+    query_corpus = load_pinned_dataset(
         query_corpus_repo,
-        revision=task_config["query_corpus_revision"],
+        task_config["query_corpus_revision"],
     )
-    qrels_dataset = load_dataset(
+    qrels_dataset = load_pinned_dataset(
         qrels_repo,
-        revision=task_config["qrels_revision"],
+        task_config["qrels_revision"],
     )
     test_qrels = list(qrels_dataset["test"])
     included_queries = sampled_query_ids(

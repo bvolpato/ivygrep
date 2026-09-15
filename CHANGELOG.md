@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Testing
+
+- Public benchmark dataset exports retry Hugging Face HTTP 429 and 5xx responses up to four times, waiting 30, 60, 120, and 240 seconds. The routing-matrix relevance check had failed twice with `429 Too Many Requests` (`maximum queue size reached`) before a delayed rerun passed. Other errors still fail immediately.
+
 ## [1.2.16] - 2026-09-14
 
 ### Upgrade notes
