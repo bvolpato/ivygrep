@@ -1,15 +1,18 @@
 use std::env;
-use std::io::{self, BufRead, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Upper bound on a single JSON-RPC message / header line. Prevents a
 /// malformed or malicious client (or `Content-Length` header) from triggering
 /// an unbounded allocation or read.
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
-/// Requests waiting for the worker. Past this the reader stops reading until
-/// one starts, so a client that floods requests cannot grow memory without
-/// bound.
+/// Requests, counting each batch member, that may wait for the worker. Past
+/// this or `MAX_QUEUED_BYTES` the reader stops reading until the worker takes
+/// the next payload, so a client that floods requests or batches cannot grow
+/// memory without bound. An empty queue still takes one payload of any size.
 const MAX_QUEUED_REQUESTS: usize = 64;
+/// Raw payload bytes that may wait for the worker.
+const MAX_QUEUED_BYTES: usize = MAX_MESSAGE_BYTES;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -21,7 +24,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
@@ -149,8 +152,11 @@ struct IvygrepStatusArgs {}
 pub fn serve_stdio() -> Result<()> {
     config::ensure_app_dirs()?;
 
-    let stdin = io::stdin();
-    serve(stdin.lock(), io::stdout(), Arc::new(dispatch))
+    serve(
+        BufReader::new(io::stdin()),
+        io::stdout(),
+        Arc::new(dispatch),
+    )
 }
 
 /// Runs one JSON-RPC method. Tests inject slow or cancellable stand-ins.
@@ -158,27 +164,37 @@ type Dispatch = dyn Fn(&str, Value, &RequestCancellation) -> std::result::Result
     + Send
     + Sync;
 
-/// Serve MCP over `reader` and `writer`. This thread keeps reading while a
+/// Serve MCP over `reader` and `writer`. A reader thread keeps reading while a
 /// request runs: it answers `ping` and undecodable messages at once and
 /// applies cancellations as they arrive. A worker thread runs every other
 /// request in arrival order, one at a time. Replies share one writer, so
 /// frames never interleave. At EOF the requests already read still run, then
-/// the server returns.
-fn serve<R, W>(mut reader: R, writer: W, dispatch: Arc<Dispatch>) -> Result<()>
+/// the server returns. A reply that cannot be written ends the session at
+/// once, even while stdin stays open.
+fn serve<R, W>(reader: R, writer: W, dispatch: Arc<Dispatch>) -> Result<()>
 where
-    R: BufRead,
+    R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
     let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
-    let pending = PendingRequests::default();
-    let (queue, queued) = mpsc::sync_channel::<(Work, FramingMode)>(MAX_QUEUED_REQUESTS);
+    let budget = Arc::new(QueueBudget::default());
+    let (queue, queued) = mpsc::channel::<QueuedWork>();
+    let (stopped, first_stopped) = mpsc::channel();
     let worker = std::thread::Builder::new()
         .name("ig-mcp-worker".to_string())
         .spawn({
             let writer = writer.clone();
             let dispatch = dispatch.clone();
+            let budget = budget.clone();
+            let stop = StopSignal {
+                thread: ServingThread::Worker,
+                stopped: stopped.clone(),
+                budget: budget.clone(),
+            };
             move || -> Result<()> {
-                for (work, mode) in queued {
+                let _stop = stop;
+                for QueuedWork { work, mode, cost } in queued {
+                    budget.release(cost);
                     if let Some(reply) = run_work(work, dispatch.as_ref()) {
                         write_message(&mut *writer.lock(), &reply, mode)?;
                     }
@@ -187,17 +203,70 @@ where
             }
         })
         .context("failed to start the MCP worker thread")?;
+    let reader = std::thread::Builder::new()
+        .name("ig-mcp-reader".to_string())
+        .spawn({
+            let budget = budget.clone();
+            let stop = StopSignal {
+                thread: ServingThread::Reader,
+                stopped,
+                budget: budget.clone(),
+            };
+            move || {
+                let _stop = stop;
+                read_requests(reader, &writer, dispatch.as_ref(), &budget, &queue)
+            }
+        })
+        .context("failed to start the MCP reader thread")?;
 
+    let worker = if first_stopped.recv() == Ok(ServingThread::Worker) {
+        // A reply could not be written, or the worker panicked: end the
+        // session without waiting for stdin. A reader still blocked on stdin
+        // ends with the process. A worker only stops cleanly after the reader
+        // closed the queue.
+        join_serving_thread(worker)??;
+        None
+    } else {
+        Some(worker)
+    };
+    match join_serving_thread(reader)? {
+        ReadOutcome::OutputFailed(err) => Err(err),
+        // EOF or malformed framing: requests already read still run.
+        ReadOutcome::InputEnded(result) => result.and(worker.map_or(Ok(()), |worker| {
+            join_serving_thread(worker).and_then(|result| result)
+        })),
+    }
+}
+
+/// Why the reader thread stopped.
+enum ReadOutcome {
+    /// EOF (`Ok`) or malformed framing (`Err`). Requests already read still run.
+    InputEnded(Result<()>),
+    /// A reply written by the reader could not be written.
+    OutputFailed(anyhow::Error),
+}
+
+/// Read framed payloads until EOF, a framing error, or a failed write.
+fn read_requests<R: BufRead, W: Write>(
+    mut reader: R,
+    writer: &Mutex<BufWriter<W>>,
+    dispatch: &Dispatch,
+    budget: &QueueBudget,
+    queue: &mpsc::Sender<QueuedWork>,
+) -> ReadOutcome {
+    let pending = PendingRequests::default();
     let mut mode = FramingMode::Unknown;
-    let read_result = loop {
+    loop {
         let answer = match read_message(&mut reader, &mut mode) {
             Ok(Some(Frame::Payload(payload))) => match admit(&payload, &pending) {
                 Admission::Answer(work) => work,
                 Admission::Queue(work) => {
-                    // Sending fails only after the worker stopped on a write
-                    // error, which is returned below.
-                    if queue.send((work, mode)).is_err() {
-                        break Ok(());
+                    let cost = QueueCost::of(&work, payload.len());
+                    // Both fail only after the worker stopped, and `serve`
+                    // returns the worker's error.
+                    if !budget.reserve(cost) || queue.send(QueuedWork { work, mode, cost }).is_err()
+                    {
+                        return ReadOutcome::InputEnded(Ok(()));
                     }
                     continue;
                 }
@@ -208,20 +277,140 @@ where
                 -32700,
                 format!("parse error: message exceeds maximum of {MAX_MESSAGE_BYTES} bytes"),
             ))),
-            Ok(None) => break Ok(()),
-            Err(err) => break Err(err),
+            Ok(None) => return ReadOutcome::InputEnded(Ok(())),
+            Err(err) => return ReadOutcome::InputEnded(Err(err)),
         };
-        if let Some(reply) = run_work(answer, dispatch.as_ref())
+        if let Some(reply) = run_work(answer, dispatch)
             && let Err(err) = write_message(&mut *writer.lock(), &reply, mode)
         {
-            break Err(err);
+            return ReadOutcome::OutputFailed(err);
         }
-    };
-    drop(queue);
-    let worker_result = worker
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ServingThread {
+    Reader,
+    Worker,
+}
+
+/// Tells `serve` that a serving thread stopped, however it stopped, and wakes
+/// a reader waiting for queue room.
+struct StopSignal {
+    thread: ServingThread,
+    stopped: mpsc::Sender<ServingThread>,
+    budget: Arc<QueueBudget>,
+}
+
+impl Drop for StopSignal {
+    fn drop(&mut self) {
+        self.budget.close();
+        let _ = self.stopped.send(self.thread);
+    }
+}
+
+/// Join a serving thread, turning a panic into an error.
+fn join_serving_thread<T>(thread: std::thread::JoinHandle<T>) -> Result<T> {
+    let name = thread.thread().name().unwrap_or("MCP").to_string();
+    thread
         .join()
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("MCP worker thread panicked")));
-    read_result.and(worker_result)
+        .map_err(|_| anyhow::anyhow!("{name} thread panicked"))
+}
+
+/// A payload waiting for the worker.
+struct QueuedWork {
+    work: Work,
+    mode: FramingMode,
+    cost: QueueCost,
+}
+
+/// What one queued payload counts against the queue limits.
+#[derive(Clone, Copy)]
+struct QueueCost {
+    /// Batch members count one each.
+    requests: usize,
+    bytes: usize,
+}
+
+impl QueueCost {
+    fn of(work: &Work, payload_bytes: usize) -> Self {
+        let requests = match work {
+            Work::Single(_) => 1,
+            Work::Batch(entries) => entries.len(),
+        };
+        Self {
+            requests: requests.max(1),
+            bytes: payload_bytes,
+        }
+    }
+}
+
+/// Payloads queued for the worker and not yet taken.
+#[derive(Default)]
+struct QueuedLoad {
+    requests: usize,
+    bytes: usize,
+}
+
+impl QueuedLoad {
+    /// Add `cost` if it fits. An empty queue takes one payload of any size, so
+    /// a single maximal message or batch still runs.
+    fn try_add(&mut self, cost: QueueCost) -> bool {
+        let fits = self.requests == 0
+            || (self.requests + cost.requests <= MAX_QUEUED_REQUESTS
+                && self.bytes + cost.bytes <= MAX_QUEUED_BYTES);
+        if fits {
+            self.requests += cost.requests;
+            self.bytes += cost.bytes;
+        }
+        fits
+    }
+
+    fn remove(&mut self, cost: QueueCost) {
+        self.requests -= cost.requests;
+        self.bytes -= cost.bytes;
+    }
+}
+
+/// Bounds what waits for the worker. The reader reserves a payload's cost
+/// before queuing it, and the worker releases it when it takes the payload.
+#[derive(Default)]
+struct QueueBudget {
+    state: Mutex<BudgetState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct BudgetState {
+    load: QueuedLoad,
+    closed: bool,
+}
+
+impl QueueBudget {
+    /// Wait until `cost` fits, then reserve it. `false` once a serving thread
+    /// stopped.
+    fn reserve(&self, cost: QueueCost) -> bool {
+        let mut state = self.state.lock();
+        loop {
+            if state.closed {
+                return false;
+            }
+            if state.load.try_add(cost) {
+                return true;
+            }
+            self.changed.wait(&mut state);
+        }
+    }
+
+    fn release(&self, cost: QueueCost) {
+        self.state.lock().load.remove(cost);
+        self.changed.notify_one();
+    }
+
+    fn close(&self) {
+        self.state.lock().closed = true;
+        self.changed.notify_one();
+    }
 }
 
 /// What one framed payload sends back.
@@ -2138,7 +2327,6 @@ fn write_message<W: Write, T: Serialize>(
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
-    use std::io::BufReader;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -2294,40 +2482,65 @@ mod tests {
         }
     }
 
+    /// Stdout stand-in whose writes fail, like a client that closed its end.
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
     /// `serve` on its own thread over in-memory stdin and stdout.
     struct TestServer {
         input: Option<mpsc::Sender<Vec<u8>>>,
         output: mpsc::Receiver<Vec<u8>>,
         buffered: Vec<u8>,
-        server: std::thread::JoinHandle<Result<()>>,
+        served: mpsc::Receiver<Result<()>>,
     }
 
     impl TestServer {
-        fn start(
-            dispatch: impl Fn(
-                &str,
-                Value,
-                &RequestCancellation,
-            ) -> std::result::Result<Value, DispatchError>
-            + Send
-            + Sync
-            + 'static,
-        ) -> Self {
-            let (input, chunks) = mpsc::channel();
+        fn start<D>(dispatch: D) -> Self
+        where
+            D: Fn(&str, Value, &RequestCancellation) -> std::result::Result<Value, DispatchError>
+                + Send
+                + Sync
+                + 'static,
+        {
             let (written, output) = mpsc::channel();
+            Self::start_with_writer(dispatch, ChannelWriter(written), output)
+        }
+
+        fn start_with_writer<D>(
+            dispatch: D,
+            writer: impl Write + Send + 'static,
+            output: mpsc::Receiver<Vec<u8>>,
+        ) -> Self
+        where
+            D: Fn(&str, Value, &RequestCancellation) -> std::result::Result<Value, DispatchError>
+                + Send
+                + Sync
+                + 'static,
+        {
+            let (input, chunks) = mpsc::channel();
+            let (served_tx, served) = mpsc::channel();
             let reader = BufReader::new(ChannelReader {
                 chunks,
                 chunk: Vec::new(),
                 offset: 0,
             });
-            let server = std::thread::spawn(move || {
-                serve(reader, ChannelWriter(written), Arc::new(dispatch))
+            std::thread::spawn(move || {
+                let _ = served_tx.send(serve(reader, writer, Arc::new(dispatch)));
             });
             Self {
                 input: Some(input),
                 output,
                 buffered: Vec::new(),
-                server,
+                served,
             }
         }
 
@@ -2357,10 +2570,17 @@ mod tests {
             }
         }
 
+        /// What `serve` returned, failing the test if it runs past five seconds.
+        fn result(&self) -> Result<()> {
+            self.served
+                .recv_timeout(Duration::from_secs(5))
+                .expect("serve did not return within 5 s")
+        }
+
         /// Close stdin and return what `serve` returned.
         fn finish(mut self) -> Result<()> {
             self.input.take();
-            self.server.join().unwrap()
+            self.result()
         }
     }
 
@@ -2459,6 +2679,89 @@ mod tests {
         assert_eq!(tools["id"], 2, "{tools}");
         assert!(tools["result"]["tools"].is_array(), "{tools}");
         server.finish().unwrap();
+    }
+
+    #[test]
+    fn mcp_server_returns_when_stdout_breaks_while_stdin_stays_open() {
+        let broken_pipe = |result: Result<()>| {
+            let err = result.expect_err("serve must report the failed write");
+            assert!(
+                err.downcast_ref::<io::Error>()
+                    .is_some_and(|err| err.kind() == io::ErrorKind::BrokenPipe),
+                "{err:#}"
+            );
+        };
+
+        // The worker fails to write a queued reply while the reader waits for
+        // more input.
+        let server =
+            TestServer::start_with_writer(super::dispatch, BrokenPipeWriter, mpsc::channel().1);
+        server.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
+        broken_pipe(server.result());
+
+        // The reader fails to write a ping reply while the worker runs a request.
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let server = TestServer::start_with_writer(
+            move |method, params, cancellation| {
+                if method == "tools/call" {
+                    started.send(()).unwrap();
+                    let _ = release_rx.lock().recv_timeout(Duration::from_secs(10));
+                }
+                super::dispatch(method, params, cancellation)
+            },
+            BrokenPipeWriter,
+            mpsc::channel().1,
+        );
+        server.send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {}}));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        server.send(json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}));
+        broken_pipe(server.result());
+        drop(release);
+    }
+
+    #[test]
+    fn mcp_queue_budget_counts_batch_members_and_payload_bytes() {
+        let members = (0..=MAX_QUEUED_REQUESTS)
+            .map(|id| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"}).to_string())
+            .collect::<Vec<_>>();
+        let batch = format!("[{}]", members.join(","));
+        let Admission::Queue(work) = admit(batch.as_bytes(), &PendingRequests::default()) else {
+            panic!("a batch goes to the worker");
+        };
+        let batch_cost = QueueCost::of(&work, batch.len());
+        assert_eq!(batch_cost.requests, MAX_QUEUED_REQUESTS + 1);
+
+        let mut load = QueuedLoad::default();
+        let small = QueueCost {
+            requests: 1,
+            bytes: 64,
+        };
+        // An empty queue takes one payload of any size.
+        assert!(load.try_add(batch_cost));
+        assert!(
+            !load.try_add(small),
+            "batch members count against the request limit"
+        );
+        load.remove(batch_cost);
+
+        for _ in 0..MAX_QUEUED_REQUESTS {
+            assert!(load.try_add(small));
+        }
+        assert!(
+            !load.try_add(small),
+            "at most {MAX_QUEUED_REQUESTS} requests wait"
+        );
+        load.remove(small);
+        let large = QueueCost {
+            requests: 1,
+            bytes: MAX_QUEUED_BYTES,
+        };
+        assert!(
+            !load.try_add(large),
+            "payload bytes count against the byte limit"
+        );
     }
 
     #[test]

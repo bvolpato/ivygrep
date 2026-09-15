@@ -647,18 +647,21 @@ batch.
 
 One thread keeps reading stdin while a worker thread runs requests one at a
 time in arrival order. The reader answers `ping` and undecodable messages at
-once and applies `notifications/cancelled` as it arrives. At most 64 requests
-wait for the worker; past that the reader stops reading until one starts. A
-cancelled request gets no response. If it is still queued, it never starts. If
-it is running, its cancel token trips. Local hybrid, literal, and regex searches
-stop, including those inside a context pack. Its daemon search gets
-`CancelSearch`, and the first-index wait returns. `initialize` is never
-cancelled. Symbol, reference, and caller lookups, and an in-process first index
-(used only when no daemon answers), run to completion. A newline-delimited
-message over 16 MiB gets a `-32700` parse error with a null id, and the server
-skips to the next line. Malformed `Content-Length` framing still ends the
-session, because there is no safe point to resume. At EOF, requests already read
-still run before the server exits. It exposes:
+once and applies `notifications/cancelled` as it arrives. At most 64 requests,
+counting batch members, and 16 MiB of payload wait for the worker, though an
+empty queue takes one message of any size. Past either limit the reader stops
+reading until the worker takes the next message. A cancelled request gets no
+response. If it is still queued, it never starts. If it is running, its cancel
+token trips. Local hybrid, literal, and regex searches stop, including those
+inside a context pack. Its daemon search gets `CancelSearch`, and the
+first-index wait returns. `initialize` is never cancelled. Symbol, reference,
+and caller lookups, and an in-process first index (used only when no daemon
+answers), run to completion. A newline-delimited message over 16 MiB gets a
+`-32700` parse error with a null id, and the server skips to the next line.
+Malformed `Content-Length` framing still ends the session, because there is no
+safe point to resume. At EOF, requests already read still run before the server
+exits. A reply that can't be written ends the session at once, even while stdin
+stays open. It exposes:
 
 - `ig_search` for hybrid, literal, regex, symbol, caller, and context-pack work
 - `ig_status` for indexed-workspace and runtime state
