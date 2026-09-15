@@ -726,6 +726,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_CUDA_LIBRARY_PATH` | Library search path `ig hardware` checks for CUDA runtime libraries, in place of `LD_LIBRARY_PATH`, before falling back to `ldconfig`. `install.sh` instead treats it as an exclusive colon-separated search path, without checking `ldconfig` or standard CUDA directories; an incomplete override can select the portable build. Empty values are ignored. |
 | `IVYGREP_AGENT_HOME` | Home directory `ig agent install` and `ig agent doctor` use to find client configuration files. Default: the user's home directory. |
 | `IVYGREP_RERANKER` | `learned` (default; also `auto`) or `deterministic` (also `disabled`, `off`). Unknown values report an error in status and use `learned`. |
+| `IVYGREP_RERANK_LIMIT` | Fused candidates the reranker reorders per query. A positive integer overrides the routed default: with the learned reranker, 100 for natural-language, docs/tests/examples, and mixed queries and 30 for identifier, path, and literal or error queries; 30 for every query with the deterministic reranker. Other values are ignored. |
 | `IVYGREP_SEARCH_DEADLINE_SECS` | Server-side daemon search deadline. Default `60`; `0` disables it. Hits gathered before the deadline return with a warning. |
 | `IVYGREP_MCP_INDEX_WAIT_SECS` | Time an MCP call waits for a first index before returning `status: indexing`. Default `20`; `0` returns immediately. |
 | `IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT` | Set to disable background hash and neural enhancement. `--wait-for-enhancement` fails. |
@@ -734,14 +735,20 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_NEURAL_THREADS` | Neural inference threads. Default: logical cores capped at 8 for foreground work; a quarter of logical cores (1 to 8) for background work. Maximum 32. |
 | `IVYGREP_NEURAL_BATCH_SIZE` | Chunks per background neural enhancement batch. Default depends on backend (static, CPU, Metal, or CUDA); maximum 4096. |
 | `IVYGREP_NEURAL_MEMORY_MB` | Memory budget that sizes transformer worker pools. Default: a quarter of available memory. |
+| `IVYGREP_NEURAL_FOREGROUND_ACCELERATOR` | `0`, `false`, `no`, `off`, or `cpu` runs query-time neural embedding on CPU. Unset or any other value uses the preferred backend (Metal or CUDA when available). Background enhancement always uses the preferred backend. |
+| `IVYGREP_NEURAL_ACCELERATOR_HANDLES` | Embedder handles in the background Metal or CUDA pool. Default `2`, capped by the neural thread count; positive values are clamped to 1 to 8. Foreground embedding uses one handle, and CPU backends size their pool from `IVYGREP_NEURAL_THREADS` and memory instead. |
 | `IVYGREP_DISABLE_QUERY_CACHE` | Set to disable the daemon query-result cache. |
 | `IVYGREP_ENHANCE_ON_BATTERY` | `1`, `true`, `yes`, or `on` keeps neural enhancement running on battery power (macOS). The hash tier never pauses for battery. |
 | `IVYGREP_ENHANCE_MAX_LOAD_RATIO` | Load-average multiple of CPU count that pauses background enhancement on macOS and Linux. Default `2.0`; `0` or below disables the check. |
 | `IVYGREP_WEB_EDITOR`, `IVYGREP_EDITOR` | Command the Web UI uses to open files, checked in that order before `EDITOR`, `VISUAL` (terminal editors skipped), and detected GUI editors. The TUI uses `EDITOR` or `VISUAL`. |
 | `IVYGREP_NO_BROWSER` | Set to stop `ig --web` from opening a browser. |
 
-Installers also read `IVYGREP_INSTALL_DIR` and `IVYGREP_VERSION`; `install.sh`
-additionally reads `IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
+Installers also read `IVYGREP_INSTALL_DIR`, `IVYGREP_VERSION`, `IVYGREP_BASE_URL`
+(download base URL instead of the tagged GitHub release), and
+`IVYGREP_INSTALL_ARCHIVE` with `IVYGREP_INSTALL_CHECKSUM` (install a local
+archive and its checksum file instead of downloading). `install.sh` defaults the
+checksum to the archive path plus `.sha256`, and additionally reads
+`IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
 
 ## Module ownership
 
