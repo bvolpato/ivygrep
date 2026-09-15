@@ -107,7 +107,7 @@ for language, `--include`/`--exclude` path globs, `--lexical-only`, `--hash`, an
 uses lightweight local embeddings for faster startup and no model download,
 with lower semantic quality. Run `ig --help` for full reference.
 
-Uppercase `AND`, `OR`, and `NOT` between words are Boolean operators. `ig "settings NOT render"` keeps
+Standalone uppercase `AND`, `OR`, and `NOT` are Boolean operators. `ig "settings NOT render"` keeps
 only results without `render`, and a malformed expression such as a trailing `OR` fails with an error
 instead of guessing. To search those words as text, write them in lowercase or wrap them in backticks
 or quotes.
