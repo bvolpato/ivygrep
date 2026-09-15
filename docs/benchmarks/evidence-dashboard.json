@@ -312,12 +312,12 @@
     },
     {
       "id": "public-retrieval-current",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/733c9b25cd8bb978d5deed03f559a8a111f2e0c6/docs/benchmarks/public-code-retrieval-results.json",
       "kind": "quality",
       "label": "Public retrieval matrix (v1.2.16)",
       "path": "docs/benchmarks/public-code-retrieval-results.json",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
+      "publication_commit": "733c9b25cd8bb978d5deed03f559a8a111f2e0c6",
+      "publication_status": "pinned",
       "sha256": "0289e10f35367664f73912f4a3f090fbe58c90a93a2be0e7fd5b72bd80a25079",
       "source_commit": "8db282cdb1ebe1d1fe0a7005a5d379657ecab5ad",
       "summary": {
