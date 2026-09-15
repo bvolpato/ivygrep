@@ -6,13 +6,25 @@ use std::path::{Path, PathBuf};
 /// malformed or malicious client (or `Content-Length` header) from triggering
 /// an unbounded allocation or read.
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Requests, counting each batch member, that may wait for the worker. Past
+/// this or `MAX_QUEUED_BYTES` the reader stops reading until the worker takes
+/// the next payload, so a client that floods requests or batches cannot grow
+/// memory without bound. An empty queue still takes one payload of any size.
+const MAX_QUEUED_REQUESTS: usize = 64;
+/// Raw payload bytes that may wait for the worker.
+const MAX_QUEUED_BYTES: usize = MAX_MESSAGE_BYTES;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+
+use parking_lot::{Condvar, Mutex};
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
@@ -140,24 +152,265 @@ struct IvygrepStatusArgs {}
 pub fn serve_stdio() -> Result<()> {
     config::ensure_app_dirs()?;
 
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut writer = BufWriter::new(stdout.lock());
+    serve(
+        BufReader::new(io::stdin()),
+        io::stdout(),
+        Arc::new(dispatch),
+    )
+}
+
+/// Runs one JSON-RPC method. Tests inject slow or cancellable stand-ins.
+type Dispatch = dyn Fn(&str, Value, &RequestCancellation) -> std::result::Result<Value, DispatchError>
+    + Send
+    + Sync;
+
+/// Serve MCP over `reader` and `writer`. A reader thread keeps reading while a
+/// request runs: it answers `ping` and undecodable messages at once and
+/// applies cancellations as they arrive. A worker thread runs every other
+/// request in arrival order, one at a time. Replies share one writer, so
+/// frames never interleave. At EOF the requests already read still run, then
+/// the server returns. A reply that cannot be written ends the session at
+/// once, even while stdin stays open.
+fn serve<R, W>(reader: R, writer: W, dispatch: Arc<Dispatch>) -> Result<()>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
+    let budget = Arc::new(QueueBudget::default());
+    let (queue, queued) = mpsc::channel::<QueuedWork>();
+    let (stopped, first_stopped) = mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("ig-mcp-worker".to_string())
+        .spawn({
+            let writer = writer.clone();
+            let dispatch = dispatch.clone();
+            let budget = budget.clone();
+            let stop = StopSignal {
+                thread: ServingThread::Worker,
+                stopped: stopped.clone(),
+                budget: budget.clone(),
+            };
+            move || -> Result<()> {
+                let _stop = stop;
+                for QueuedWork { work, mode, cost } in queued {
+                    budget.release(cost);
+                    if let Some(reply) = run_work(work, dispatch.as_ref()) {
+                        write_message(&mut *writer.lock(), &reply, mode)?;
+                    }
+                }
+                Ok(())
+            }
+        })
+        .context("failed to start the MCP worker thread")?;
+    let reader = std::thread::Builder::new()
+        .name("ig-mcp-reader".to_string())
+        .spawn({
+            let budget = budget.clone();
+            let stop = StopSignal {
+                thread: ServingThread::Reader,
+                stopped,
+                budget: budget.clone(),
+            };
+            move || {
+                let _stop = stop;
+                read_requests(reader, &writer, dispatch.as_ref(), &budget, &queue)
+            }
+        })
+        .context("failed to start the MCP reader thread")?;
+
+    let worker = if first_stopped.recv() == Ok(ServingThread::Worker) {
+        // A reply could not be written, or the worker panicked: end the
+        // session without waiting for stdin. A reader still blocked on stdin
+        // ends with the process. A worker only stops cleanly after the reader
+        // closed the queue.
+        join_serving_thread(worker)??;
+        None
+    } else {
+        Some(worker)
+    };
+    match join_serving_thread(reader)? {
+        ReadOutcome::OutputFailed(err) => Err(err),
+        // EOF or malformed framing: requests already read still run.
+        ReadOutcome::InputEnded(result) => result.and(worker.map_or(Ok(()), |worker| {
+            join_serving_thread(worker).and_then(|result| result)
+        })),
+    }
+}
+
+/// Why the reader thread stopped.
+enum ReadOutcome {
+    /// EOF (`Ok`) or malformed framing (`Err`). Requests already read still run.
+    InputEnded(Result<()>),
+    /// A reply written by the reader could not be written.
+    OutputFailed(anyhow::Error),
+}
+
+/// Read framed payloads until EOF, a framing error, or a failed write.
+fn read_requests<R: BufRead, W: Write>(
+    mut reader: R,
+    writer: &Mutex<BufWriter<W>>,
+    dispatch: &Dispatch,
+    budget: &QueueBudget,
+    queue: &mpsc::Sender<QueuedWork>,
+) -> ReadOutcome {
+    let pending = PendingRequests::default();
     let mut mode = FramingMode::Unknown;
-
     loop {
-        let payload = match read_message(&mut reader, &mut mode)? {
-            Some(payload) => payload,
-            None => break,
+        let answer = match read_message(&mut reader, &mut mode) {
+            Ok(Some(Frame::Payload(payload))) => match admit(&payload, &pending) {
+                Admission::Answer(work) => work,
+                Admission::Queue(work) => {
+                    let cost = QueueCost::of(&work, payload.len());
+                    // Both fail only after the worker stopped, and `serve`
+                    // returns the worker's error.
+                    if !budget.reserve(cost) || queue.send(QueuedWork { work, mode, cost }).is_err()
+                    {
+                        return ReadOutcome::InputEnded(Ok(()));
+                    }
+                    continue;
+                }
+                Admission::Ignore => continue,
+            },
+            Ok(Some(Frame::Oversized)) => Work::Single(Entry::Reply(error_response(
+                Value::Null,
+                -32700,
+                format!("parse error: message exceeds maximum of {MAX_MESSAGE_BYTES} bytes"),
+            ))),
+            Ok(None) => return ReadOutcome::InputEnded(Ok(())),
+            Err(err) => return ReadOutcome::InputEnded(Err(err)),
         };
+        if let Some(reply) = run_work(answer, dispatch)
+            && let Err(err) = write_message(&mut *writer.lock(), &reply, mode)
+        {
+            return ReadOutcome::OutputFailed(err);
+        }
+    }
+}
 
-        if let Some(reply) = handle_payload(&payload) {
-            write_message(&mut writer, &reply, mode)?;
+#[derive(Clone, Copy, PartialEq)]
+enum ServingThread {
+    Reader,
+    Worker,
+}
+
+/// Tells `serve` that a serving thread stopped, however it stopped, and wakes
+/// a reader waiting for queue room.
+struct StopSignal {
+    thread: ServingThread,
+    stopped: mpsc::Sender<ServingThread>,
+    budget: Arc<QueueBudget>,
+}
+
+impl Drop for StopSignal {
+    fn drop(&mut self) {
+        self.budget.close();
+        let _ = self.stopped.send(self.thread);
+    }
+}
+
+/// Join a serving thread, turning a panic into an error.
+fn join_serving_thread<T>(thread: std::thread::JoinHandle<T>) -> Result<T> {
+    let name = thread.thread().name().unwrap_or("MCP").to_string();
+    thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("{name} thread panicked"))
+}
+
+/// A payload waiting for the worker.
+struct QueuedWork {
+    work: Work,
+    mode: FramingMode,
+    cost: QueueCost,
+}
+
+/// What one queued payload counts against the queue limits.
+#[derive(Clone, Copy)]
+struct QueueCost {
+    /// Batch members count one each.
+    requests: usize,
+    bytes: usize,
+}
+
+impl QueueCost {
+    fn of(work: &Work, payload_bytes: usize) -> Self {
+        let requests = match work {
+            Work::Single(_) => 1,
+            Work::Batch(entries) => entries.len(),
+        };
+        Self {
+            requests: requests.max(1),
+            bytes: payload_bytes,
+        }
+    }
+}
+
+/// Payloads queued for the worker and not yet taken.
+#[derive(Default)]
+struct QueuedLoad {
+    requests: usize,
+    bytes: usize,
+}
+
+impl QueuedLoad {
+    /// Add `cost` if it fits. An empty queue takes one payload of any size, so
+    /// a single maximal message or batch still runs.
+    fn try_add(&mut self, cost: QueueCost) -> bool {
+        let fits = self.requests == 0
+            || (self.requests + cost.requests <= MAX_QUEUED_REQUESTS
+                && self.bytes + cost.bytes <= MAX_QUEUED_BYTES);
+        if fits {
+            self.requests += cost.requests;
+            self.bytes += cost.bytes;
+        }
+        fits
+    }
+
+    fn remove(&mut self, cost: QueueCost) {
+        self.requests -= cost.requests;
+        self.bytes -= cost.bytes;
+    }
+}
+
+/// Bounds what waits for the worker. The reader reserves a payload's cost
+/// before queuing it, and the worker releases it when it takes the payload.
+#[derive(Default)]
+struct QueueBudget {
+    state: Mutex<BudgetState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct BudgetState {
+    load: QueuedLoad,
+    closed: bool,
+}
+
+impl QueueBudget {
+    /// Wait until `cost` fits, then reserve it. `false` once a serving thread
+    /// stopped.
+    fn reserve(&self, cost: QueueCost) -> bool {
+        let mut state = self.state.lock();
+        loop {
+            if state.closed {
+                return false;
+            }
+            if state.load.try_add(cost) {
+                return true;
+            }
+            self.changed.wait(&mut state);
         }
     }
 
-    Ok(())
+    fn release(&self, cost: QueueCost) {
+        self.state.lock().load.remove(cost);
+        self.changed.notify_one();
+    }
+
+    fn close(&self) {
+        self.state.lock().closed = true;
+        self.changed.notify_one();
+    }
 }
 
 /// What one framed payload sends back.
@@ -168,62 +421,251 @@ enum JsonRpcReply {
     Batch(Vec<JsonRpcResponse>),
 }
 
-/// Handle one framed JSON-RPC payload: a single message or a batch array,
-/// which MCP 2025-03-26 requires servers to accept. `None` means nothing is
-/// sent back.
-fn handle_payload(payload: &[u8]) -> Option<JsonRpcReply> {
+/// Where the reader thread sends one framed payload.
+enum Admission {
+    /// Run on the reader thread: `ping`, parse errors, and invalid requests.
+    Answer(Work),
+    /// Run on the worker thread, in arrival order.
+    Queue(Work),
+    /// Nothing to run or send: a notification or a client's response.
+    Ignore,
+}
+
+/// One payload to run: a single message, or a batch answered with one array.
+enum Work {
+    Single(Entry),
+    Batch(Vec<Entry>),
+}
+
+/// One decoded JSON-RPC message.
+enum Entry {
+    /// An error decided while decoding.
+    Reply(JsonRpcResponse),
+    Request(QueuedRequest),
+    /// A notification or a client's response.
+    Ignore,
+}
+
+struct QueuedRequest {
+    request: JsonRpcRequest,
+    /// `None` for `initialize`, which clients must not cancel.
+    registration: Option<Registration>,
+}
+
+/// Decode one framed payload: a single message or a batch array, which MCP
+/// 2025-03-26 requires servers to accept.
+fn admit(payload: &[u8], pending: &PendingRequests) -> Admission {
     let message: Value = match serde_json::from_slice(payload) {
         Ok(message) => message,
         Err(err) => {
-            return Some(JsonRpcReply::Single(error_response(
+            return Admission::Answer(Work::Single(Entry::Reply(error_response(
                 Value::Null,
                 -32700,
                 format!("parse error: {err}"),
-            )));
+            ))));
         }
     };
     match message {
         // An empty batch is one invalid request, answered with a single object.
         Value::Array(messages) if messages.is_empty() => {
-            Some(JsonRpcReply::Single(error_response(
+            Admission::Answer(Work::Single(Entry::Reply(error_response(
                 Value::Null,
                 -32600,
                 "invalid request: empty batch".to_string(),
-            )))
+            ))))
         }
-        // Notifications and client responses get no entry, and a batch with
-        // nothing to answer sends nothing instead of an empty array.
-        Value::Array(messages) => {
-            let responses = messages
+        Value::Array(messages) => Admission::Queue(Work::Batch(
+            messages
                 .into_iter()
-                .filter_map(handle_message)
-                .collect::<Vec<_>>();
-            (!responses.is_empty()).then_some(JsonRpcReply::Batch(responses))
-        }
-        message => handle_message(message).map(JsonRpcReply::Single),
+                .map(|message| admit_message(message, pending))
+                .collect(),
+        )),
+        message => match admit_message(message, pending) {
+            Entry::Ignore => Admission::Ignore,
+            Entry::Request(queued) if queued.request.method != "ping" => {
+                Admission::Queue(Work::Single(Entry::Request(queued)))
+            }
+            entry => Admission::Answer(Work::Single(entry)),
+        },
     }
 }
 
-/// Handle one JSON-RPC message. `None` means nothing is sent back.
-fn handle_message(message: Value) -> Option<JsonRpcResponse> {
+/// Decode one message. Requests are registered so a later
+/// `notifications/cancelled` can reach them, and cancellations apply at once.
+fn admit_message(message: Value, pending: &PendingRequests) -> Entry {
     let request = match parse_request(message) {
         Ok(Some(request)) => request,
-        Ok(None) => return None,
-        Err(response) => return Some(response),
+        Ok(None) => return Entry::Ignore,
+        Err(response) => return Entry::Reply(response),
     };
+    let Some(id) = &request.id else {
+        if request.method == "notifications/cancelled" {
+            pending.cancel(&request.params);
+        }
+        return Entry::Ignore;
+    };
+    let registration = (request.method != "initialize").then(|| pending.register(id));
+    Entry::Request(QueuedRequest {
+        request,
+        registration,
+    })
+}
 
-    // Isolate handler panics: a panic deep in search must not crash the
-    // whole MCP session. Capture it and return a JSON-RPC error instead.
-    let request_id = request.id.clone();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_request(request))) {
-        Ok(response) => response,
-        Err(_) => request_id.map(|id| {
-            error_response(
-                id,
-                -32603,
-                "internal error: request handler panicked".to_string(),
-            )
-        }),
+/// Run one payload. `None` means nothing is sent back.
+fn run_work(work: Work, dispatch: &Dispatch) -> Option<JsonRpcReply> {
+    match work {
+        Work::Single(entry) => run_entry(entry, dispatch).map(JsonRpcReply::Single),
+        // Notifications, client responses, and cancelled requests get no
+        // entry, and a batch with nothing to answer sends nothing instead of
+        // an empty array.
+        Work::Batch(entries) => {
+            let responses = entries
+                .into_iter()
+                .filter_map(|entry| run_entry(entry, dispatch))
+                .collect::<Vec<_>>();
+            (!responses.is_empty()).then_some(JsonRpcReply::Batch(responses))
+        }
+    }
+}
+
+fn run_entry(entry: Entry, dispatch: &Dispatch) -> Option<JsonRpcResponse> {
+    match entry {
+        Entry::Reply(response) => Some(response),
+        Entry::Ignore => None,
+        Entry::Request(QueuedRequest {
+            request,
+            registration,
+        }) => {
+            let cancellation = registration
+                .as_ref()
+                .map(|registration| registration.cancellation.clone())
+                .unwrap_or_default();
+            // A request cancelled while queued never starts, and a cancelled
+            // request gets no response.
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            handle_request(request, dispatch, &cancellation)
+                .filter(|_| !cancellation.is_cancelled())
+        }
+    }
+}
+
+/// Queued and running requests by JSON-RPC id, so a cancellation can reach
+/// them. Entries leave when their request finishes, which bounds the map by
+/// the queue.
+#[derive(Clone, Default)]
+struct PendingRequests(Arc<Mutex<HashMap<String, RequestCancellation>>>);
+
+impl PendingRequests {
+    fn register(&self, id: &Value) -> Registration {
+        let key = id.to_string();
+        let cancellation = RequestCancellation::default();
+        // Ids must be unique per session; a reused id replaces the older entry.
+        self.0.lock().insert(key.clone(), cancellation.clone());
+        Registration {
+            pending: self.clone(),
+            key,
+            cancellation,
+        }
+    }
+
+    /// Apply `notifications/cancelled`. Unknown or finished ids and malformed
+    /// params are ignored.
+    fn cancel(&self, params: &Value) {
+        let Some(id) = params
+            .get("requestId")
+            .filter(|id| id.is_string() || id.is_number())
+        else {
+            return;
+        };
+        let cancellation = self.0.lock().get(&id.to_string()).cloned();
+        if let Some(cancellation) = cancellation {
+            let reason = params
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("no reason given");
+            tracing::debug!("MCP request {id} cancelled: {reason}");
+            cancellation.cancel();
+        }
+    }
+}
+
+/// A request's entry in [`PendingRequests`], removed when dropped.
+struct Registration {
+    pending: PendingRequests,
+    key: String,
+    cancellation: RequestCancellation,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let mut requests = self.pending.0.lock();
+        if requests
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(&current.0, &self.cancellation.0))
+        {
+            requests.remove(&self.key);
+        }
+    }
+}
+
+/// Cancellation of one MCP request. Tripping it stops local searches that
+/// poll the token, cancels the daemon search the request waits on, and ends
+/// the first-index wait.
+#[derive(Clone, Default)]
+struct RequestCancellation(Arc<CancellationState>);
+
+#[derive(Default)]
+struct CancellationState {
+    token: Arc<AtomicBool>,
+    /// Id of the daemon search the request is waiting on.
+    daemon_search: Mutex<Option<uuid::Uuid>>,
+}
+
+impl RequestCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.token.load(Ordering::SeqCst)
+    }
+
+    /// Token for [`SearchOptions::cancel_token`].
+    fn token(&self) -> Arc<AtomicBool> {
+        self.0.token.clone()
+    }
+
+    fn cancel(&self) {
+        let daemon_search = {
+            let mut daemon_search = self.0.daemon_search.lock();
+            self.0.token.store(true, Ordering::SeqCst);
+            daemon_search.take()
+        };
+        if let Some(search_id) = daemon_search {
+            // Off the reader thread: the daemon answers once the search stopped.
+            let _ = std::thread::Builder::new()
+                .name("ig-mcp-cancel".to_string())
+                .spawn(move || {
+                    let request = DaemonRequest::CancelSearch { search_id };
+                    if let Err(err) = crate::daemon::request_blocking(&request, false) {
+                        tracing::debug!("failed to cancel MCP daemon search: {err:#}");
+                    }
+                });
+        }
+    }
+
+    /// Run a daemon search that cancelling this request also cancels on the
+    /// daemon. `Ok(None)` when the request is already cancelled.
+    fn daemon_search(&self, request: &DaemonRequest) -> Result<Option<DaemonResponse>> {
+        let search_id = uuid::Uuid::new_v4();
+        {
+            let mut daemon_search = self.0.daemon_search.lock();
+            if self.is_cancelled() {
+                return Ok(None);
+            }
+            *daemon_search = Some(search_id);
+        }
+        let response = crate::daemon::request_blocking_with_id(request, Some(search_id), false);
+        self.0.daemon_search.lock().take();
+        response
     }
 }
 
@@ -277,26 +719,45 @@ fn error_response(id: Value, code: i64, message: String) -> JsonRpcResponse {
     }
 }
 
-fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
+fn handle_request(
+    request: JsonRpcRequest,
+    dispatch: &Dispatch,
+    cancellation: &RequestCancellation,
+) -> Option<JsonRpcResponse> {
     let id = request.id?;
+    let method = request.method;
+    let params = request.params;
 
-    match dispatch(request.method.as_str(), request.params) {
-        Ok(result) => Some(JsonRpcResponse {
+    // Isolate handler panics: a panic deep in search must not crash the
+    // whole MCP session. Capture it and return a JSON-RPC error instead.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        dispatch(method.as_str(), params, cancellation)
+    })) {
+        Ok(Ok(result)) => Some(JsonRpcResponse {
             jsonrpc: JSONRPC_VERSION,
             id,
             result: Some(result),
             error: None,
         }),
-        Err(err) => Some(error_response(id, err.code, err.message)),
+        Ok(Err(err)) => Some(error_response(id, err.code, err.message)),
+        Err(_) => Some(error_response(
+            id,
+            -32603,
+            "internal error: request handler panicked".to_string(),
+        )),
     }
 }
 
-fn dispatch(method: &str, params: Value) -> std::result::Result<Value, DispatchError> {
+fn dispatch(
+    method: &str,
+    params: Value,
+    cancellation: &RequestCancellation,
+) -> std::result::Result<Value, DispatchError> {
     match method {
         "initialize" => Ok(initialize_result(&params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": [search_tool_schema(), status_tool_schema()]})),
-        "tools/call" => run_tool_call(params).map_err(DispatchError::invalid_params),
+        "tools/call" => run_tool_call(params, cancellation).map_err(DispatchError::invalid_params),
         "notifications/initialized" => Ok(json!({})),
         "shutdown" => Ok(json!({})),
         other => Err(DispatchError::method_not_found(other)),
@@ -672,12 +1133,12 @@ fn status_output_schema() -> Value {
     })
 }
 
-fn run_tool_call(params: Value) -> Result<Value> {
+fn run_tool_call(params: Value, cancellation: &RequestCancellation) -> Result<Value> {
     let call: ToolCallParams = serde_json::from_value(params)?;
     if call.name == TOOL_IG_SEARCH {
         let result = serde_json::from_value(call.arguments)
             .map_err(anyhow::Error::from)
-            .and_then(execute_ivygrep_search);
+            .and_then(|args| execute_ivygrep_search(args, cancellation));
         Ok(result.unwrap_or_else(tool_error_result))
     } else if call.name == TOOL_IG_STATUS {
         let arguments = if call.arguments.is_null() {
@@ -823,8 +1284,8 @@ fn mcp_query_model() -> Arc<dyn EmbeddingModel> {
     match create_neural_model() {
         Ok(model) => {
             let model: Arc<dyn EmbeddingModel> = Arc::from(model);
-            // First successful neural init wins; the MCP stdio loop is serial,
-            // so a lost race here is not a concern.
+            // First successful neural init wins; MCP requests run one at a
+            // time on the worker thread, so a lost race here is not a concern.
             let _ = MODEL.set(model.clone());
             model
         }
@@ -863,6 +1324,7 @@ fn needs_ignored_refresh(workspace: &Workspace, include_ignored: bool) -> Result
 fn ensure_mcp_workspace_ready(
     workspace: &Workspace,
     include_ignored: bool,
+    cancellation: &RequestCancellation,
 ) -> Result<WorkspaceReadiness> {
     let metadata = workspace.read_metadata()?;
     let include_ignored = include_ignored
@@ -888,7 +1350,7 @@ fn ensure_mcp_workspace_ready(
     let wait_started = std::time::Instant::now();
     match crate::daemon::request_blocking(&start_request, true)? {
         Some(DaemonResponse::IndexStarted { .. }) => {
-            return wait_for_daemon_index(workspace, include_ignored, wait_started);
+            return wait_for_daemon_index(workspace, include_ignored, wait_started, cancellation);
         }
         Some(DaemonResponse::Error { message }) => {
             // The daemon is up and rejected the request; do not duplicate its
@@ -923,7 +1385,7 @@ fn ensure_mcp_workspace_ready(
             "MCP index request for {} got no reply from a live daemon; polling its status instead of indexing locally",
             workspace.root.display()
         );
-        return wait_for_daemon_index(workspace, include_ignored, wait_started);
+        return wait_for_daemon_index(workspace, include_ignored, wait_started, cancellation);
     }
     index_workspace_locally(workspace, include_ignored)?;
     Ok(WorkspaceReadiness::Ready)
@@ -936,6 +1398,7 @@ fn wait_for_daemon_index(
     workspace: &Workspace,
     include_ignored: bool,
     wait_started: std::time::Instant,
+    cancellation: &RequestCancellation,
 ) -> Result<WorkspaceReadiness> {
     let deadline = wait_started + config::mcp_index_wait();
     let status_request = DaemonRequest::RuntimeStatus {
@@ -943,6 +1406,10 @@ fn wait_for_daemon_index(
     };
     let mut resubmitted = false;
     loop {
+        // Only the wait stops; the daemon keeps indexing for the next call.
+        if cancellation.is_cancelled() {
+            bail!("request cancelled");
+        }
         let in_flight = match crate::daemon::request_blocking(&status_request, false)? {
             Some(DaemonResponse::RuntimeStatus {
                 workspace: Some(status),
@@ -1173,7 +1640,10 @@ fn indexing_tool_result(payload: Value) -> Result<Value> {
     }))
 }
 
-fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
+fn execute_ivygrep_search(
+    args: IvygrepSearchArgs,
+    cancellation: &RequestCancellation,
+) -> Result<Value> {
     let query = args
         .query
         .as_deref()
@@ -1248,9 +1718,11 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     // MCP search is intentionally scoped to one workspace. Ensure that
     // workspace is indexed and watched before searching so edits made by a
     // coding agent become searchable without restarting the MCP process.
-    if let WorkspaceReadiness::Indexing(payload) =
-        ensure_mcp_workspace_ready(&current_workspace, args.skip_gitignore.unwrap_or(false))?
-    {
+    if let WorkspaceReadiness::Indexing(payload) = ensure_mcp_workspace_ready(
+        &current_workspace,
+        args.skip_gitignore.unwrap_or(false),
+        cancellation,
+    )? {
         return indexing_tool_result(payload);
     }
     let workspace = current_workspace.clone();
@@ -1292,7 +1764,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         skip_gitignore: args.skip_gitignore.unwrap_or(false),
         force_neural: false,
         progress_tx: None,
-        cancel_token: None,
+        cancel_token: Some(cancellation.token()),
     };
 
     if wants_context_pack {
@@ -1376,13 +1848,10 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     };
     let mut search_warnings = Vec::new();
     let daemon_hits = if let Some(daemon_request) = daemon_request {
-        // Tag the search so a client-side timeout cancels it on the daemon
-        // instead of leaving the work running for a caller that gave up.
-        match crate::daemon::request_blocking_with_id(
-            &daemon_request,
-            Some(uuid::Uuid::new_v4()),
-            false,
-        )? {
+        // Tag the search so a client-side timeout or a cancelled MCP request
+        // cancels it on the daemon instead of leaving the work running for a
+        // caller that gave up.
+        match cancellation.daemon_search(&daemon_request)? {
             Some(DaemonResponse::SearchResults { hits, warnings }) => {
                 search_warnings = warnings;
                 Some(hits)
@@ -1400,6 +1869,10 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     } else {
         None
     };
+    // A cancelled daemon search must not fall back to a local search.
+    if cancellation.is_cancelled() {
+        bail!("request cancelled");
+    }
 
     let mut hits = if let Some(hits) = daemon_hits {
         hits
@@ -1713,20 +2186,71 @@ fn read_line_capped<R: BufRead>(reader: &mut R, line: &mut String) -> Result<usi
     Ok(n)
 }
 
-fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Option<Vec<u8>>> {
+/// One message read from the stdio transport.
+enum Frame {
+    Payload(Vec<u8>),
+    /// A newline-delimited message over `MAX_MESSAGE_BYTES`. The rest of its
+    /// line was skipped, so the next message can still be read.
+    Oversized,
+}
+
+/// Consume input through the next newline without buffering it.
+fn skip_line<R: BufRead>(reader: &mut R) -> io::Result<()> {
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        match buffer.iter().position(|byte| *byte == b'\n') {
+            Some(newline) => {
+                reader.consume(newline + 1);
+                return Ok(());
+            }
+            None => {
+                let length = buffer.len();
+                reader.consume(length);
+            }
+        }
+    }
+}
+
+fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Option<Frame>> {
     // Read first non-empty line (skip blank lines between messages).
-    let first_line = loop {
-        let mut line = String::new();
-        let bytes = read_line_capped(reader, &mut line)?;
+    let trimmed = loop {
+        let mut line = Vec::new();
+        let bytes = reader
+            .by_ref()
+            .take((MAX_MESSAGE_BYTES as u64) + 1)
+            .read_until(b'\n', &mut line)?;
         if bytes == 0 {
             return Ok(None);
         }
-        let trimmed = line.trim().to_string();
+        if line.len() > MAX_MESSAGE_BYTES {
+            // A JSON line can resync at the next newline. An oversized header
+            // line leaves no safe point to resume, so it ends the session.
+            let json_line = match *mode {
+                FramingMode::JsonLine => true,
+                FramingMode::Unknown => line
+                    .iter()
+                    .find(|byte| !byte.is_ascii_whitespace())
+                    .is_some_and(|byte| matches!(byte, b'{' | b'[')),
+                FramingMode::ContentLength => false,
+            };
+            if !json_line {
+                bail!("request line exceeds maximum of {MAX_MESSAGE_BYTES} bytes");
+            }
+            *mode = FramingMode::JsonLine;
+            if line.last() != Some(&b'\n') {
+                skip_line(reader)?;
+            }
+            return Ok(Some(Frame::Oversized));
+        }
+        let line = String::from_utf8_lossy(&line);
+        let trimmed = line.trim();
         if !trimmed.is_empty() {
-            break (trimmed, line);
+            break trimmed.to_string();
         }
     };
-    let (trimmed, _raw) = first_line;
 
     // Auto-detect framing: a first meaningful line starting with '{', or '[' for
     // a batch, is bare JSON.
@@ -1741,7 +2265,7 @@ fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Op
     match *mode {
         FramingMode::JsonLine => {
             // The trimmed line IS the JSON payload.
-            Ok(Some(trimmed.into_bytes()))
+            Ok(Some(Frame::Payload(trimmed.into_bytes())))
         }
         FramingMode::ContentLength => {
             // Parse header lines for Content-Length.
@@ -1774,7 +2298,7 @@ fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Op
             }
             let mut payload = vec![0u8; len];
             reader.read_exact(&mut payload)?;
-            Ok(Some(payload))
+            Ok(Some(Frame::Payload(payload)))
         }
         FramingMode::Unknown => unreachable!(),
     }
@@ -1803,8 +2327,18 @@ fn write_message<W: Write, T: Serialize>(
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
+    use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// The production dispatcher without cancellation, as most tests call it.
+    fn dispatch(method: &str, params: Value) -> std::result::Result<Value, DispatchError> {
+        super::dispatch(method, params, &RequestCancellation::default())
+    }
+
+    fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
+        super::execute_ivygrep_search(args, &RequestCancellation::default())
+    }
 
     #[test]
     fn read_message_rejects_oversized_content_length() {
@@ -1822,12 +2356,18 @@ mod tests {
         let msg = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         let mut reader = std::io::BufReader::new(msg.as_bytes());
         let mut mode = FramingMode::Unknown;
-        let payload = read_message(&mut reader, &mut mode).unwrap().unwrap();
+        let Some(Frame::Payload(payload)) = read_message(&mut reader, &mut mode).unwrap() else {
+            panic!("expected a payload");
+        };
         assert_eq!(payload, body.as_bytes());
     }
 
     fn payload_response(payload: &str) -> Option<Value> {
-        handle_payload(payload.as_bytes()).map(|response| serde_json::to_value(response).unwrap())
+        let work = match admit(payload.as_bytes(), &PendingRequests::default()) {
+            Admission::Answer(work) | Admission::Queue(work) => work,
+            Admission::Ignore => return None,
+        };
+        run_work(work, &super::dispatch).map(|reply| serde_json::to_value(reply).unwrap())
     }
 
     #[test]
@@ -1898,9 +2438,330 @@ mod tests {
         let batch = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]\n";
         let mut reader = std::io::BufReader::new(batch.as_bytes());
         let mut mode = FramingMode::Unknown;
-        let payload = read_message(&mut reader, &mut mode).unwrap();
-        assert_eq!(payload.as_deref(), Some(batch.trim_end().as_bytes()));
+        let Some(Frame::Payload(payload)) = read_message(&mut reader, &mut mode).unwrap() else {
+            panic!("expected a payload");
+        };
+        assert_eq!(payload, batch.trim_end().as_bytes());
         assert!(mode == FramingMode::JsonLine);
+    }
+
+    /// Stdin stand-in: bytes arrive as the test sends them, and EOF once the
+    /// test drops the sender.
+    struct ChannelReader {
+        chunks: mpsc::Receiver<Vec<u8>>,
+        chunk: Vec<u8>,
+        offset: usize,
+    }
+
+    impl Read for ChannelReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            while self.offset == self.chunk.len() {
+                match self.chunks.recv() {
+                    Ok(chunk) => (self.chunk, self.offset) = (chunk, 0),
+                    Err(_) => return Ok(0),
+                }
+            }
+            let length = out.len().min(self.chunk.len() - self.offset);
+            out[..length].copy_from_slice(&self.chunk[self.offset..self.offset + length]);
+            self.offset += length;
+            Ok(length)
+        }
+    }
+
+    /// Stdout stand-in that forwards every write to the test.
+    struct ChannelWriter(mpsc::Sender<Vec<u8>>);
+
+    impl Write for ChannelWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let _ = self.0.send(bytes.to_vec());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Stdout stand-in whose writes fail, like a client that closed its end.
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    /// `serve` on its own thread over in-memory stdin and stdout.
+    struct TestServer {
+        input: Option<mpsc::Sender<Vec<u8>>>,
+        output: mpsc::Receiver<Vec<u8>>,
+        buffered: Vec<u8>,
+        served: mpsc::Receiver<Result<()>>,
+    }
+
+    impl TestServer {
+        fn start<D>(dispatch: D) -> Self
+        where
+            D: Fn(&str, Value, &RequestCancellation) -> std::result::Result<Value, DispatchError>
+                + Send
+                + Sync
+                + 'static,
+        {
+            let (written, output) = mpsc::channel();
+            Self::start_with_writer(dispatch, ChannelWriter(written), output)
+        }
+
+        fn start_with_writer<D>(
+            dispatch: D,
+            writer: impl Write + Send + 'static,
+            output: mpsc::Receiver<Vec<u8>>,
+        ) -> Self
+        where
+            D: Fn(&str, Value, &RequestCancellation) -> std::result::Result<Value, DispatchError>
+                + Send
+                + Sync
+                + 'static,
+        {
+            let (input, chunks) = mpsc::channel();
+            let (served_tx, served) = mpsc::channel();
+            let reader = BufReader::new(ChannelReader {
+                chunks,
+                chunk: Vec::new(),
+                offset: 0,
+            });
+            std::thread::spawn(move || {
+                let _ = served_tx.send(serve(reader, writer, Arc::new(dispatch)));
+            });
+            Self {
+                input: Some(input),
+                output,
+                buffered: Vec::new(),
+                served,
+            }
+        }
+
+        fn send(&self, message: Value) {
+            self.send_raw(format!("{message}\n").into_bytes());
+        }
+
+        fn send_raw(&self, bytes: Vec<u8>) {
+            self.input.as_ref().unwrap().send(bytes).unwrap();
+        }
+
+        /// The next reply, failing the test after five seconds.
+        fn recv(&mut self) -> Value {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
+                    let line = self.buffered.drain(..=newline).collect::<Vec<_>>();
+                    return serde_json::from_slice(&line).unwrap();
+                }
+                match self
+                    .output
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                {
+                    Ok(bytes) => self.buffered.extend(bytes),
+                    Err(err) => panic!("no MCP reply within 5 s: {err}"),
+                }
+            }
+        }
+
+        /// What `serve` returned, failing the test if it runs past five seconds.
+        fn result(&self) -> Result<()> {
+            self.served
+                .recv_timeout(Duration::from_secs(5))
+                .expect("serve did not return within 5 s")
+        }
+
+        /// Close stdin and return what `serve` returned.
+        fn finish(mut self) -> Result<()> {
+            self.input.take();
+            self.result()
+        }
+    }
+
+    #[test]
+    fn mcp_server_answers_ping_while_a_request_runs() {
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let mut server = TestServer::start(move |method, params, cancellation| {
+            if method != "tools/call" {
+                return super::dispatch(method, params, cancellation);
+            }
+            started.send(()).unwrap();
+            release_rx
+                .lock()
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the test never released the request");
+            Ok(json!({"released": true}))
+        });
+
+        server.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}}));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        server.send(json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}));
+        let ping = server.recv();
+        assert_eq!(ping["id"], 2, "{ping}");
+        assert_eq!(ping["result"], json!({}));
+
+        release.send(()).unwrap();
+        let call = server.recv();
+        assert_eq!(call["id"], 1, "{call}");
+        assert_eq!(call["result"]["released"], true);
+        server.finish().unwrap();
+    }
+
+    #[test]
+    fn mcp_server_sends_no_response_for_cancelled_requests() {
+        let (events, events_rx) = mpsc::channel();
+        let mut server = TestServer::start(move |method, params, cancellation| {
+            if method != "tools/call" {
+                return super::dispatch(method, params, cancellation);
+            }
+            let name = params["name"].as_str().unwrap_or_default().to_string();
+            events.send(format!("{name} started")).unwrap();
+            let token = cancellation.token();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !token.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            events
+                .send(format!(
+                    "{name} token tripped: {}",
+                    token.load(Ordering::SeqCst)
+                ))
+                .unwrap();
+            Ok(json!({"finished": name}))
+        });
+        let call = |id: &str| json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": id}});
+        let cancel = |id: &str| json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id, "reason": "test"}});
+        let next_event = || events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        server.send(call("running"));
+        assert_eq!(next_event(), "running started");
+        // Queued behind the running request and cancelled before it starts.
+        server.send(call("queued"));
+        server.send(cancel("queued"));
+        server.send(cancel("unknown"));
+        server.send(cancel("running"));
+        assert_eq!(next_event(), "running token tripped: true");
+
+        // The worker answers in arrival order, so a response for either
+        // cancelled request would arrive before this one.
+        server.send(json!({"jsonrpc": "2.0", "id": "after", "method": "tools/list"}));
+        let reply = server.recv();
+        assert_eq!(reply["id"], "after", "{reply}");
+        assert!(reply["result"]["tools"].is_array(), "{reply}");
+        assert!(
+            events_rx.try_recv().is_err(),
+            "the request cancelled while queued started"
+        );
+        server.finish().unwrap();
+    }
+
+    #[test]
+    fn mcp_server_recovers_from_an_oversized_json_line() {
+        let mut server = TestServer::start(super::dispatch);
+        let mut oversized = br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":""#.to_vec();
+        oversized.resize(MAX_MESSAGE_BYTES + 64, b'x');
+        oversized.extend_from_slice(b"\"}\n");
+        server.send_raw(oversized);
+        server.send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+
+        let error = server.recv();
+        assert_eq!(error["error"]["code"], -32700, "{error}");
+        assert_eq!(error.get("id"), Some(&Value::Null));
+        let tools = server.recv();
+        assert_eq!(tools["id"], 2, "{tools}");
+        assert!(tools["result"]["tools"].is_array(), "{tools}");
+        server.finish().unwrap();
+    }
+
+    #[test]
+    fn mcp_server_returns_when_stdout_breaks_while_stdin_stays_open() {
+        let broken_pipe = |result: Result<()>| {
+            let err = result.expect_err("serve must report the failed write");
+            assert!(
+                err.downcast_ref::<io::Error>()
+                    .is_some_and(|err| err.kind() == io::ErrorKind::BrokenPipe),
+                "{err:#}"
+            );
+        };
+
+        // The worker fails to write a queued reply while the reader waits for
+        // more input.
+        let server =
+            TestServer::start_with_writer(super::dispatch, BrokenPipeWriter, mpsc::channel().1);
+        server.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
+        broken_pipe(server.result());
+
+        // The reader fails to write a ping reply while the worker runs a request.
+        let (started, started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let server = TestServer::start_with_writer(
+            move |method, params, cancellation| {
+                if method == "tools/call" {
+                    started.send(()).unwrap();
+                    let _ = release_rx.lock().recv_timeout(Duration::from_secs(10));
+                }
+                super::dispatch(method, params, cancellation)
+            },
+            BrokenPipeWriter,
+            mpsc::channel().1,
+        );
+        server.send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {}}));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        server.send(json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}));
+        broken_pipe(server.result());
+        drop(release);
+    }
+
+    #[test]
+    fn mcp_queue_budget_counts_batch_members_and_payload_bytes() {
+        let members = (0..=MAX_QUEUED_REQUESTS)
+            .map(|id| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"}).to_string())
+            .collect::<Vec<_>>();
+        let batch = format!("[{}]", members.join(","));
+        let Admission::Queue(work) = admit(batch.as_bytes(), &PendingRequests::default()) else {
+            panic!("a batch goes to the worker");
+        };
+        let batch_cost = QueueCost::of(&work, batch.len());
+        assert_eq!(batch_cost.requests, MAX_QUEUED_REQUESTS + 1);
+
+        let mut load = QueuedLoad::default();
+        let small = QueueCost {
+            requests: 1,
+            bytes: 64,
+        };
+        // An empty queue takes one payload of any size.
+        assert!(load.try_add(batch_cost));
+        assert!(
+            !load.try_add(small),
+            "batch members count against the request limit"
+        );
+        load.remove(batch_cost);
+
+        for _ in 0..MAX_QUEUED_REQUESTS {
+            assert!(load.try_add(small));
+        }
+        assert!(
+            !load.try_add(small),
+            "at most {MAX_QUEUED_REQUESTS} requests wait"
+        );
+        load.remove(small);
+        let large = QueueCost {
+            requests: 1,
+            bytes: MAX_QUEUED_BYTES,
+        };
+        assert!(
+            !load.try_add(large),
+            "payload bytes count against the byte limit"
+        );
     }
 
     #[test]
@@ -2659,22 +3520,30 @@ impl AccountManager {
 
     #[test]
     fn mcp_returns_standard_json_rpc_error_codes() {
-        let unknown_method = handle_request(JsonRpcRequest {
-            id: Some(json!(1)),
-            method: "tools/nonexistent".to_string(),
-            params: json!({}),
-        })
+        let unknown_method = handle_request(
+            JsonRpcRequest {
+                id: Some(json!(1)),
+                method: "tools/nonexistent".to_string(),
+                params: json!({}),
+            },
+            &super::dispatch,
+            &RequestCancellation::default(),
+        )
         .unwrap();
         let error = unknown_method.error.unwrap();
         assert_eq!(error.code, -32601);
         assert!(error.message.contains("method not found"));
 
         for params in [json!({}), json!({"name": "unknown_tool", "arguments": {}})] {
-            let invalid_params = handle_request(JsonRpcRequest {
-                id: Some(json!(2)),
-                method: "tools/call".to_string(),
-                params,
-            })
+            let invalid_params = handle_request(
+                JsonRpcRequest {
+                    id: Some(json!(2)),
+                    method: "tools/call".to_string(),
+                    params,
+                },
+                &super::dispatch,
+                &RequestCancellation::default(),
+            )
             .unwrap();
             assert_eq!(invalid_params.error.unwrap().code, -32602);
         }
