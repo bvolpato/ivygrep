@@ -1602,6 +1602,75 @@ class PublicBenchmarkTest(unittest.TestCase):
             )
             self.assertEqual(cached_path.read_bytes(), before)
 
+    def test_matrix_resolves_the_assembling_checkout_before_any_run(self):
+        # Without Git history the aggregation revision cannot resolve, even
+        # with --source-commit. That must fail before retrieval runs start.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, request, _ = cached_result_fixture(root)
+            binary = root / "binary"
+            binary.write_text("fixture\n")
+            (root / "work").mkdir()
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "profiles": {
+                            "probe": {"tasks": ["public"], "minimum_queries": 1}
+                        },
+                        "tasks": {"public": {}},
+                    }
+                )
+            )
+            argv = [
+                "matrix",
+                "--manifest",
+                str(manifest),
+                "--profile",
+                "probe",
+                "--datasets-root",
+                str(root),
+                "--work-root",
+                str(root / "work"),
+                "--binary",
+                str(binary),
+                "--modes",
+                "blended",
+                "--runs",
+                "1",
+                "--skip-build",
+                "--skip-export",
+                "--source-commit",
+                "a" * 40,
+                "--output",
+                str(root / "matrix.json"),
+            ]
+            no_history = subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"])
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(matrix_runner, "git_revision", side_effect=no_history),
+                mock.patch.object(
+                    evaluator, "runtime_metadata", return_value=request["runtime"]
+                ),
+                mock.patch.object(
+                    evaluator, "expected_execution_request", return_value=request
+                ),
+                mock.patch.object(
+                    contracts,
+                    "execution_harness",
+                    return_value=request["harness_sha256"],
+                ),
+                mock.patch.object(matrix_runner.subprocess, "run"),
+                mock.patch.object(
+                    matrix_runner,
+                    "run_evaluation",
+                    side_effect=AssertionError("retrieval runs started first"),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    matrix_runner.main()
+
     def test_evaluator_rejects_persistent_binary_replacement_before_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
