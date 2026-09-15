@@ -62,6 +62,12 @@ const MAX_WAITING_DAEMON_CONNECTIONS: usize = 64;
 const DAEMON_CONNECTION_WAIT: Duration = Duration::from_secs(2);
 /// Bound on reading the request of a connection that is being refused.
 const REFUSED_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a served connection may take to send its next whole request line
+/// before it is closed, so a client that never finishes one cannot hold a slot.
+/// Clients write their request as soon as they connect, within
+/// `DAEMON_WRITE_TIMEOUT`. Running handlers, including long searches and
+/// indexing, are not bounded by it.
+const DAEMON_IDLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
 const MAX_NEURAL_QUERY_CACHE_ENTRIES: usize = 128;
 /// Cap on cached workspace/dimension keys. Idle contexts additionally share a
@@ -2721,28 +2727,32 @@ async fn run_daemon_inner() -> Result<()> {
             MAX_DAEMON_CONNECTIONS,
             MAX_WAITING_DAEMON_CONNECTIONS,
             DAEMON_CONNECTION_WAIT,
+            DAEMON_IDLE_REQUEST_TIMEOUT,
         ),
     )
     .await
 }
 
 /// Slots for open client connections, plus a smaller pool for connections past
-/// the cap that wait briefly for a slot before they are refused.
+/// the cap that wait briefly for a slot before they are refused. A served
+/// connection gives its slot back when it sends no request for `idle_timeout`.
 #[derive(Clone)]
 struct ConnectionLimiter {
     active: Arc<tokio::sync::Semaphore>,
     waiting: Arc<tokio::sync::Semaphore>,
     capacity: usize,
     wait: Duration,
+    idle_timeout: Duration,
 }
 
 impl ConnectionLimiter {
-    fn new(capacity: usize, waiting: usize, wait: Duration) -> Self {
+    fn new(capacity: usize, waiting: usize, wait: Duration, idle_timeout: Duration) -> Self {
         Self {
             active: Arc::new(tokio::sync::Semaphore::new(capacity)),
             waiting: Arc::new(tokio::sync::Semaphore::new(waiting)),
             capacity,
             wait,
+            idle_timeout,
         }
     }
 }
@@ -2769,7 +2779,12 @@ async fn serve_daemon_connections(
 
         let state = state.clone();
         if let Ok(slot) = limiter.active.clone().try_acquire_owned() {
-            tokio::spawn(serve_daemon_connection(stream, state, slot));
+            tokio::spawn(serve_daemon_connection(
+                stream,
+                state,
+                slot,
+                limiter.idle_timeout,
+            ));
         } else if let Ok(waiting) = limiter.waiting.clone().try_acquire_owned() {
             let limiter = limiter.clone();
             tokio::spawn(async move {
@@ -2779,7 +2794,7 @@ async fn serve_daemon_connections(
                 match slot {
                     Ok(Ok(slot)) => {
                         drop(waiting);
-                        serve_daemon_connection(stream, state, slot).await;
+                        serve_daemon_connection(stream, state, slot, limiter.idle_timeout).await;
                     }
                     _ => {
                         refuse_daemon_connection(stream, state, limiter.capacity).await;
@@ -2799,6 +2814,7 @@ async fn serve_daemon_connection(
     stream: crate::ipc::PendingIpcStream,
     state: DaemonState,
     _slot: tokio::sync::OwnedSemaphorePermit,
+    idle_timeout: Duration,
 ) {
     // The socket exposes cross-workspace search/index/delete; only serve
     // authenticated connections from the daemon's own user.
@@ -2806,7 +2822,7 @@ async fn serve_daemon_connection(
         warn!("rejected daemon connection that failed authentication");
         return;
     };
-    if let Err(err) = handle_connection(stream, state).await {
+    if let Err(err) = handle_connection(stream, state, idle_timeout).await {
         error!("daemon connection error: {err:#}");
     }
 }
@@ -3087,10 +3103,22 @@ fn stop_all_watchers(state: &DaemonState) {
     }
 }
 
-async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) -> Result<()> {
+async fn handle_connection(
+    stream: crate::ipc::IpcStream,
+    state: DaemonState,
+    idle_timeout: Duration,
+) -> Result<()> {
     let mut reader = BufReader::new(stream);
     loop {
-        let (response, keep_alive) = match read_daemon_request(&mut reader).await {
+        // Bound the whole request line, so trickled bytes do not extend it.
+        // The handler below runs without this bound.
+        let Ok(request) =
+            tokio::time::timeout(idle_timeout, read_daemon_request(&mut reader)).await
+        else {
+            tracing::debug!("closing daemon connection that sent no request in time");
+            return Ok(());
+        };
+        let (response, keep_alive) = match request {
             Ok(Some(envelope)) => {
                 match handle_client_request(state.clone(), envelope, &mut reader).await {
                     ClientRequestOutcome::Respond(response) => (response, true),
@@ -8126,7 +8154,12 @@ mod tests {
         let server = tokio::spawn(serve_daemon_connections(
             listener,
             test_state(),
-            ConnectionLimiter::new(2, 1, Duration::from_millis(200)),
+            ConnectionLimiter::new(
+                2,
+                1,
+                Duration::from_millis(200),
+                DAEMON_IDLE_REQUEST_TIMEOUT,
+            ),
         ));
 
         // Clients that got an answer and stay connected hold both slots.
@@ -8170,6 +8203,64 @@ mod tests {
 
         // Closing a client frees a slot for the next request.
         open_clients.truncate(1);
+        let served =
+            request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Status, false, None)
+                .await
+                .unwrap();
+        assert!(
+            matches!(served, Some(DaemonResponse::Status { .. })),
+            "{served:?}"
+        );
+
+        server.abort();
+        crate::ipc::cleanup_socket();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_closes_connections_that_send_no_request_in_time() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let (listener, _) = crate::ipc::bind().await.unwrap();
+        let server = tokio::spawn(serve_daemon_connections(
+            listener,
+            test_state(),
+            ConnectionLimiter::new(2, 1, Duration::from_millis(200), Duration::from_millis(300)),
+        ));
+
+        // One client sends nothing. The other sends a byte every 50 ms without
+        // ending the line, so a timer that restarted on each read never fires.
+        let mut silent = crate::ipc::connect().await.unwrap();
+        let (mut trickling_read, mut trickling_write) =
+            tokio::io::split(crate::ipc::connect().await.unwrap());
+        let trickle = tokio::spawn(async move {
+            for _ in 0..200 {
+                if trickling_write.write_all(b"x").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let mut buffer = [0u8; 64];
+        let silent_read = tokio::time::timeout(Duration::from_secs(5), silent.read(&mut buffer))
+            .await
+            .expect("a connection that sends no request must be closed");
+        assert!(matches!(silent_read, Ok(0)), "{silent_read:?}");
+        // Closing with unread trickled bytes may reset instead of a clean EOF.
+        let trickling_read =
+            tokio::time::timeout(Duration::from_secs(5), trickling_read.read(&mut buffer))
+                .await
+                .expect("a connection that never ends its request line must be closed");
+        assert!(
+            matches!(trickling_read, Ok(0) | Err(_)),
+            "{trickling_read:?}"
+        );
+        trickle.abort();
+
+        // Both slots are free again, so the next request is served, not refused.
         let served =
             request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Status, false, None)
                 .await

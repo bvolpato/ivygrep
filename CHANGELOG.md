@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- The daemon closes a connection that sends no complete request line within 10 seconds. Connections that never sent a request, or sent bytes without a newline, held their slot until the client closed them, so 512 of them locked other clients out with busy errors. Running requests, such as long searches and indexing, have no such bound.
+
 ### Documentation
 
 - The public code-retrieval report and benchmark dashboard now show the v1.2.16 release matrix, which covers lexical, hash, hybrid, blended, and neural modes, instead of the v1.1.9 blended and neural matrix.

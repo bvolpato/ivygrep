@@ -632,6 +632,10 @@ CLI, TUI, and MCP searches fall back to local search on that error; index,
 status, and `--web` requests report it. A `Version` probe still gets the real
 version, because clients restart a daemon whose probe fails.
 Beyond 64 waiting connections, new connections are closed without a reply.
+A served connection that sends no complete request line within 10 s is closed
+without a reply, so connections that never send a request cannot hold slots.
+The bound covers only the wait for a request, not running requests such as
+long searches or indexing.
 
 ### MCP
 
