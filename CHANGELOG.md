@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- The public code-retrieval report and benchmark dashboard now show the v1.2.16 release matrix, which covers lexical, hash, hybrid, blended, and neural modes, instead of the v1.1.9 blended and neural matrix.
+
 ### Testing
 
 - Public benchmark dataset exports retry Hugging Face HTTP 429 and 5xx responses up to four times, waiting 30, 60, 120, and 240 seconds. The routing-matrix relevance check had failed twice with `429 Too Many Requests` (`maximum queue size reached`) before a delayed rerun passed. Other errors still fail immediately.

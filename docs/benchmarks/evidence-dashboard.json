@@ -312,28 +312,28 @@
     },
     {
       "id": "public-retrieval-current",
-      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/83e32213c58ae16a9b7cadecad0138910225ce70/docs/benchmarks/public-code-retrieval-results.json",
+      "immutable_url": null,
       "kind": "quality",
-      "label": "Historical public retrieval matrix (v1.1.9)",
+      "label": "Public retrieval matrix (v1.2.16)",
       "path": "docs/benchmarks/public-code-retrieval-results.json",
-      "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70",
-      "publication_status": "pinned",
-      "sha256": "f8c1907ec42bc57c91364206f56d75487d583433ee184a84cbe44fabdb131561",
-      "source_commit": "82686c6ff6e6030a08365ac30a3a51a541cab9a7",
+      "publication_commit": null,
+      "publication_status": "not pinned to an immutable revision",
+      "sha256": "0289e10f35367664f73912f4a3f090fbe58c90a93a2be0e7fd5b72bd80a25079",
+      "source_commit": "8db282cdb1ebe1d1fe0a7005a5d379657ecab5ad",
       "summary": {
         "binary_sha256": [
-          "0aae1ce9283e371584d404030eeb22a3cf0b581182d68239bd1b81d48e62cc92"
+          "9aec00ad619f3ca190d82782843f927cae93ea960d6458ceb1fac5888a78ee7f"
         ],
         "binary_versions": [
-          "ivygrep 1.1.9"
+          "ivygrep 1.2.16"
         ],
-        "index_size_bytes": 95572164.66666667,
+        "index_size_bytes": 111198753.33333333,
         "mode": "blended",
         "models": [
           {
             "architecture": "static-embedding",
             "dimensions": 256,
-            "document_character_limit": 1024,
+            "document_character_limit": 16384,
             "license": "Apache-2.0",
             "max_input_tokens": 0,
             "model_asset_bytes": 125729604,
@@ -345,113 +345,245 @@
             "pooling": "token-mean",
             "profile": "static-retrieval-v1",
             "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
-            "schema_version": 1,
+            "schema_version": 2,
             "vector_quantization": "f16"
           }
         ],
         "modes": {
           "blended": {
             "index_ms": {
-              "coefficient_of_variation": 0.0033374420993049297,
-              "maximum": 1259.3785009812564,
-              "mean": 1256.083416364466,
-              "minimum": 1250.1676849788055,
-              "standard_deviation": 4.192105674013532
+              "coefficient_of_variation": 0.0025685628528637223,
+              "maximum": 6895.278914999835,
+              "mean": 6875.055752666641,
+              "minimum": 6852.254455999855,
+              "standard_deviation": 17.65901281766657
             },
             "index_size_bytes": {
-              "coefficient_of_variation": 1.5975739611353162e-05,
-              "maximum": 95573910.0,
-              "mean": 95572164.66666667,
-              "minimum": 95570191.0,
-              "standard_deviation": 1526.8360168080337
+              "coefficient_of_variation": 3.0357489345386302e-05,
+              "maximum": 111203372.0,
+              "mean": 111198753.33333333,
+              "minimum": 111195398.0,
+              "standard_deviation": 3375.714969536906
             },
             "mrr_at_10": {
-              "coefficient_of_variation": 0.0019360519590931454,
-              "maximum": 0.21696904761904762,
-              "mean": 0.21665515873015873,
-              "minimum": 0.21606230158730158,
-              "standard_deviation": 0.0004194556445071602
+              "coefficient_of_variation": 0.0017635693839406915,
+              "maximum": 0.2729611111111111,
+              "mean": 0.272371164021164,
+              "minimum": 0.27178452380952384,
+              "standard_deviation": 0.00048034544593601324
             },
             "ndcg_at_10": {
-              "coefficient_of_variation": 0.001570698117453595,
-              "maximum": 0.2630349161851741,
-              "mean": 0.26252098487045034,
-              "minimum": 0.2620253900628806,
-              "standard_deviation": 0.00041234121672808
+              "coefficient_of_variation": 0.001691178017437795,
+              "maximum": 0.32570570371522883,
+              "mean": 0.32496686679664527,
+              "minimum": 0.3243885415879771,
+              "standard_deviation": 0.0005495768215221225
             },
             "peak_child_rss_bytes": {
-              "coefficient_of_variation": 0.0008570488949339965,
-              "maximum": 391946240.0,
-              "mean": 391472469.3333333,
-              "minimum": 391213056.0,
-              "standard_deviation": 335511.04723921616
+              "coefficient_of_variation": 0.00793342083109479,
+              "maximum": 412270592.0,
+              "mean": 407713109.3333333,
+              "minimum": 405094400.0,
+              "standard_deviation": 3234559.674695494
             },
             "warm_latency_p95_ms": {
-              "coefficient_of_variation": 0.007414643786549474,
-              "maximum": 241.02030508220196,
-              "mean": 238.82219571775445,
-              "minimum": 236.68403702322394,
-              "standard_deviation": 1.7707815095687505
+              "coefficient_of_variation": 0.013296753497636968,
+              "maximum": 210.0014199997986,
+              "mean": 206.47215266664412,
+              "minimum": 203.30605100025423,
+              "standard_deviation": 2.745409318134834
+            }
+          },
+          "hash": {
+            "index_ms": {
+              "coefficient_of_variation": 0.0057854315691943,
+              "maximum": 6884.309183999449,
+              "mean": 6854.937323666415,
+              "minimum": 6798.872684999651,
+              "standard_deviation": 39.65877079718796
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.00012719634582514965,
+              "maximum": 73129178.0,
+              "mean": 73116935.66666667,
+              "minimum": 73106651.0,
+              "standard_deviation": 9300.207034732553
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.0012245681140484615,
+              "maximum": 0.27420634920634923,
+              "mean": 0.2737771164021164,
+              "minimum": 0.2733880952380952,
+              "standard_deviation": 0.0003352587271021658
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.000490792757158633,
+              "maximum": 0.32670795097687994,
+              "mean": 0.32653709611836185,
+              "minimum": 0.32632270223604526,
+              "standard_deviation": 0.00016026204171850437
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.004228506634182788,
+              "maximum": 353026048.0,
+              "mean": 350927530.6666667,
+              "minimum": 349868032.0,
+              "standard_deviation": 1483899.3915413837
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.0053734097005355115,
+              "maximum": 213.8466710002831,
+              "mean": 212.74866366691944,
+              "minimum": 211.1719950000861,
+              "standard_deviation": 1.1431857331237918
+            }
+          },
+          "hybrid": {
+            "index_ms": {
+              "coefficient_of_variation": 0.002566901762244201,
+              "maximum": 6890.36779800017,
+              "mean": 6877.7160880000565,
+              "minimum": 6852.749724000319,
+              "standard_deviation": 17.654421546502636
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 5.172744621230343e-05,
+              "maximum": 73116584.0,
+              "mean": 73111373.66666667,
+              "minimum": 73107723.0,
+              "standard_deviation": 3781.8646488501176
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.0015875891509789532,
+              "maximum": 0.27494801587301587,
+              "mean": 0.27435396825396824,
+              "minimum": 0.27391587301587306,
+              "standard_deviation": 0.0004355613835280241
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.001390671977041112,
+              "maximum": 0.3275360524854329,
+              "mean": 0.32690652768945677,
+              "minimum": 0.3264786610465741,
+              "standard_deviation": 0.0004546197471695419
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.0024031716714936866,
+              "maximum": 351571968.0,
+              "mean": 350381397.3333333,
+              "minimum": 349765632.0,
+              "standard_deviation": 842026.6482898402
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.004020591251544304,
+              "maximum": 205.94094399984897,
+              "mean": 204.80681033329043,
+              "minimum": 204.01084000013725,
+              "standard_deviation": 0.823444469882721
+            }
+          },
+          "lexical": {
+            "index_ms": {
+              "coefficient_of_variation": 0.0042615017370980154,
+              "maximum": 6896.135819000051,
+              "mean": 6855.758555666664,
+              "minimum": 6827.980175999983,
+              "standard_deviation": 29.21582699409807
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.00021345808607980748,
+              "maximum": 38690489.0,
+              "mean": 38683575.0,
+              "minimum": 38671968.0,
+              "standard_deviation": 8257.321882224689
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.0,
+              "maximum": 0.27128452380952384,
+              "mean": 0.27128452380952384,
+              "minimum": 0.27128452380952384,
+              "standard_deviation": 0.0
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.0,
+              "maximum": 0.32454761869862203,
+              "mean": 0.32454761869862203,
+              "minimum": 0.32454761869862203,
+              "standard_deviation": 0.0
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.0002599188805629865,
+              "maximum": 343515136.0,
+              "mean": 343414101.3333333,
+              "minimum": 343298048.0,
+              "standard_deviation": 89259.808788104
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.029051846461752545,
+              "maximum": 353.97589099966353,
+              "mean": 345.0788106664883,
+              "minimum": 331.07057799998074,
+              "standard_deviation": 10.025176624686996
             }
           },
           "neural": {
             "index_ms": {
-              "coefficient_of_variation": 0.005589798375084819,
-              "maximum": 1275.3230698872358,
-              "mean": 1265.6373186424996,
-              "minimum": 1258.622845984064,
-              "standard_deviation": 7.074657427194552
+              "coefficient_of_variation": 0.004561527463630696,
+              "maximum": 6915.1678249997985,
+              "mean": 6876.168264333349,
+              "minimum": 6838.36551499985,
+              "standard_deviation": 31.365830382302384
             },
             "index_size_bytes": {
-              "coefficient_of_variation": 3.515282715040392e-05,
-              "maximum": 95573216.0,
-              "mean": 95568553.0,
-              "minimum": 95565433.0,
-              "standard_deviation": 3359.5048246232163
+              "coefficient_of_variation": 7.004081536185171e-05,
+              "maximum": 111219811.0,
+              "mean": 111212373.0,
+              "minimum": 111201617.0,
+              "standard_deviation": 7789.405283246383
             },
             "mrr_at_10": {
-              "coefficient_of_variation": 0.0026918976647730634,
-              "maximum": 0.21856190476190476,
-              "mean": 0.2178133597883598,
-              "minimum": 0.21713015873015873,
-              "standard_deviation": 0.0005863312745706609
+              "coefficient_of_variation": 0.002845267445241729,
+              "maximum": 0.2760865079365079,
+              "mean": 0.2752436507936508,
+              "minimum": 0.2742,
+              "standard_deviation": 0.0007831417991126574
             },
             "ndcg_at_10": {
-              "coefficient_of_variation": 0.002943829066104276,
-              "maximum": 0.26404984218529093,
-              "mean": 0.26330215029852816,
-              "minimum": 0.2622340954033917,
-              "standard_deviation": 0.0007751165232165639
+              "coefficient_of_variation": 0.0021220371753642407,
+              "maximum": 0.32728380525273676,
+              "mean": 0.3265700198302719,
+              "minimum": 0.3256315403009135,
+              "standard_deviation": 0.0006929937224392742
             },
             "peak_child_rss_bytes": {
-              "coefficient_of_variation": 0.0019182390209433612,
-              "maximum": 384577536.0,
-              "mean": 383776085.3333333,
-              "minimum": 382799872.0,
-              "standard_deviation": 736174.2621912891
+              "coefficient_of_variation": 0.003819094457283783,
+              "maximum": 406097920.0,
+              "mean": 404987904.0,
+              "minimum": 402800640.0,
+              "standard_deviation": 1546687.0594333769
             },
             "warm_latency_p95_ms": {
-              "coefficient_of_variation": 0.01223464842752878,
-              "maximum": 245.28121098410338,
-              "mean": 242.3520946952825,
-              "minimum": 238.28890803270042,
-              "standard_deviation": 2.965092674271944
+              "coefficient_of_variation": 0.03287659563596415,
+              "maximum": 220.5676050002694,
+              "mean": 212.41177900007338,
+              "minimum": 203.5106729999825,
+              "standard_deviation": 6.983376166501194
             }
           }
         },
-        "mrr_at_10": 0.21665515873015873,
-        "ndcg_at_10": 0.26252098487045034,
-        "peak_child_rss_bytes": 391472469.3333333,
+        "mrr_at_10": 0.272371164021164,
+        "ndcg_at_10": 0.32496686679664527,
+        "peak_child_rss_bytes": 407713109.3333333,
         "profile": "public-core",
         "queries": 1000,
         "repetitions": 3,
         "runtime": {
           "cpu_model": "x86_64",
-          "logical_cpus": 32,
+          "logical_cpus": 4,
           "machine": "x86_64",
-          "physical_memory_bytes": 134966132736,
-          "python": "3.13.12",
-          "release": "6.17.0-22-generic",
+          "physical_memory_bytes": 16766414848,
+          "python": "3.12.3",
+          "release": "6.17.0-1022-azure",
           "system": "Linux"
         },
         "tasks": [
@@ -460,7 +592,7 @@
           "cosqa",
           "codefeedback-st"
         ],
-        "warm_latency_p95_ms": 238.82219571775445
+        "warm_latency_p95_ms": 206.47215266664412
       }
     },
     {
@@ -1251,9 +1383,9 @@
         ]
       },
       "public-retrieval-current": {
-        "status": "historical",
+        "status": "current",
         "versions": [
-          "1.1.9"
+          "1.2.16"
         ]
       }
     },

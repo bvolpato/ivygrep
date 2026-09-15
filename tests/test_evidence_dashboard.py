@@ -452,11 +452,12 @@ class EvidenceDashboardTest(unittest.TestCase):
             if item["id"] == "release-workflow"
         )
         self.assertEqual(current["summary"]["mode"], "blended")
-        self.assertIn("Historical", current["label"])
-        self.assertEqual(
-            dashboard["freshness"]["evidence"]["public-retrieval-current"]["status"],
-            "historical",
-        )
+        # The label names the release the matrix measured, so it can't go stale.
+        retrieval_versions = dashboard["freshness"]["evidence"][
+            "public-retrieval-current"
+        ]["versions"]
+        self.assertEqual(len(retrieval_versions), 1)
+        self.assertIn(f"(v{retrieval_versions[0]})", current["label"])
         self.assertEqual(release["summary"]["release_archives"], 7)
         current_scale = next(
             item
