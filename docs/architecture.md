@@ -331,22 +331,36 @@ body field, and an explicit `signature:` clause keeps its boost. The dotted
 but mixed-case identifiers inside it, such as `sendFile`, can still become
 exact-symbol candidates.
 
-A line reads as code when it ends in `;`, `{` or `}`, starts with `}`, is
-indented and not a list item, ends in `:` after a code-shaped token, or has at
-least as many code-shaped tokens as words. Code-shaped tokens are operators and
-identifier shapes such as `=`, `snake_case`, `camelCase`, `owner.member`,
-`a::b`, and `call(arg)`; numbers, bullets, and dashes count as neither. A
-multi-line query is pasted source when the tokens of its code lines plus the
-code-shaped tokens of its other lines at least match the words of those other
-lines. Multi-line pasted error output, described below, keeps the
-pasted-source rules.
+A line reads as code when it ends in `;`, `{` or `}`, starts with `}`, is an
+import statement (`import …`, `from … import …`, or `require`, `use` or
+`package` with one argument), ends in `:` after a code-shaped token, has at
+least as many code-shaped tokens as words, or is indented. An indented list
+item is not code, and neither is a continuation: an indented line of words with
+no code-shaped tokens that does not end in `:` and follows a prose line that
+does not end in `:`, such as a wrapped list item or an indented paragraph.
+Code-shaped tokens are operators and identifier shapes such as `=`,
+`snake_case`, `camelCase`, `owner.member`, `a::b`, and `call(arg)`. Numbers,
+versions, sizes, and issue references such as `1.84.0`, `v1.2.16`, `2.3GB`,
+`12k`, and `#375` count as neither, and so do bullets, dashes, table pipes, and
+Markdown rules and heading marks. Unicode punctuation around a word, such as
+`？`, `。`, curly quotes, and `…`, is trimmed like ASCII punctuation, and `e.g.`
+and `and/or` count as words. A multi-line query is pasted source when the
+tokens of its code lines plus the code-shaped tokens of its other lines at least
+match the words of those other lines. Multi-line pasted error output, described
+below, keeps the pasted-source rules.
 
 Multi-paragraph prompts, pasted issue text, and questions with a blank line are
-prose. Their `owner.member` mentions become exact-symbol lookups, and their
-lexical matches include the signature field, but without the 5x boost one-line
-queries get: a boosted bonus for every term of a long prompt would lift short
-definitions that share a word above documents that explain the task. An explicit
-`signature:` clause keeps 5x in any query, including explicit Boolean queries.
+prose. Their lexical matches include the signature field, but without the 5x
+boost one-line queries get: a boosted bonus for every term of a long prompt
+would lift short definitions that share a word above documents that explain the
+task. Their `owner.member` mentions become exact-symbol lookups only on prose
+lines, and only when written as code: a call such as `res.send(body)`, a
+backtick span, or a camelCase member such as `res.sendFile`. File names, hosts,
+and missing spaces such as `go.sum`, `go.dev`, or `it.The` look up nothing.
+One-line queries keep their existing `owner.member` lookups. An explicit
+`signature:` term clause keeps 5x in any query, including explicit Boolean
+queries. Tantivy applies field boosts to term clauses only, so range and set
+clauses on the field score the same unboosted value on every query shape.
 
 `src/search_error_text.rs` recognizes pasted error output by line-leading error
 labels (`Error:`, `Caused by:`, `ValueError:`, `java.lang.IllegalStateException:`,

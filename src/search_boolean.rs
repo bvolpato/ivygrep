@@ -111,8 +111,8 @@ fn backtick_runs(query: &str) -> HashMap<usize, VecDeque<usize>> {
 
 /// Pasted source, with or without Boolean operators, leaves `signature` out of
 /// the default fields, and multi-line prose scores it like body text (see
-/// `SignatureScoring`). An explicit `signature:` clause scores 5x on any query
-/// shape: the field boost covers one-line queries and pasted source, and
+/// `SignatureScoring`). An explicit `signature:` term clause scores 5x on any
+/// query shape: the field boost covers one-line queries and pasted source, and
 /// `parse_lexical_query` and `boolean_candidates` boost the clause for prose.
 pub(super) fn lexical_query_parser(
     ctx: &SearchContext,
@@ -157,8 +157,10 @@ pub(super) fn parse_lexical_query(
     parser.build_query_from_user_input_ast(ast)
 }
 
-/// Wraps explicit `signature:` clauses in a boost that restores 5x when the
-/// parser scores default signature matches at 1x.
+/// Wraps explicit `signature:` term clauses in a boost that restores 5x when the
+/// parser scores default signature matches at 1x. Tantivy applies field boosts
+/// to term clauses only, so range, set, regex, and exists clauses keep the same
+/// unboosted score on every query shape.
 fn boost_explicit_signature_clauses(ast: &mut UserInputAst) {
     match ast {
         UserInputAst::Clause(clauses) => {
@@ -168,15 +170,11 @@ fn boost_explicit_signature_clauses(ast: &mut UserInputAst) {
         }
         UserInputAst::Boost(child, _) => boost_explicit_signature_clauses(child),
         UserInputAst::Leaf(leaf) => {
-            let field = match leaf.as_ref() {
-                UserInputLeaf::Literal(literal) => literal.field_name.as_deref(),
-                UserInputLeaf::Range { field, .. }
-                | UserInputLeaf::Set { field, .. }
-                | UserInputLeaf::Regex { field, .. } => field.as_deref(),
-                UserInputLeaf::Exists { field } => Some(field.as_str()),
-                UserInputLeaf::All => None,
-            };
-            if field == Some("signature") {
+            let explicit_signature_term = matches!(
+                leaf.as_ref(),
+                UserInputLeaf::Literal(literal) if literal.field_name.as_deref() == Some("signature")
+            );
+            if explicit_signature_term {
                 let clause = std::mem::replace(ast, UserInputAst::Clause(Vec::new()));
                 let restored = SignatureScoring::BOOST / SignatureScoring::Plain.default_boost();
                 *ast = UserInputAst::Boost(Box::new(clause), f64::from(restored).into());
