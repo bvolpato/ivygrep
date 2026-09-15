@@ -11494,7 +11494,10 @@ mod tests {
         std::fs::write(&source, "pub fn recovered_watch_marker() {}\n").unwrap();
         control.mark_paths_dirty([PathBuf::from("lib.rs")]);
 
-        for _ in 0..60 {
+        // The failing update reindexes before it enters retry. On a loaded
+        // Windows runner it was still indexing after 3 s, so allow 30 s; the
+        // loop exits as soon as the retry starts.
+        for _ in 0..600 {
             if control.retrying.load(Ordering::Relaxed) {
                 break;
             }
