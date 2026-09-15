@@ -10,6 +10,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Documentation
 
+- The README and the `ig_search` MCP tool schema say that uppercase `AND`, `OR`, and `NOT` between words are Boolean operators, and that lowercase words, backticks, or quotes search them as text. Neither mentioned it, so a bug report pasted as a query, such as "the watcher does NOT reload settings", silently excluded every result containing "reload settings".
 - The public code-retrieval report and benchmark dashboard now show the v1.2.16 release matrix, which covers lexical, hash, hybrid, blended, and neural modes, instead of the v1.1.9 blended and neural matrix.
 
 ### Testing
