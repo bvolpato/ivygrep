@@ -746,9 +746,11 @@ variables tune runtime defaults. "Set" means present with any value, including
 Installers also read `IVYGREP_INSTALL_DIR`, `IVYGREP_VERSION`, `IVYGREP_BASE_URL`
 (download base URL instead of the tagged GitHub release), and
 `IVYGREP_INSTALL_ARCHIVE` with `IVYGREP_INSTALL_CHECKSUM` (install a local
-archive and its checksum file instead of downloading). `install.sh` defaults the
-checksum to the archive path plus `.sha256`, and additionally reads
-`IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
+archive and its checksum file instead of downloading). Set `IVYGREP_VERSION` to
+the archive's release tag with a local archive: when it is unset, both installers
+first look up the latest release on GitHub, so an offline install fails.
+`install.sh` defaults the checksum to the archive path plus `.sha256`, and
+additionally reads `IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
 
 ## Module ownership
 
