@@ -368,6 +368,33 @@ class PublicBenchmarkTest(unittest.TestCase):
                     current_head_runner.validate_report(report, root=root))
             )
 
+    def test_pinned_dataset_load_retries_throttled_hub_requests(self):
+        class HubError(Exception):
+            def __init__(self, status):
+                super().__init__(f"HTTP {status}")
+                self.response = mock.Mock(status_code=status)
+
+        loader = mock.Mock(side_effect=[HubError(429), HubError(503), "dataset"])
+        sleep = mock.Mock()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(
+                exporter.load_pinned_dataset("repo", "rev", loader=loader, sleep=sleep),
+                "dataset",
+            )
+        self.assertEqual(loader.call_count, 3)
+        loader.assert_called_with("repo", revision="rev")
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [30, 60])
+
+        missing = mock.Mock(side_effect=HubError(404))
+        with self.assertRaises(HubError):
+            exporter.load_pinned_dataset("repo", "rev", loader=missing, sleep=sleep)
+        self.assertEqual(missing.call_count, 1)
+
+        throttled = mock.Mock(side_effect=HubError(429))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(HubError):
+            exporter.load_pinned_dataset("repo", "rev", loader=throttled, sleep=mock.Mock())
+        self.assertEqual(throttled.call_count, len(exporter.HUB_RETRY_DELAYS_SECONDS) + 1)
+
     def test_coreb_hard_negatives_are_not_exported_as_relevant(self):
         rows = [
             {"query_id": "q1", "doc_id": "positive", "relevance": 2},
