@@ -20,7 +20,7 @@
       "kind": "quality",
       "label": "Public retrieval matrix (v1.2.16)",
       "path": "docs/benchmarks/public-code-retrieval-results.json",
-      "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70"
+      "publication_commit": "733c9b25cd8bb978d5deed03f559a8a111f2e0c6"
     },
     {
       "id": "public-retrieval-challenge-current",
