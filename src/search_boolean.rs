@@ -109,13 +109,14 @@ fn backtick_runs(query: &str) -> HashMap<usize, VecDeque<usize>> {
     runs
 }
 
-/// Multi-line input, with or without Boolean operators, leaves `signature` out
-/// of the default fields (see `hybrid_search_with_context_and_neural_job`). The
-/// field keeps its boost, so an explicit `signature:` clause scores the same on
-/// any query shape.
+/// Pasted source, with or without Boolean operators, leaves `signature` out of
+/// the default fields, and multi-line prose scores it like body text (see
+/// `SignatureScoring`). An explicit `signature:` clause scores 5x on any query
+/// shape: the field boost covers one-line queries and pasted source, and
+/// `parse_lexical_query` and `boolean_candidates` boost the clause for prose.
 pub(super) fn lexical_query_parser(
     ctx: &SearchContext,
-    query_text: &str,
+    signature_scoring: SignatureScoring,
     conjunction: bool,
 ) -> QueryParser {
     let fields = &ctx.fields;
@@ -123,7 +124,7 @@ pub(super) fn lexical_query_parser(
     // not defaults, so they cannot hide unsupported phrase queries.
     let mut default_fields = vec![fields.text];
     default_fields.extend(fields.file_path_text);
-    if !is_multiline_query(query_text) {
+    if signature_scoring != SignatureScoring::Omitted {
         default_fields.extend(fields.signature);
     }
     let mut parser = QueryParser::for_index(&ctx.indexes[0], default_fields);
@@ -132,12 +133,56 @@ pub(super) fn lexical_query_parser(
         parser.set_field_boost(field, 5.0);
     }
     if let Some(field) = fields.signature {
-        parser.set_field_boost(field, 5.0);
+        parser.set_field_boost(field, signature_scoring.default_boost());
     }
     if conjunction {
         parser.set_conjunction_by_default();
     }
     parser
+}
+
+/// Parses text with a parser from `lexical_query_parser`. For multi-line prose,
+/// explicit `signature:` clauses get back the boost the field gives up.
+pub(super) fn parse_lexical_query(
+    parser: &QueryParser,
+    text: &str,
+    signature_scoring: SignatureScoring,
+) -> std::result::Result<Box<dyn Query>, tantivy::query::QueryParserError> {
+    if signature_scoring != SignatureScoring::Plain {
+        return parser.parse_query(text);
+    }
+    let mut ast = tantivy::query_grammar::parse_query(text)
+        .map_err(|_| tantivy::query::QueryParserError::SyntaxError(text.to_string()))?;
+    boost_explicit_signature_clauses(&mut ast);
+    parser.build_query_from_user_input_ast(ast)
+}
+
+/// Wraps explicit `signature:` clauses in a boost that restores 5x when the
+/// parser scores default signature matches at 1x.
+fn boost_explicit_signature_clauses(ast: &mut UserInputAst) {
+    match ast {
+        UserInputAst::Clause(clauses) => {
+            for (_, child) in clauses.iter_mut() {
+                boost_explicit_signature_clauses(child);
+            }
+        }
+        UserInputAst::Boost(child, _) => boost_explicit_signature_clauses(child),
+        UserInputAst::Leaf(leaf) => {
+            let field = match leaf.as_ref() {
+                UserInputLeaf::Literal(literal) => literal.field_name.as_deref(),
+                UserInputLeaf::Range { field, .. }
+                | UserInputLeaf::Set { field, .. }
+                | UserInputLeaf::Regex { field, .. } => field.as_deref(),
+                UserInputLeaf::Exists { field } => Some(field.as_str()),
+                UserInputLeaf::All => None,
+            };
+            if field == Some("signature") {
+                let clause = std::mem::replace(ast, UserInputAst::Clause(Vec::new()));
+                let restored = SignatureScoring::BOOST / SignatureScoring::Plain.default_boost();
+                *ast = UserInputAst::Boost(Box::new(clause), f64::from(restored).into());
+            }
+        }
+    }
 }
 
 fn anchor_negative_clauses(ast: &mut UserInputAst) {
@@ -180,6 +225,7 @@ fn boolean_query_error(text: &str) -> String {
 pub(super) fn boolean_candidates(
     ctx: &SearchContext,
     text: &str,
+    signature_scoring: SignatureScoring,
     options: &SearchOptions,
     paths: &PathGlobMatcher,
     glob_filter: &GlobPathQueryFilter,
@@ -188,10 +234,17 @@ pub(super) fn boolean_candidates(
     if !has_explicit_boolean_operators(text) {
         return Ok(None);
     }
-    let parser = lexical_query_parser(ctx, text, should_use_conjunctive_numeric_query(text));
+    let parser = lexical_query_parser(
+        ctx,
+        signature_scoring,
+        should_use_conjunctive_numeric_query(text),
+    );
     let mut ast = tantivy::query_grammar::parse_query(text)
         .map_err(|_| anyhow::anyhow!(boolean_query_error(text)))?;
     anchor_negative_clauses(&mut ast);
+    if signature_scoring == SignatureScoring::Plain {
+        boost_explicit_signature_clauses(&mut ast);
+    }
     let query = parser
         .build_query_from_user_input_ast(ast)
         .with_context(|| boolean_query_error(text))?;

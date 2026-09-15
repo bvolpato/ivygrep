@@ -43,6 +43,15 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let retrieval_text = pasted_error
         .as_ref()
         .map_or(query_text, |error| error.retrieval_text.as_str());
+    // Multi-line pasted source ranks by body evidence (see
+    // `is_pasted_source_query`), and multi-line error output keeps that handling
+    // after its runtime values are dropped.
+    let pasted_source = if pasted_error.is_some() {
+        retrieval_text.contains('\n')
+    } else {
+        is_pasted_source_query(retrieval_text)
+    };
+    let signature_scoring = SignatureScoring::for_query(retrieval_text, pasted_source);
 
     let t0 = std::time::Instant::now();
     let bounded_limit = options.bounded_limit();
@@ -95,6 +104,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let (boolean_docs, boolean_keys) = match boolean_candidates(
         ctx,
         query_text,
+        signature_scoring,
         options,
         &path_matcher,
         &glob_path_filter,
@@ -178,13 +188,14 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // A raw STRING path match can mask phrase errors in analyzed fields.
     // Keep it available through explicit file_path: queries, not defaults.
     let conjunctive_numeric_query = should_use_conjunctive_numeric_query(trimmed);
-    // Multi-line input such as pasted source carries many incidental
-    // identifiers. Scored as a separate boosted field, each one adds a
-    // near-maximal bonus to every one-line definition signature that shares it,
-    // burying the snippet's body evidence. Signature text remains searchable
-    // through the body field. Explicit Boolean queries follow the same rule, and
-    // explicit `signature:` clauses keep their boost.
-    let lexical_fields = if is_multiline_query(trimmed) {
+    // Pasted source carries many incidental identifiers. Scored as a separate
+    // boosted field, each one adds a near-maximal bonus to every one-line
+    // definition signature that shares it, burying the snippet's body evidence,
+    // so its field view leaves `signature` out. Signature text remains searchable
+    // through the body field. Multi-line prose keeps the field without the boost.
+    // Explicit Boolean queries follow the same rules, and explicit `signature:`
+    // clauses keep their boost.
+    let lexical_fields = if signature_scoring == SignatureScoring::Omitted {
         TantivyFields {
             signature: None,
             ..ctx.fields.clone()
@@ -192,7 +203,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     } else {
         ctx.fields.clone()
     };
-    let parser = lexical_query_parser(ctx, trimmed, conjunctive_numeric_query);
+    let parser = lexical_query_parser(ctx, signature_scoring, conjunctive_numeric_query);
 
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();
@@ -239,6 +250,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             CandidateEligibility::new(ctx, 1, options, &path_matcher, boolean_keys.as_ref()),
         ],
         cancel_token: options.cancel_token.as_ref(),
+        signature_scoring,
     };
     let collect_docs = |(lexical_query, query_candidate_limit): (&String, usize)| {
         executor.collect_docs(lexical_query, query_candidate_limit)
@@ -319,7 +331,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         }
         Ok(chunks)
     };
-    let exact_symbol_names = exact_symbol_query_names(trimmed);
+    let exact_symbol_names = exact_symbol_query_names(trimmed, pasted_source);
     let exact_symbol_chunks =
         symbol_candidates(&exact_symbol_names, symbol_candidate_limit, &HashSet::new())?;
     let exact_symbol_ids = exact_symbol_chunks
@@ -720,6 +732,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
 
     let mut fusion_query = FusionQuery::new(trimmed);
     fusion_query.pasted_error = pasted_error.is_some();
+    fusion_query.pasted_source = pasted_source;
     let merged = fuse_rrf_with_context(
         Some(ctx),
         FusionCandidates {
@@ -731,7 +744,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             symbols: symbol_chunks,
         },
         Some(direct_ids),
-        hash_direct_weight(trimmed, neural_available),
+        hash_direct_weight(trimmed, pasted_source, neural_available),
         &fusion_query,
         routing,
         bounded_limit,
@@ -804,14 +817,18 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
 }
 
 /// Fusion weight for a hash-vector match on a candidate that direct search
-/// already found. Hash vectors bag the query's tokens, so for a one-line prose
-/// query they repeat common words that BM25 already weighs by rarity. Pasted
+/// already found. Hash vectors bag the query's tokens, so for prose, one line or
+/// several, they repeat common words that BM25 already weighs by rarity. Pasted
 /// source bags many specific identifier segments, where hash overlap still
-/// separates the matching snippet, so multi-line queries keep their vote.
-pub(super) fn hash_direct_weight(query_text: &str, neural_available: bool) -> f32 {
+/// separates the matching snippet, so pasted source keeps its vote.
+pub(super) fn hash_direct_weight(
+    query_text: &str,
+    pasted_source: bool,
+    neural_available: bool,
+) -> f32 {
     if query_targets_secondary_sources(query_text) {
         1.0
-    } else if !is_multiline_query(query_text) {
+    } else if !pasted_source {
         0.0
     } else if neural_available {
         1.0

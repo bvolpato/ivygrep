@@ -322,14 +322,31 @@ Unsupported structured queries, including phrases requiring unindexed positions,
 fail explicitly. Quoted or escaped operator words and ordinary natural-language
 input keep their existing expansion behavior.
 
-Multi-line queries, usually pasted source, a stack trace, or a multi-paragraph
-prompt, score lexical matches without the boosted signature field. Each pasted
-identifier would otherwise add a near-maximal bonus to every one-line definition
-signature containing it and bury the snippet's body evidence. Signature text
-stays searchable through the body field, and an explicit `signature:` clause
-keeps its boost. The dotted `owner.member` heuristic does not create
-exact-symbol lookups for multi-line queries, but mixed-case identifiers inside
-them, such as `sendFile`, can still become exact-symbol candidates.
+Multi-line queries that read as pasted source score lexical matches without the
+boosted signature field. Each pasted identifier would otherwise add a
+near-maximal bonus to every one-line definition signature containing it and
+bury the snippet's body evidence. Signature text stays searchable through the
+body field, and an explicit `signature:` clause keeps its boost. The dotted
+`owner.member` heuristic does not create exact-symbol lookups for pasted source,
+but mixed-case identifiers inside it, such as `sendFile`, can still become
+exact-symbol candidates.
+
+A line reads as code when it ends in `;`, `{` or `}`, starts with `}`, is
+indented and not a list item, ends in `:` after a code-shaped token, or has at
+least as many code-shaped tokens as words. Code-shaped tokens are operators and
+identifier shapes such as `=`, `snake_case`, `camelCase`, `owner.member`,
+`a::b`, and `call(arg)`; numbers, bullets, and dashes count as neither. A
+multi-line query is pasted source when the tokens of its code lines plus the
+code-shaped tokens of its other lines at least match the words of those other
+lines. Multi-line pasted error output, described below, keeps the
+pasted-source rules.
+
+Multi-paragraph prompts, pasted issue text, and questions with a blank line are
+prose. Their `owner.member` mentions become exact-symbol lookups, and their
+lexical matches include the signature field, but without the 5x boost one-line
+queries get: a boosted bonus for every term of a long prompt would lift short
+definitions that share a word above documents that explain the task. An explicit
+`signature:` clause keeps 5x in any query, including explicit Boolean queries.
 
 `src/search_error_text.rs` recognizes pasted error output by line-leading error
 labels (`Error:`, `Caused by:`, `ValueError:`, `java.lang.IllegalStateException:`,
@@ -365,12 +382,12 @@ signals, literal coverage, and deterministic reranking. Fusion remains one
 module because ordering and score interactions form one relevance contract.
 
 A hash-vector match on a candidate that lexical, literal, path, or symbol search
-already found hashes the same words BM25 scored. For one-line queries it gets no
-fusion vote unless the query names secondary sources such as tests, docs, or
-examples. Multi-line queries keep a vote, because hash overlap on pasted
-identifiers still separates the matching snippet. When hash votes are
-discounted, neural corroboration votes from the neural tier's own rank, and
-semantic-only discoveries keep full weight.
+already found hashes the same words BM25 scored. For prose, one line or several,
+it gets no fusion vote unless the query names secondary sources such as tests,
+docs, or examples. Pasted source and multi-line pasted error output keep a vote,
+because hash overlap on pasted identifiers still separates the matching snippet.
+When hash votes are discounted, neural corroboration votes from the neural
+tier's own rank, and semantic-only discoveries keep full weight.
 
 `src/search_presentation.rs` selects representative spans, loads source text,
 and builds explanations. Output records source signals and whether neural

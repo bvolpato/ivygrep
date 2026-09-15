@@ -634,6 +634,50 @@ fn public_boolean_constraints_preserve_prefixed_quoted_operator_words() {
 
 #[test]
 #[serial]
+fn explicit_signature_clauses_keep_their_boost_on_every_query_shape() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("report.py"),
+        "def render(totals):\n    return totals\n",
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    index_workspace(
+        &workspace,
+        &HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS),
+    )
+    .unwrap();
+    let ctx = SearchContext::load(&workspace, None, false).unwrap();
+    let top_score = |scoring: SignatureScoring, text: &str| {
+        let parser = lexical_query_parser(&ctx, scoring, false);
+        let query = parse_lexical_query(&parser, text, scoring).unwrap();
+        ctx.searchers[0]
+            .search(query.as_ref(), &TopDocs::with_limit(1).order_by_score())
+            .unwrap()
+            .first()
+            .map(|(score, _)| *score)
+            .expect("the definition matches")
+    };
+
+    let explicit = top_score(SignatureScoring::Boosted, "signature:render");
+    for scoring in [SignatureScoring::Plain, SignatureScoring::Omitted] {
+        let score = top_score(scoring, "signature:render");
+        assert!(
+            (score - explicit).abs() < 1e-4,
+            "{scoring:?} scored an explicit signature clause {score}, one-line queries {explicit}"
+        );
+    }
+    assert!(
+        top_score(SignatureScoring::Plain, "render totals")
+            < top_score(SignatureScoring::Boosted, "render totals"),
+        "multi-line prose scores default signature matches without the boost"
+    );
+}
+
+#[test]
+#[serial]
 fn public_boolean_constraints_reject_unterminated_operator_quotes() {
     let home = tempdir().unwrap();
     unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -652,7 +696,7 @@ fn public_boolean_constraints_reject_unterminated_operator_quotes() {
     // Both delimiters are rejected by the pinned parser. Public dispatch must
     // not hide these malformed Boolean requests from that strict parser.
     let ctx = SearchContext::load(&workspace, None, false).unwrap();
-    let parser = lexical_query_parser(&ctx, "alpha AND beta", false);
+    let parser = lexical_query_parser(&ctx, SignatureScoring::Boosted, false);
     assert!(parser.parse_query("\"alpha AND beta").is_err());
     assert!(parser.parse_query("'alpha AND beta").is_err());
     for query in [r#""NOT(beta)"#, "'NOT(beta)"] {
