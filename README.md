@@ -112,12 +112,13 @@ only results without `render`, and a malformed expression such as a trailing `OR
 instead of guessing. To search those words as text, write them in lowercase or wrap them in backticks
 or quotes.
 
-Multi-line queries are ranked as pasted source, so the code that contains the snippet ranks above
-one-line definition signatures that share a few of its identifiers. For pasted error output, such as
-a traceback, a `Caused by:` chain, or a `panicked at` line, lexical, path, hash-vector, and reranking
-signals ignore runtime values such as paths outside the workspace, ids, and timestamps, and the static
-message text is matched against the code that raises it. Neural query vectors still embed the original
-text.
+Multi-line queries that read as pasted source rank the code that contains the snippet above one-line
+definition signatures that share a few of its identifiers. Multi-paragraph prompts, pasted issue text,
+and questions with a blank line rank as prose, with signature matches scored like body text. For pasted
+error output, such as a traceback, a `Caused by:` chain, or a `panicked at` line, lexical, path,
+hash-vector, and reranking signals ignore runtime values such as paths outside the workspace, ids, and
+timestamps, and the static message text is matched against the code that raises it. Neural query vectors
+still embed the original text.
 
 On macOS laptops, background neural enhancement pauses on battery power (`ig --status`
 shows `Paused: Battery Power`); set `IVYGREP_ENHANCE_ON_BATTERY=1` to keep it running.

@@ -490,7 +490,9 @@ pub(super) fn fuse_rrf_with_context(
     // A qualified member in prose is an explicit request for that definition.
     // Keep the winning file and score, but center its preview on the exact
     // member instead of a nearby helper with stronger prose overlap.
-    promote_qualified_symbol_span(&mut ranked, query.text);
+    if !query.pasted_source {
+        promote_qualified_symbol_span(&mut ranked, query.text);
+    }
     if query.pasted_error {
         promote_literal_spans(&mut ranked);
     }

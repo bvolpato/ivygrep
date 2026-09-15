@@ -42,7 +42,9 @@ mod presentation;
 #[path = "search_semantic_visibility.rs"]
 mod semantic_visibility;
 
-use boolean::{boolean_candidates, has_explicit_boolean_operators, lexical_query_parser};
+use boolean::{
+    boolean_candidates, has_explicit_boolean_operators, lexical_query_parser, parse_lexical_query,
+};
 use eligibility::CandidateEligibility;
 use file_cache::{CachedFileContent, FileContentCache};
 use semantic_visibility::{refill_semantic_matches, score_constrained_semantic_keys};
@@ -1587,6 +1589,7 @@ fn simple_lexical_query(
     fields: &TantivyFields,
     query: &str,
     conjunction_by_default: bool,
+    signature_scoring: SignatureScoring,
 ) -> Option<Box<dyn Query>> {
     if !query
         .chars()
@@ -1597,7 +1600,7 @@ fn simple_lexical_query(
     if has_explicit_boolean_operators(query) {
         return None;
     }
-    lexical_terms_query(fields, query, conjunction_by_default)
+    lexical_terms_query(fields, query, conjunction_by_default, signature_scoring)
 }
 
 /// Longest punctuated variant that still runs as a flat token disjunction.
@@ -1618,6 +1621,7 @@ fn lexical_terms_query(
     fields: &TantivyFields,
     query: &str,
     conjunction_by_default: bool,
+    signature_scoring: SignatureScoring,
 ) -> Option<Box<dyn Query>> {
     let terms = literal_candidate_terms(query);
     if terms.is_empty() {
@@ -1627,7 +1631,7 @@ fn lexical_terms_query(
     if !conjunction_by_default && terms.len() == 3 {
         let clauses = terms
             .iter()
-            .flat_map(|term| simple_lexical_term_clauses(fields, term))
+            .flat_map(|term| simple_lexical_term_clauses(fields, term, signature_scoring))
             .collect::<Vec<_>>();
         return Some(Box::new(BooleanQuery::new(clauses)));
     }
@@ -1639,7 +1643,12 @@ fn lexical_terms_query(
     };
     let mut clauses = terms
         .iter()
-        .map(|term| (occur, simple_lexical_term_query(fields, term)))
+        .map(|term| {
+            (
+                occur,
+                simple_lexical_term_query(fields, term, signature_scoring),
+            )
+        })
         .collect::<Vec<_>>();
     if clauses.len() == 1 {
         Some(clauses.pop().unwrap().1)
@@ -1660,6 +1669,7 @@ struct LexicalQueryExecutor<'a> {
     searchers: &'a [tantivy::Searcher],
     eligibility: [CandidateEligibility; 2],
     cancel_token: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
+    signature_scoring: SignatureScoring,
 }
 
 impl LexicalQueryExecutor<'_> {
@@ -1668,16 +1678,19 @@ impl LexicalQueryExecutor<'_> {
         lexical_query: &str,
         query_candidate_limit: usize,
     ) -> Result<Vec<(usize, f32, TantivyDocument)>> {
-        let mut parsed_query = if let Some(query) =
-            simple_lexical_query(self.fields, lexical_query, self.conjunctive_numeric_query)
-        {
+        let mut parsed_query = if let Some(query) = simple_lexical_query(
+            self.fields,
+            lexical_query,
+            self.conjunctive_numeric_query,
+            self.signature_scoring,
+        ) {
             query
         } else {
             let terms = literal_candidate_terms(lexical_query);
             if terms.is_empty() {
                 return Ok(Vec::new());
             }
-            match self.parser.parse_query(lexical_query) {
+            match parse_lexical_query(self.parser, lexical_query, self.signature_scoring) {
                 Ok(query) => query,
                 Err(err) => {
                     tracing::debug!(
@@ -1700,6 +1713,7 @@ impl LexicalQueryExecutor<'_> {
                         self.fields,
                         lexical_query,
                         self.conjunctive_numeric_query,
+                        self.signature_scoring,
                     ) else {
                         return Ok(Vec::new());
                     };
@@ -1788,15 +1802,22 @@ pub(crate) fn path_terms_query(
     Some(Box::new(BooleanQuery::new(clauses)))
 }
 
-fn simple_lexical_term_query(fields: &TantivyFields, term_text: &str) -> Box<dyn Query> {
+fn simple_lexical_term_query(
+    fields: &TantivyFields,
+    term_text: &str,
+    signature_scoring: SignatureScoring,
+) -> Box<dyn Query> {
     Box::new(BooleanQuery::new(simple_lexical_term_clauses(
-        fields, term_text,
+        fields,
+        term_text,
+        signature_scoring,
     )))
 }
 
 fn simple_lexical_term_clauses(
     fields: &TantivyFields,
     term_text: &str,
+    signature_scoring: SignatureScoring,
 ) -> Vec<(Occur, Box<dyn Query>)> {
     let mut field_queries = Vec::with_capacity(3);
     field_queries.push((
@@ -1826,7 +1847,7 @@ fn simple_lexical_term_clauses(
                     tantivy::Term::from_field_text(field, term_text),
                     IndexRecordOption::Basic,
                 )),
-                5.0,
+                signature_scoring.default_boost(),
             )),
         ));
     }
@@ -2242,22 +2263,165 @@ fn natural_language_symbol_queries(query_text: &str) -> Vec<String> {
     queries
 }
 
-/// Multi-line input: usually pasted source, a stack trace, or a multi-paragraph
-/// prompt rather than a request for one symbol.
-fn is_multiline_query(query_text: &str) -> bool {
-    query_text.trim().contains('\n')
+/// Multi-line input that reads as pasted source. Its many incidental
+/// identifiers rank by body evidence: lexical scoring leaves out the boosted
+/// signature field, `owner.member` calls are not exact-symbol lookups, and hash
+/// matches on direct candidates keep a fusion vote. A multi-paragraph prompt,
+/// pasted issue text, or a question with a blank line is prose: its
+/// `owner.member` mentions are lookups, hash matches on direct candidates get no
+/// vote, and signature matches score like body matches (see
+/// `SignatureScoring`).
+///
+/// A line reads as code when it ends in `;`, `{` or `}`, starts with `}`, is
+/// indented and not a list item, ends in `:` after a code-shaped token, or has
+/// at least as many code-shaped tokens as words. The input is pasted source
+/// when the tokens of its code lines plus the code-shaped tokens of its other
+/// lines at least match the words of those other lines.
+fn is_pasted_source_query(query_text: &str) -> bool {
+    let query = query_text.trim();
+    if !query.contains('\n') {
+        return false;
+    }
+    let (mut code, mut words) = (0usize, 0usize);
+    for line in query.lines() {
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let (line_code, line_words) =
+            text.split_whitespace()
+                .fold((0, 0), |(code, words), token| {
+                    match source_token_kind(token) {
+                        SourceToken::Code => (code + 1, words),
+                        SourceToken::Word => (code, words + 1),
+                        SourceToken::Neutral => (code, words),
+                    }
+                });
+        let indented = line.starts_with('\t') || line.starts_with("  ");
+        let code_line = text.ends_with([';', '{', '}'])
+            || text.starts_with('}')
+            || (indented && !starts_with_list_marker(text))
+            || (text.ends_with(':') && line_code > 0)
+            || line_code >= line_words;
+        if code_line {
+            code += line_code + line_words;
+        } else {
+            code += line_code;
+            words += line_words;
+        }
+    }
+    code >= words
 }
 
-/// Member names a prose query mentions as `owner.member`. In multi-line input
-/// such as pasted source, `np.zeros` or `f.write` are ordinary calls; promoting
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceToken {
+    /// Letters, possibly with inner apostrophes or hyphens, without a camelCase
+    /// hump.
+    Word,
+    /// Operators and identifier shapes: `=`, `x**2`, `snake_case`, `camelCase`,
+    /// `owner.member`, `a::b`, `call(arg)`.
+    Code,
+    /// Numbers, bullets, dashes, quote markers, and lone brackets or punctuation.
+    Neutral,
+}
+
+fn source_token_kind(token: &str) -> SourceToken {
+    if matches!(
+        token,
+        "-" | "--" | "*" | "+" | "•" | "—" | "–" | ">" | "#" | "&" | "~"
+    ) || token.chars().all(|ch| matches!(ch, '.' | '…'))
+    {
+        return SourceToken::Neutral;
+    }
+    let text = token
+        .trim_start_matches(['(', '[', '{', '"', '\'', '`', '*'])
+        .trim_end_matches([
+            ')', ']', '}', '"', '\'', '`', '*', '.', ',', ';', ':', '?', '!',
+        ]);
+    if text.is_empty() || is_plain_number(text) {
+        return SourceToken::Neutral;
+    }
+    let has_hump = text
+        .chars()
+        .zip(text.chars().skip(1))
+        .any(|(left, right)| left.is_lowercase() && right.is_uppercase());
+    let mut letters = text
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '’' | '-'))
+        .peekable();
+    if letters.peek().is_some() && letters.all(char::is_alphabetic) && !has_hump {
+        SourceToken::Word
+    } else {
+        SourceToken::Code
+    }
+}
+
+/// `12`, `-3`, `2.5`, `1,000`, `12:30`, `50%`.
+fn is_plain_number(text: &str) -> bool {
+    fn digits(part: &str) -> bool {
+        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+    }
+    let text = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let text = text.strip_suffix('%').unwrap_or(text);
+    let mut parts = text.splitn(2, ['.', ',', ':']);
+    parts.next().is_some_and(digits) && parts.next().is_none_or(digits)
+}
+
+/// `- item`, `* item`, `1. step`, `2) step`, `a) choice`.
+fn starts_with_list_marker(text: &str) -> bool {
+    let Some((marker, _)) = text.split_once(char::is_whitespace) else {
+        return false;
+    };
+    matches!(marker, "-" | "*" | "+" | "•")
+        || marker.strip_suffix(['.', ')']).is_some_and(|label| {
+            (!label.is_empty() && label.bytes().all(|byte| byte.is_ascii_digit()))
+                || (label.len() == 1 && label.bytes().all(|byte| byte.is_ascii_alphabetic()))
+        })
+}
+
+/// How lexical scoring uses the definition `signature` field for one query. An
+/// explicit `signature:` clause scores 5x on any query shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignatureScoring {
+    /// One-line queries: signature matches score 5x, so a short request reaches
+    /// the definition it names.
+    Boosted,
+    /// Multi-line prose: signature matches score like body matches. A 5x bonus
+    /// for every term of a long prompt would lift short definitions that share a
+    /// word above documents that explain the task.
+    Plain,
+    /// Pasted source and multi-line error output leave the field out.
+    Omitted,
+}
+
+impl SignatureScoring {
+    const BOOST: f32 = 5.0;
+
+    fn for_query(query_text: &str, pasted_source: bool) -> Self {
+        if pasted_source {
+            Self::Omitted
+        } else if query_text.trim().contains('\n') {
+            Self::Plain
+        } else {
+            Self::Boosted
+        }
+    }
+
+    /// Boost for signature matches from default query fields.
+    fn default_boost(self) -> f32 {
+        match self {
+            Self::Plain => 1.0,
+            Self::Boosted | Self::Omitted => Self::BOOST,
+        }
+    }
+}
+
+/// Member names a prose query mentions as `owner.member`. Callers skip them for
+/// pasted source, where `np.zeros` or `f.write` are ordinary calls; promoting
 /// them to exact-symbol candidates would outrank the snippet's own lexical
 /// evidence.
 fn qualified_symbol_leaf_names(query_text: &str) -> Vec<String> {
     const MAX_QUALIFIED_NAMES: usize = 4;
-
-    if is_multiline_query(query_text) {
-        return Vec::new();
-    }
 
     let mut names = Vec::new();
     let mut seen = HashSet::new();
@@ -2303,7 +2467,7 @@ fn qualified_symbol_leaf_names(query_text: &str) -> Vec<String> {
     names
 }
 
-fn exact_symbol_query_names(query_text: &str) -> Vec<String> {
+fn exact_symbol_query_names(query_text: &str, pasted_source: bool) -> Vec<String> {
     let query = query_text.trim();
     if query.is_empty() {
         return Vec::new();
@@ -2313,7 +2477,9 @@ fn exact_symbol_query_names(query_text: &str) -> Vec<String> {
     if !query.chars().any(char::is_whitespace) {
         names.push(query.to_string());
     }
-    names.extend(qualified_symbol_leaf_names(query));
+    if !pasted_source {
+        names.extend(qualified_symbol_leaf_names(query));
+    }
     if !query.chars().any(char::is_whitespace)
         && let Some(leaf) = query
             .rsplit([':', '\\', '.', '/', '#'])
@@ -4099,6 +4265,9 @@ struct FusionQuery<'a> {
     compact_candidate_text: bool,
     /// Pasted error output, whose literal matches mark where the message is raised.
     pasted_error: bool,
+    /// Multi-line pasted source or error output, whose `owner.member` calls are
+    /// not requests for one definition. Search execution sets it once per query.
+    pasted_source: bool,
 }
 
 impl<'a> FusionQuery<'a> {
@@ -4142,6 +4311,7 @@ impl<'a> FusionQuery<'a> {
             alias_token_compacts,
             compact_candidate_text,
             pasted_error: false,
+            pasted_source: false,
         }
     }
 }
@@ -4421,7 +4591,8 @@ fn fuse_rrf(
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
-    let query = FusionQuery::new(query_text);
+    let mut query = FusionQuery::new(query_text);
+    query.pasted_source = is_pasted_source_query(query_text);
     let routing = QueryRouting::classify(query_text);
     fuse_rrf_with_context(
         None,
@@ -7492,6 +7663,7 @@ mod tests {
                 searchers: &context.searchers,
                 eligibility: Default::default(),
                 cancel_token: None,
+                signature_scoring: SignatureScoring::Boosted,
             };
             let lexical_paths = executor
                 .collect_docs("OrchidRetryBudget", 1)
@@ -7613,6 +7785,7 @@ mod tests {
             searchers: &context.searchers,
             eligibility: Default::default(),
             cancel_token: None,
+            signature_scoring: SignatureScoring::Boosted,
         };
 
         let mut paths = executor
@@ -8312,10 +8485,13 @@ function sendfile(res, path, options, callback) {
             signature: Some(schema.add_text_field("signature", tantivy::schema::TEXT)),
         };
 
-        assert!(simple_lexical_query(&fields, "calculate invoice_tax 42", false).is_some());
-        assert!(simple_lexical_query(&fields, "src/search.rs", false).is_none());
-        assert!(simple_lexical_query(&fields, "\"exact phrase\"", false).is_none());
-        assert!(simple_lexical_query(&fields, "alpha OR beta", false).is_none());
+        let scoring = SignatureScoring::Boosted;
+        assert!(
+            simple_lexical_query(&fields, "calculate invoice_tax 42", false, scoring).is_some()
+        );
+        assert!(simple_lexical_query(&fields, "src/search.rs", false, scoring).is_none());
+        assert!(simple_lexical_query(&fields, "\"exact phrase\"", false, scoring).is_none());
+        assert!(simple_lexical_query(&fields, "alpha OR beta", false, scoring).is_none());
     }
 
     #[test]
@@ -8380,10 +8556,10 @@ function sendfile(res, path, options, callback) {
     #[test]
     fn exact_symbol_queries_include_qualified_leaf_names() {
         assert_eq!(
-            exact_symbol_query_names("Rack::Response"),
+            exact_symbol_query_names("Rack::Response", false),
             ["Rack::Response", "Response"]
         );
-        assert_eq!(exact_symbol_query_names("Visitor"), ["Visitor"]);
+        assert_eq!(exact_symbol_query_names("Visitor", false), ["Visitor"]);
         assert_eq!(
             qualified_symbol_leaf_names(
                 "how app.handle dispatches requests and res.sendFile() serves content"
@@ -8391,7 +8567,7 @@ function sendfile(res, path, options, callback) {
             ["handle", "sendFile"]
         );
         assert!(
-            exact_symbol_query_names("how app.handle dispatches requests")
+            exact_symbol_query_names("how app.handle dispatches requests", false)
                 .contains(&"handle".to_string())
         );
         assert_eq!(
@@ -8403,10 +8579,16 @@ function sendfile(res, path, options, callback) {
         assert!(qualified_symbol_leaf_names("Plug.Session cookie store").is_empty());
         assert!(qualified_symbol_leaf_names("absl::Mutex locking").is_empty());
         assert!(qualified_symbol_leaf_names("read config.toml").is_empty());
+        let snippet = "x = tf.constant(0.5)\ny = np.zeros(3)\nd2l.plot(x, y)";
         assert!(
-            qualified_symbol_leaf_names("x = tf.constant(0.5)\ny = np.zeros(3)\nd2l.plot(x, y)")
-                .is_empty(),
+            exact_symbol_query_names(snippet, is_pasted_source_query(snippet)).is_empty(),
             "pasted multi-line source must not become exact member lookups"
+        );
+        let prompt = "How does res.sendFile stream a file?\n\nI want to know where static file serving handles byte ranges.";
+        assert_eq!(
+            exact_symbol_query_names(prompt, is_pasted_source_query(prompt)),
+            ["sendFile"],
+            "a multi-paragraph prompt still names a member explicitly"
         );
         assert_eq!(
             qualified_symbol_leaf_names("  static file serving with res.sendFile\n"),
@@ -8914,10 +9096,10 @@ export function registerCommands(p: Plugin) {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        // Explicit Boolean operators do not change the multi-line rule.
+        // Explicit Boolean operators do not change the pasted-source rule.
         for query in [
             "values = load(source)\ntotals = summarize(values)\nreport = render(totals)\npublish(report)",
-            "values OR load OR source\nOR totals OR summarize\nOR report OR render OR publish",
+            "values OR load OR source\n    OR totals OR summarize\n    OR report OR render OR publish",
         ] {
             let hits = hybrid_search(
                 &workspace,
@@ -8940,6 +9122,56 @@ export function registerCommands(p: Plugin) {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    #[serial]
+    fn multi_paragraph_prose_reaches_definitions_through_signatures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("sync.py"),
+            "def reconcile_worktree_overlay(base, overlay):\n    return base.merge(overlay)\n",
+        )
+        .unwrap();
+        // Helpers that repeat the question's terms in their bodies more often
+        // than the definition does, without naming them in a signature.
+        for index in 0..40 {
+            std::fs::write(
+                tmp.path().join(format!("refresh_{index:02}.py")),
+                format!(
+                    "def refresh_{index}(state):\n    # reconcile the worktree overlay, then reconcile the worktree overlay again\n    return state\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "We use linked checkouts for feature work.\n\nWhere do we reconcile a worktree overlay?",
+            None,
+            &SearchOptions {
+                limit: Some(20),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            hits.first().map(|hit| hit.file_path.clone()),
+            Some(PathBuf::from("sync.py")),
+            "a multi-paragraph question should reach the definition its signature names, got: {:?}",
+            hits.iter()
+                .take(5)
+                .map(|hit| hit.file_path.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -9321,17 +9553,45 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
-    fn hash_corroboration_weight_drops_votes_for_one_line_prose() {
+    fn hash_corroboration_weight_drops_votes_for_prose() {
         use super::execution::hash_direct_weight;
+        let weight =
+            |query: &str, neural| hash_direct_weight(query, is_pasted_source_query(query), neural);
         // Keep one-line fixtures short: the benchmark leakage check rejects
         // production sources that contain public benchmark query text.
         let prose = "reload watcher settings";
-        assert_eq!(hash_direct_weight(prose, false), 0.0);
-        assert_eq!(hash_direct_weight(prose, true), 0.0);
+        assert_eq!(weight(prose, false), 0.0);
+        assert_eq!(weight(prose, true), 0.0);
+        let paragraphs =
+            "Which settings does the watcher reload?\n\nI edited the ignore file twice.";
+        assert_eq!(weight(paragraphs, false), 0.0);
+        assert_eq!(weight(paragraphs, true), 0.0);
         let snippet = "for i in range(n):\n    total += values[i]";
-        assert_eq!(hash_direct_weight(snippet, false), 0.25);
-        assert_eq!(hash_direct_weight(snippet, true), 1.0);
-        assert_eq!(hash_direct_weight("parse config tests", false), 1.0);
+        assert_eq!(weight(snippet, false), 0.25);
+        assert_eq!(weight(snippet, true), 1.0);
+        assert_eq!(weight("parse config tests", false), 1.0);
+    }
+
+    #[test]
+    fn pasted_source_needs_code_shaped_lines() {
+        for prose in [
+            "I keep several Git worktrees of one repository.\n\nDoes a linked worktree reuse the main checkout's index?",
+            "Reindexing processes every file after one edit.\n\nSteps to reproduce:\n1. Index a repository\n2. Edit a single file\n\nExpected: only changed paths are processed.",
+            "Add another client to the setup command.\n\nRequirements:\n- the install step writes the MCP configuration\n- the doctor step verifies one search",
+            "Why does hybrid_search() ignore options.limit?\nIt happens when force_neural is set (= true) on the CLI.",
+        ] {
+            assert!(!is_pasted_source_query(prose), "{prose:?}");
+        }
+        for source in [
+            "values = load(source)\ntotals = summarize(values)",
+            "for i in range(n):\n    total += values[i]",
+            "int main() {\n    return 0;\n}",
+            "from collections import deque\nstack = deque()\nvalue = stack.pop()",
+            "match result {\n    Ok(value) => value,\n    Err(error) => return Err(error),\n}",
+        ] {
+            assert!(is_pasted_source_query(source), "{source:?}");
+        }
+        assert!(!is_pasted_source_query("values = load(source)"));
     }
 
     #[test]
@@ -10664,6 +10924,7 @@ export function registerCommands(p: Plugin) {
             searchers: &ctx.searchers,
             eligibility: Default::default(),
             cancel_token: None,
+            signature_scoring: SignatureScoring::Boosted,
         };
         let mut paths = executor
             .collect_docs(variant, 20)
