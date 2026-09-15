@@ -661,13 +661,22 @@ fn explicit_signature_clauses_keep_their_boost_on_every_query_shape() {
             .expect("the definition matches")
     };
 
-    let explicit = top_score(SignatureScoring::Boosted, "signature:render");
-    for scoring in [SignatureScoring::Plain, SignatureScoring::Omitted] {
-        let score = top_score(scoring, "signature:render");
-        assert!(
-            (score - explicit).abs() < 1e-4,
-            "{scoring:?} scored an explicit signature clause {score}, one-line queries {explicit}"
-        );
+    // Field boosts reach term clauses only, so range and set clauses score the
+    // same unboosted value on every shape too.
+    for text in [
+        "signature:render",
+        "signature:[render TO render]",
+        "signature:[render TO *]",
+        "signature: IN [render]",
+    ] {
+        let explicit = top_score(SignatureScoring::Boosted, text);
+        for scoring in [SignatureScoring::Plain, SignatureScoring::Omitted] {
+            let score = top_score(scoring, text);
+            assert!(
+                (score - explicit).abs() < 1e-4,
+                "{scoring:?} scored {text:?} {score}, one-line queries {explicit}"
+            );
+        }
     }
     assert!(
         top_score(SignatureScoring::Plain, "render totals")

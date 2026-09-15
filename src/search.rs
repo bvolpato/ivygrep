@@ -2267,79 +2267,134 @@ fn natural_language_symbol_queries(query_text: &str) -> Vec<String> {
 /// identifiers rank by body evidence: lexical scoring leaves out the boosted
 /// signature field, `owner.member` calls are not exact-symbol lookups, and hash
 /// matches on direct candidates keep a fusion vote. A multi-paragraph prompt,
-/// pasted issue text, or a question with a blank line is prose: its
-/// `owner.member` mentions are lookups, hash matches on direct candidates get no
+/// pasted issue text, or a question with a blank line is prose: `owner.member`
+/// mentions written as code on its prose lines are lookups (see
+/// `qualified_symbol_leaf_names`), hash matches on direct candidates get no
 /// vote, and signature matches score like body matches (see
 /// `SignatureScoring`).
 ///
-/// A line reads as code when it ends in `;`, `{` or `}`, starts with `}`, is
-/// indented and not a list item, ends in `:` after a code-shaped token, or has
-/// at least as many code-shaped tokens as words. The input is pasted source
-/// when the tokens of its code lines plus the code-shaped tokens of its other
-/// lines at least match the words of those other lines.
+/// The input is pasted source when the tokens of its code lines plus the
+/// code-shaped tokens of its other lines at least match the words of those
+/// other lines (see `source_lines`).
 fn is_pasted_source_query(query_text: &str) -> bool {
     let query = query_text.trim();
     if !query.contains('\n') {
         return false;
     }
     let (mut code, mut words) = (0usize, 0usize);
-    for line in query.lines() {
-        let text = line.trim();
-        if text.is_empty() {
-            continue;
-        }
-        let (line_code, line_words) =
-            text.split_whitespace()
-                .fold((0, 0), |(code, words), token| {
-                    match source_token_kind(token) {
-                        SourceToken::Code => (code + 1, words),
-                        SourceToken::Word => (code, words + 1),
-                        SourceToken::Neutral => (code, words),
-                    }
-                });
-        let indented = line.starts_with('\t') || line.starts_with("  ");
-        let code_line = text.ends_with([';', '{', '}'])
-            || text.starts_with('}')
-            || (indented && !starts_with_list_marker(text))
-            || (text.ends_with(':') && line_code > 0)
-            || line_code >= line_words;
-        if code_line {
-            code += line_code + line_words;
+    for line in source_lines(query) {
+        if line.code {
+            code += line.code_tokens + line.words;
         } else {
-            code += line_code;
-            words += line_words;
+            code += line.code_tokens;
+            words += line.words;
         }
     }
     code >= words
 }
 
+/// A non-blank line of multi-line input, as the pasted-source classifier reads
+/// it.
+struct SourceLine<'a> {
+    text: &'a str,
+    code_tokens: usize,
+    words: usize,
+    code: bool,
+}
+
+/// Classifies the non-blank lines of multi-line input. A line reads as code
+/// when it ends in `;`, `{` or `}`, starts with `}`, is an import statement,
+/// ends in `:` after a code-shaped token, has at least as many code-shaped
+/// tokens as words, or is indented and is neither a list item nor a
+/// continuation. A continuation is an indented line of words with no
+/// code-shaped tokens that does not end in `:` and follows a prose line that
+/// does not end in `:`, such as a wrapped list item or an indented paragraph.
+fn source_lines(query: &str) -> impl Iterator<Item = SourceLine<'_>> {
+    let mut after_prose = false;
+    query.lines().filter_map(move |line| {
+        let text = line.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let (code_tokens, words) = text
+            .split_whitespace()
+            .fold((0, 0), |(code, words), token| {
+                match source_token_kind(token) {
+                    SourceToken::Code => (code + 1, words),
+                    SourceToken::Word => (code, words + 1),
+                    SourceToken::Neutral => (code, words),
+                }
+            });
+        let indented = line.starts_with('\t') || line.starts_with("  ");
+        let continuation =
+            indented && after_prose && code_tokens == 0 && words > 0 && !text.ends_with(':');
+        let code = text.ends_with([';', '{', '}'])
+            || text.starts_with('}')
+            || is_import_statement(text)
+            || (text.ends_with(':') && code_tokens > 0)
+            || code_tokens >= words
+            || (indented && !continuation && !starts_with_list_marker(text));
+        after_prose = !code && !text.ends_with(':');
+        Some(SourceLine {
+            text,
+            code_tokens,
+            words,
+            code,
+        })
+    })
+}
+
+/// `import numpy as np`, `from pathlib import Path`, and `require`, `use` or
+/// `package` with one argument, such as `require 'json'` or `package main`.
+fn is_import_statement(text: &str) -> bool {
+    let mut tokens = text.split_whitespace();
+    match tokens.next() {
+        Some("import") => tokens.next().is_some() && !text.ends_with(['.', '?', '!']),
+        Some("from") => tokens.any(|token| token == "import") && !text.ends_with(['.', '?', '!']),
+        Some("require" | "use" | "package") => tokens.next().is_some() && tokens.next().is_none(),
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceToken {
     /// Letters, possibly with inner apostrophes or hyphens, without a camelCase
-    /// hump.
+    /// hump, and prose shapes such as `e.g.` and `and/or`.
     Word,
     /// Operators and identifier shapes: `=`, `x**2`, `snake_case`, `camelCase`,
     /// `owner.member`, `a::b`, `call(arg)`.
     Code,
-    /// Numbers, bullets, dashes, quote markers, and lone brackets or punctuation.
+    /// Numbers, versions, sizes, issue references, bullets, dashes, table pipes,
+    /// Markdown rules and heading marks, and lone brackets or punctuation.
     Neutral,
 }
 
 fn source_token_kind(token: &str) -> SourceToken {
     if matches!(
         token,
-        "-" | "--" | "*" | "+" | "•" | "—" | "–" | ">" | "#" | "&" | "~"
+        "-" | "--" | "*" | "+" | "•" | "—" | "–" | ">" | "#" | "&" | "~" | "|"
     ) || token.chars().all(|ch| matches!(ch, '.' | '…'))
+        || is_markdown_rule(token)
     {
         return SourceToken::Neutral;
     }
+    // Unicode punctuation, such as `？`, `。`, curly quotes, and `…`, wraps words
+    // the way ASCII punctuation does.
     let text = token
-        .trim_start_matches(['(', '[', '{', '"', '\'', '`', '*'])
-        .trim_end_matches([
-            ')', ']', '}', '"', '\'', '`', '*', '.', ',', ';', ':', '?', '!',
-        ]);
-    if text.is_empty() || is_plain_number(text) {
+        .trim_start_matches(|ch: char| {
+            matches!(ch, '(' | '[' | '{' | '"' | '\'' | '`' | '*') || is_non_ascii_punctuation(ch)
+        })
+        .trim_end_matches(|ch: char| {
+            matches!(
+                ch,
+                ')' | ']' | '}' | '"' | '\'' | '`' | '*' | '.' | ',' | ';' | ':' | '?' | '!'
+            ) || is_non_ascii_punctuation(ch)
+        });
+    if text.is_empty() || is_numeric_label(text) {
         return SourceToken::Neutral;
+    }
+    if is_abbreviation(token, text) || is_slash_word(text) {
+        return SourceToken::Word;
     }
     let has_hump = text
         .chars()
@@ -2356,15 +2411,59 @@ fn source_token_kind(token: &str) -> SourceToken {
     }
 }
 
-/// `12`, `-3`, `2.5`, `1,000`, `12:30`, `50%`.
-fn is_plain_number(text: &str) -> bool {
-    fn digits(part: &str) -> bool {
-        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-    }
-    let text = text.strip_prefix(['+', '-']).unwrap_or(text);
-    let text = text.strip_suffix('%').unwrap_or(text);
-    let mut parts = text.splitn(2, ['.', ',', ':']);
-    parts.next().is_some_and(digits) && parts.next().is_none_or(digits)
+fn is_non_ascii_punctuation(ch: char) -> bool {
+    !ch.is_ascii() && !ch.is_alphanumeric()
+}
+
+/// `##`, `---`, `***`, `___`: Markdown heading marks and rules.
+fn is_markdown_rule(token: &str) -> bool {
+    let Some(first) = token.chars().next() else {
+        return false;
+    };
+    let minimum = match first {
+        '#' => 2,
+        '-' | '*' | '_' => 3,
+        _ => return false,
+    };
+    token.len() >= minimum && token.chars().all(|ch| ch == first)
+}
+
+/// `12`, `-3`, `2.5`, `1,000`, `12:30`, `50%`, `1.84.0`, `v1.2.16`, `#375`,
+/// `~2.3GB`, `12k`.
+fn is_numeric_label(text: &str) -> bool {
+    let text = text.strip_prefix(['+', '-', '~', '#']).unwrap_or(text);
+    let text = match text.strip_prefix(['v', 'V']) {
+        Some(rest) if rest.starts_with(|ch: char| ch.is_ascii_digit()) => rest,
+        _ => text,
+    };
+    let number = text.trim_end_matches(|ch: char| ch.is_ascii_alphabetic() || ch == '%');
+    text.len() - number.len() <= 3
+        && number
+            .split(['.', ',', ':'])
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// `e.g.`, `i.e.`, `U.S.`: single letters joined by dots, ending in a dot.
+fn is_abbreviation(token: &str, text: &str) -> bool {
+    token
+        .trim_end_matches([',', ';', ':', ')', '"', '\''])
+        .ends_with('.')
+        && text.contains('.')
+        && text
+            .split('.')
+            .all(|part| part.chars().count() == 1 && part.chars().all(char::is_alphabetic))
+}
+
+/// `and/or`, `read/write`: two words of letters joined by a slash. Namespaced
+/// names such as Clojure's `json/write-str` stay code.
+fn is_slash_word(text: &str) -> bool {
+    let mut parts = text.split('/');
+    let (Some(left), Some(right), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    [left, right]
+        .iter()
+        .all(|part| !part.is_empty() && part.chars().all(char::is_alphabetic))
 }
 
 /// `- item`, `* item`, `1. step`, `2) step`, `a) choice`.
@@ -2419,20 +2518,62 @@ impl SignatureScoring {
 /// Member names a prose query mentions as `owner.member`. Callers skip them for
 /// pasted source, where `np.zeros` or `f.write` are ordinary calls; promoting
 /// them to exact-symbol candidates would outrank the snippet's own lexical
-/// evidence.
+/// evidence. Multi-line prose contributes names only from its prose lines, and
+/// only for mentions written as code: a call (`res.send(body)`), a backtick span
+/// (`` `app.handle` ``), or a camelCase member (`res.sendFile`). Dotted prose
+/// such as `go.sum`, `go.dev`, or a missing space in `it.The` names no member.
 fn qualified_symbol_leaf_names(query_text: &str) -> Vec<String> {
-    const MAX_QUALIFIED_NAMES: usize = 4;
+    let query = query_text.trim();
+    let mut names = QualifiedNames::default();
+    if query.contains('\n') {
+        for line in source_lines(query).filter(|line| !line.code) {
+            names.collect(line.text, true);
+        }
+    } else {
+        names.collect(query, false);
+    }
+    names.names
+}
 
-    let mut names = Vec::new();
-    let mut seen = HashSet::new();
-    for candidate in query_text
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '$' && ch != '.')
-        .map(|candidate| candidate.trim_matches('.'))
-        .filter(|candidate| candidate.contains('.'))
-    {
+#[derive(Default)]
+struct QualifiedNames {
+    names: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl QualifiedNames {
+    const MAX: usize = 4;
+
+    fn collect(&mut self, text: &str, written_as_code: bool) {
+        let is_part = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.');
+        let mut run_start = None;
+        for (index, ch) in text.char_indices().chain([(text.len(), ' ')]) {
+            if is_part(ch) {
+                run_start.get_or_insert(index);
+                continue;
+            }
+            let Some(start) = run_start.take() else {
+                continue;
+            };
+            if self.names.len() == Self::MAX {
+                return;
+            }
+            let run = &text[start..index];
+            let candidate = run.trim_matches('.');
+            let begin = start + (run.len() - run.trim_start_matches('.').len());
+            let end = begin + candidate.len();
+            self.consider(
+                candidate,
+                written_as_code,
+                text[end..].starts_with('(') || text[..begin].ends_with('`'),
+            );
+        }
+    }
+
+    fn consider(&mut self, candidate: &str, written_as_code: bool, called_or_quoted: bool) {
         let mut parts = candidate.split('.');
         let (Some(owner), Some(leaf), None) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
+            return;
         };
         let valid_owner = owner
             .chars()
@@ -2448,23 +2589,20 @@ fn qualified_symbol_leaf_names(query_text: &str) -> Vec<String> {
             && leaf
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$');
-        let object_shaped = (2..=3).contains(&owner.len())
-            || leaf.chars().skip(1).any(|ch| ch.is_ascii_uppercase());
+        let camel_leaf = leaf.chars().skip(1).any(|ch| ch.is_ascii_uppercase());
+        let object_shaped = (2..=3).contains(&owner.len()) || camel_leaf;
         let normalized = leaf.to_ascii_lowercase();
         if valid_owner
             && valid_leaf
             && object_shaped
+            && (!written_as_code || called_or_quoted || camel_leaf)
             && leaf.len() >= 2
             && crate::chunking::resolve_type_alias(&normalized).is_none()
-            && seen.insert(normalized)
+            && self.seen.insert(normalized)
         {
-            names.push(leaf.to_string());
-            if names.len() == MAX_QUALIFIED_NAMES {
-                break;
-            }
+            self.names.push(leaf.to_string());
         }
     }
-    names
 }
 
 fn exact_symbol_query_names(query_text: &str, pasted_source: bool) -> Vec<String> {
@@ -8590,6 +8728,26 @@ function sendfile(res, path, options, callback) {
             ["sendFile"],
             "a multi-paragraph prompt still names a member explicitly"
         );
+        for query in [
+            // Pasted calls, whether or not import lines lead the snippet.
+            "import numpy as np\nimport matplotlib.pyplot as plt\nplt.plot(x, y)\nplt.savefig(path)\nplt.show()",
+            "Why does the figure stay empty?\n\nplt.plot(x, y)\nplt.savefig(path)\n\nIt worked before the upgrade and nothing else changed.",
+            // File names, hosts, and missing spaces in prose are not members.
+            "Where do we verify module checksums?\n\nThe go.sum file changed after an upgrade.",
+            "The guide at https://go.dev/ref/mod covers it.The cache lives under ab.cd and vs.Code keeps a copy\n\nWhy is the index rebuilt?",
+        ] {
+            assert!(
+                exact_symbol_query_names(query, is_pasted_source_query(query)).is_empty(),
+                "{query:?}"
+            );
+        }
+        let marked =
+            "How does `app.handle` dispatch requests?\n\nI also call res.send(body) after it.";
+        assert_eq!(
+            exact_symbol_query_names(marked, is_pasted_source_query(marked)),
+            ["handle", "send"],
+            "members written as code in prose are still looked up"
+        );
         assert_eq!(
             qualified_symbol_leaf_names("  static file serving with res.sendFile\n"),
             ["sendFile"]
@@ -9579,6 +9737,12 @@ export function registerCommands(p: Plugin) {
             "Reindexing processes every file after one edit.\n\nSteps to reproduce:\n1. Index a repository\n2. Edit a single file\n\nExpected: only changed paths are processed.",
             "Add another client to the setup command.\n\nRequirements:\n- the install step writes the MCP configuration\n- the doctor step verifies one search",
             "Why does hybrid_search() ignore options.limit?\nIt happens when force_neural is set (= true) on the CLI.",
+            // An indented paragraph and hard-wrapped list items continue prose.
+            "We use linked checkouts for feature work.\n\n  Where do we reconcile a worktree overlay?",
+            "Where do we reconcile a worktree overlay?\n- we use linked checkouts for feature work,\n  and every linked checkout keeps a worktree\n  overlay that we have to reconcile again\n  after feature work lands",
+            "Search ranks the wrong file first.\n\n| Query | Expected | Actual |\n| --- | --- | --- |\n| worktree overlay | sync.py | refresh_17.py |\n\nHow do we reconcile a worktree overlay?",
+            "为什么 ig 搜索不到新文件？\n我切换了分支。",
+            "Search for “worktree” returns nothing…\nIt worked before, e.g. on v1.2.16 with ~2.3GB and 12k files.\nSee #375 and/or #378.",
         ] {
             assert!(!is_pasted_source_query(prose), "{prose:?}");
         }
@@ -9588,6 +9752,13 @@ export function registerCommands(p: Plugin) {
             "int main() {\n    return 0;\n}",
             "from collections import deque\nstack = deque()\nvalue = stack.pop()",
             "match result {\n    Ok(value) => value,\n    Err(error) => return Err(error),\n}",
+            "import numpy as np\nimport matplotlib.pyplot as plt\nplt.plot(x, y)\nplt.savefig(path)\nplt.show()",
+            "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(total)\n}",
+            // A line ending in a colon introduces a snippet, not a paragraph.
+            "It fails on large tables:\n\n    for row in rows:\n        total += row.amount",
+            // Indented code after a code-free header line, and namespaced calls.
+            "defmodule Report do\n  def render(totals) do\n    Jason.encode!(totals)\n  end\nend",
+            "(ns report.core)\n(defn render [totals]\n(json/write-str totals))",
         ] {
             assert!(is_pasted_source_query(source), "{source:?}");
         }
