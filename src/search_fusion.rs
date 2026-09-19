@@ -3,19 +3,20 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::indexer::IndexedChunk;
-use crate::search_routing::{QueryIntent, QueryRouting};
+use crate::search_routing::{QueryIntent, QueryRouting, is_long_query};
 
 use super::{
     ChunkBoostContext, FILE_COHERENCE_WEIGHT, FusionCandidates, FusionQuery,
-    REPRESENTATIVE_SPAN_MIN_COVERAGE, RankedCandidate, SOURCE_EXACT_SYMBOL, SearchContext,
-    SourceMask, SymbolCandidateKind, alias_file_stem_multiplier, apply_file_coherence_boost,
-    backfill_enabled, chunk_density_exponent, chunk_kind_boost, definition_name_boost,
-    effective_authority_score_with_intent, file_stem_signals, filter_meaningful_scores_with_query,
-    is_definition_kind, is_precise_lookup_query_with_tokens, literal_match_boost_with_query,
-    location_intent_boost, normalize_lexical_score, normalize_semantic_score,
-    path_exact_match_boost_with_query, path_key, path_segment_boost, primary_file_stem_multiplier,
-    promote_literal_spans, promote_qualified_symbol_span, promote_representative_span,
-    rerank_candidate_limit_for_routing, should_run_literal_pass, source_bit, term_coverage_boost,
+    REPRESENTATIVE_SPAN_MIN_COVERAGE, RankedCandidate, SOURCE_BACKFILL, SOURCE_EXACT_SYMBOL,
+    SearchContext, SourceMask, SymbolCandidateKind, alias_file_stem_multiplier,
+    apply_file_coherence_boost, backfill_enabled, chunk_density_exponent, chunk_kind_boost,
+    definition_name_boost, effective_authority_score_with_intent, file_stem_signals,
+    filter_meaningful_scores_with_query, is_definition_kind, is_precise_lookup_query_with_tokens,
+    literal_match_boost_with_query, location_intent_boost, normalize_lexical_score,
+    normalize_semantic_score, path_exact_match_boost_with_query, path_key, path_segment_boost,
+    primary_file_stem_multiplier, promote_literal_spans, promote_qualified_symbol_span,
+    promote_representative_span, rerank_candidate_limit_for_routing, should_run_literal_pass,
+    source_bit, term_coverage_boost,
 };
 
 pub(super) fn fuse_rrf_with_context(
@@ -67,6 +68,9 @@ pub(super) fn fuse_rrf_with_context(
     } = candidates;
 
     const LEXICAL_WEIGHT: f32 = 3.2;
+    // Weight of a long query's BM25 share (score / best score) in its lexical
+    // vote. Public tune halves are flat from 1 to 4; this is the low end.
+    const LONG_QUERY_LEXICAL_MARGIN_WEIGHT: f32 = 1.0;
     let query_tokens = query.tokens.as_slice();
     let location_intent = query.location_intent;
     let secondary_intent = query.secondary_intent;
@@ -98,11 +102,41 @@ pub(super) fn fuse_rrf_with_context(
         entry.sources |= sources;
     };
 
+    // Rank votes are nearly flat at the top (3.2/61 against 3.2/62) and the
+    // score term is logarithmic, so a BM25 margin barely reaches the fused
+    // score. For a lookup that is intended: structural boosts choose among
+    // near-tied matches. A long prompt or pasted snippet sums dozens of term
+    // scores, and its margin is the strongest evidence available, so its
+    // candidates also vote with their share of the best BM25 score.
+    let lexical_margin_weight = if is_long_query(query.text) {
+        LONG_QUERY_LEXICAL_MARGIN_WEIGHT
+    } else {
+        0.0
+    };
+    let best_lexical_score = lexical
+        .iter()
+        .map(|(_, score)| *score)
+        .fold(0.0f32, f32::max);
+    // The vote may reorder and add results, never remove one. The score
+    // filter below keeps candidates within a ratio of the best score, and a
+    // vote worth several rank votes to the leader would push low-share tail
+    // candidates under that ratio. Each candidate's vote is kept so the
+    // filter can also judge the score it would have had without it.
+    let mut lexical_margins: HashMap<u64, f32> = HashMap::new();
     for (rank, (chunk, lexical_score)) in lexical.into_iter().enumerate() {
+        let lexical_margin = if best_lexical_score > 0.0 {
+            lexical_margin_weight * (lexical_score / best_lexical_score).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if lexical_margin > 0.0 {
+            lexical_margins.insert(chunk.vector_key, lexical_margin);
+        }
         add_entry(
             chunk,
             LEXICAL_WEIGHT / (K + rank as f32 + 1.0)
-                + normalize_lexical_score(lexical_score) * LEXICAL_SCORE_WEIGHT,
+                + normalize_lexical_score(lexical_score) * LEXICAL_SCORE_WEIGHT
+                + lexical_margin,
             source_bit("lexical"),
         );
     }
@@ -303,6 +337,7 @@ pub(super) fn fuse_rrf_with_context(
     }
     tracing::trace!("fuse_context={:?}", fuse_started.elapsed());
 
+    let mut unvoted_ratios: HashMap<u64, f32> = HashMap::new();
     let mut ranked = entries
         .into_values()
         .map(|e| {
@@ -311,7 +346,17 @@ pub(super) fn fuse_rrf_with_context(
                 chunk,
                 sources: source_set,
             } = e;
+            let lexical_margin = lexical_margins
+                .get(&chunk.vector_key)
+                .copied()
+                .unwrap_or(0.0);
             if !rerank_ids.contains(&chunk.vector_key) {
+                if lexical_margin > 0.0 && base_score > 0.0 {
+                    unvoted_ratios.insert(
+                        chunk.vector_key,
+                        ((base_score - lexical_margin) / base_score).clamp(0.0, 1.0),
+                    );
+                }
                 return RankedCandidate {
                     chunk,
                     score: base_score,
@@ -369,6 +414,13 @@ pub(super) fn fuse_rrf_with_context(
             // weak-base candidates get a meaningful, bounded lift).
             let boost_cap = (base_score * MAX_BOOST_RATIO).max(MAX_BOOST_FLOOR);
             let mut score = base_score + additive_boost.min(boost_cap);
+            if lexical_margin > 0.0 && score > 0.0 {
+                // Every later step multiplies the score, so this ratio holds.
+                let unvoted_base = base_score - lexical_margin;
+                let unvoted_cap = (unvoted_base * MAX_BOOST_RATIO).max(MAX_BOOST_FLOOR);
+                let unvoted = unvoted_base + additive_boost.min(unvoted_cap);
+                unvoted_ratios.insert(chunk.vector_key, (unvoted / score).clamp(0.0, 1.0));
+            }
 
             if let Some(matches) = file_query_matches.get(&path_key(&chunk.file_path))
                 && matches.len() >= 2
@@ -546,7 +598,86 @@ pub(super) fn fuse_rrf_with_context(
         ranked.retain(|item| seen_files.insert(path_key(&item.chunk.file_path)));
     }
 
-    let mut filtered = filter_meaningful_scores_with_query(ranked, query, enable_backfill);
+    let mut filtered = if unvoted_ratios.is_empty() {
+        filter_meaningful_scores_with_query(ranked, query, enable_backfill)
+    } else {
+        // A file is returned if it clears the score filter with the vote or
+        // without it: the vote may reorder and add results, never remove one.
+        // What the voted pass kept stays as it is, in its order. The filter
+        // keeps strong path matches and literal matches under its score cut,
+        // so a rescued candidate can outscore results it kept; rescued
+        // candidates follow them in voted order, and backfilled items stay
+        // last. Another chunk of a file the voted pass kept is not rescued:
+        // it adds no file, and the learned reranker scores a file from its
+        // returned hits, so it would change the rank of a file that was
+        // never at risk.
+        let mut unvoted = ranked
+            .iter()
+            .map(|item| RankedCandidate {
+                chunk: item.chunk.clone(),
+                score: item.score
+                    * unvoted_ratios
+                        .get(&item.chunk.vector_key)
+                        .copied()
+                        .unwrap_or(1.0),
+                sources: item.sources,
+            })
+            .collect::<Vec<_>>();
+        unvoted.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
+        });
+        let voted_scores = ranked
+            .iter()
+            .map(|item| (item.chunk.vector_key, item.score))
+            .collect::<HashMap<_, _>>();
+        let (mut backfilled, mut kept): (Vec<_>, Vec<_>) =
+            filter_meaningful_scores_with_query(ranked, query, enable_backfill)
+                .into_iter()
+                .partition(|item| item.sources & SOURCE_BACKFILL != 0);
+        let mut returned = kept
+            .iter()
+            .map(|item| item.chunk.vector_key)
+            .collect::<HashSet<_>>();
+        let mut returned_files = kept
+            .iter()
+            .map(|item| path_key(&item.chunk.file_path))
+            .collect::<HashSet<_>>();
+        let mut rescued = filter_meaningful_scores_with_query(unvoted, query, enable_backfill)
+            .into_iter()
+            .filter(|item| {
+                item.sources & SOURCE_BACKFILL == 0 && !returned.contains(&item.chunk.vector_key)
+            })
+            .map(|mut item| {
+                item.score = voted_scores[&item.chunk.vector_key];
+                item
+            })
+            .collect::<Vec<_>>();
+        rescued.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
+        });
+        rescued.retain(|item| returned_files.insert(path_key(&item.chunk.file_path)));
+        let mut next_rescued_score = kept.last().map_or(f32::MAX, |item| item.score);
+        for item in &mut rescued {
+            item.score = item.score.min(next_rescued_score);
+            next_rescued_score = item.score;
+            returned.insert(item.chunk.vector_key);
+        }
+        kept.append(&mut rescued);
+        backfilled.retain(|item| !returned.contains(&item.chunk.vector_key));
+        let mut next_backfill_score = kept.last().map_or(f32::MAX, |item| item.score * 0.99);
+        for item in &mut backfilled {
+            item.score = item.score.min(next_backfill_score);
+            next_backfill_score = item.score * 0.99;
+        }
+        kept.append(&mut backfilled);
+        kept
+    };
 
     if let Some(limit) = limit {
         filtered.truncate(limit);
