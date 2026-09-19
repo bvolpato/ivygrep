@@ -5727,6 +5727,10 @@ fn path_role(path: &str) -> PathRole {
     PathRole::PrimarySource
 }
 
+/// Data and configuration formats. SQL is not one of them: it is an indexed
+/// language with its own definitions (queries, views, procedures, migrations),
+/// and the data role's authority sits below every recommendation floor, so a
+/// repository of `.sql` files would answer natural-language queries with nothing.
 fn is_data_or_config_path(path: &str) -> bool {
     path.ends_with(".json")
         || path.ends_with(".csv")
@@ -5736,7 +5740,6 @@ fn is_data_or_config_path(path: &str) -> bool {
         || path.ends_with(".toml")
         || path.ends_with(".ini")
         || path.ends_with(".env")
-        || path.ends_with(".sql")
 }
 
 fn is_support_path(path: &str) -> bool {
@@ -10147,6 +10150,34 @@ export function registerCommands(p: Plugin) {
             .map(|(chunk, _, _)| chunk.chunk_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["example"]);
+    }
+
+    #[test]
+    fn sql_files_are_source_and_answer_natural_language_queries() {
+        // A repository of SQL files has no higher-authority candidate. The data
+        // role (0.4) is below every recommendation floor and cannot relax it,
+        // so these lexical matches used to be filtered to an empty result.
+        let revenue = make_chunk_with_path(
+            "revenue",
+            "reports/revenue.sql",
+            "SELECT customer_id, SUM(total_amount) AS revenue FROM orders GROUP BY customer_id;",
+        );
+        let stock = make_chunk_with_path(
+            "stock",
+            "reports/stock.sql",
+            "SELECT warehouse, COUNT(*) FROM inventory GROUP BY warehouse;",
+        );
+        let ranked =
+            make_ranked_with_chunks(&[(revenue, 0.9, &["lexical"]), (stock, 0.5, &["lexical"])]);
+        let filtered = filter_meaningful_scores(ranked, "total revenue per customer");
+        assert_eq!(
+            filtered
+                .first()
+                .map(|(chunk, _, _)| chunk.chunk_id.as_str()),
+            Some("revenue")
+        );
+        assert_eq!(path_role("db/reports/revenue.sql"), PathRole::PrimarySource);
+        assert_eq!(path_role("db/fixtures/seed.sql"), PathRole::Generated);
     }
 
     #[test]
