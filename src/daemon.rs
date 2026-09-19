@@ -1506,6 +1506,24 @@ impl DaemonState {
         self.watcher_recovery.lock().remove(workspace_id);
     }
 
+    /// Drop everything kept per workspace for one whose root is gone, so
+    /// deleted worktrees leave nothing behind in the unbounded tables.
+    fn forget_workspace(&self, workspace: &Workspace) {
+        self.clear_workspace_contexts(workspace);
+        self.clear_watcher_failure(&workspace.id);
+        self.full_index_run_starts.lock().remove(&workspace.id);
+        self.replaced_workspaces.lock().remove(&workspace.id);
+        let mut resolved = self.resolved_workspaces.lock();
+        let paths = resolved
+            .iter()
+            .filter(|(_, cached)| cached.workspace.id == workspace.id)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        for path in paths {
+            resolved.pop(&path);
+        }
+    }
+
     pub(crate) async fn acquire_cpu_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.cpu_permits.clone().acquire_owned().await.ok()
     }
@@ -2995,6 +3013,7 @@ fn restore_configured_watchers(state: &DaemonState) {
 /// limits, a root that was temporarily missing) comes back without anyone
 /// restarting the daemon.
 fn supervise_watchers(state: &DaemonState) {
+    release_watchers_for_missing_roots(state);
     let workspaces = match crate::workspace::list_workspace_metadata() {
         Ok(workspaces) => workspaces,
         Err(err) => {
@@ -3007,8 +3026,26 @@ fn supervise_watchers(state: &DaemonState) {
         if !metadata.watch_enabled
             || metadata.last_indexed_at_unix.is_none()
             || state.watcher_registered(&metadata.id)
-            || state.watcher_backoff_error(&metadata.id).is_some()
         {
+            continue;
+        }
+        if crate::workspace::root_is_gone(&metadata.root) {
+            // A deleted worktree or repository has nothing to watch, and
+            // retrying it forever would keep one backoff entry per dead root.
+            // The ledger says why it is not watched. `watch_enabled` stays
+            // set: the root is watched again once it is back, by this pass or
+            // by the next request for it.
+            let ledger_workspace = Workspace::ledger_only(index_dir, &metadata);
+            if record_missing_root(&ledger_workspace) {
+                warn!(
+                    "not watching {}: the workspace directory no longer exists",
+                    metadata.root.display()
+                );
+            }
+            state.clear_watcher_failure(&metadata.id);
+            continue;
+        }
+        if state.watcher_backoff_error(&metadata.id).is_some() {
             continue;
         }
         let workspace = match Workspace::resolve_registered(&metadata.root) {
@@ -3065,6 +3102,14 @@ fn ensure_watcher(state: &DaemonState, workspace: &Workspace) -> Result<()> {
             state.clear_watcher_failure(&workspace.id);
             Ok(())
         }
+        Err(err) if crate::workspace::root_is_gone(&workspace.root) => {
+            // The ledger says why, but there is no backoff for a root that is
+            // gone: nothing retries it, and a root that comes back must be
+            // watched by the next request.
+            record_missing_root(workspace);
+            state.clear_watcher_failure(&workspace.id);
+            Err(err.context(missing_root_error(&workspace.root)))
+        }
         Err(err) => {
             let message = format!("{err:#}");
             let failures = state.record_watcher_failure(&workspace.id, message.clone());
@@ -3073,6 +3118,81 @@ fn ensure_watcher(state: &DaemonState, workspace: &Workspace) -> Result<()> {
                 "watcher registration failed ({failures} consecutive attempt{})",
                 if failures == 1 { "" } else { "s" }
             )))
+        }
+    }
+}
+
+/// What the job ledger, and through it `ig --status`, says about a workspace
+/// whose directory is gone.
+fn missing_root_error(root: &Path) -> String {
+    format!("workspace directory no longer exists: {}", root.display())
+}
+
+/// Record in the job ledger that a workspace is not watched because its
+/// directory is gone, so `ig --status` keeps showing the reason while nothing
+/// retries the root. Written once: later passes find the record and leave it.
+/// A successful registration replaces it. Returns whether this call wrote it.
+fn record_missing_root(workspace: &Workspace) -> bool {
+    let message = missing_root_error(&workspace.root);
+    let recorded = jobs::job_status(
+        workspace,
+        JobKind::Watcher,
+        jobs::WATCHER_HEARTBEAT_TTL_SECS,
+    )
+    .record
+    .is_some_and(|record| {
+        record.phase == "failed" && record.last_error.as_deref() == Some(message.as_str())
+    });
+    if recorded {
+        return false;
+    }
+    let _ = jobs::finish_job(workspace, JobKind::Watcher, "failed", Some(message));
+    true
+}
+
+/// Stop watching a workspace whose root is gone and drop the state kept for
+/// it: the watch backend with its thread and descriptors, the heartbeat and
+/// retry tasks, cached contexts, and resolution entries. The ledger records
+/// why. The index and `watch_enabled` stay, so a root that comes back is
+/// watched again by the next request or supervisor pass.
+fn release_watcher_for_missing_root(state: &DaemonState, control: &Arc<WatchControl>) {
+    let workspace = control.workspace.clone();
+    let registration = {
+        let mut watchers = state.watchers.lock();
+        // A root that already came back may own a newer registration.
+        if !watchers
+            .get(&workspace.id)
+            .is_some_and(|registration| Arc::ptr_eq(&registration.control, control))
+        {
+            return;
+        }
+        watchers.remove(&workspace.id)
+    };
+    let Some(registration) = registration else {
+        return;
+    };
+    stop_watcher(&workspace, registration);
+    record_missing_root(&workspace);
+    state.forget_workspace(&workspace);
+    daemon_log(&format!(
+        "stopped watching {}: the workspace directory no longer exists",
+        workspace.root.display()
+    ));
+}
+
+/// Release every watcher whose root is gone. The watch worker does this when
+/// an update fails, and this pass covers roots that vanished without an event
+/// reaching it, such as a renamed parent directory.
+fn release_watchers_for_missing_roots(state: &DaemonState) {
+    let controls = state
+        .watchers
+        .lock()
+        .values()
+        .map(|registration| registration.control.clone())
+        .collect::<Vec<_>>();
+    for control in controls {
+        if crate::workspace::root_is_gone(&control.workspace.root) {
+            release_watcher_for_missing_root(state, &control);
         }
     }
 }
@@ -4518,8 +4638,20 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     register_resolved_watcher(state, workspace)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Fails the next watcher registration on this thread, on every platform,
+    /// the way an exhausted inotify limit or a permission error would.
+    static FAIL_NEXT_WATCHER_REGISTRATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 fn register_resolved_watcher(state: &DaemonState, workspace: Workspace) -> Result<()> {
     crate::workspace_file::validate_root(&workspace.root)?;
+    #[cfg(test)]
+    if FAIL_NEXT_WATCHER_REGISTRATION.with(|fail| fail.replace(false)) {
+        anyhow::bail!("injected watcher registration failure");
+    }
 
     let mut watchers = state.watchers.lock();
     if let Some(registration) = watchers.get_mut(&workspace.id) {
@@ -5180,6 +5312,18 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             ..Default::default()
                         };
                         update_watcher_job(&control, success);
+                    }
+                    Err(_) if crate::workspace::root_is_gone(&control.workspace.root) => {
+                        // A deleted worktree or repository: retrying cannot
+                        // succeed, so release the watcher instead of keeping
+                        // its thread, descriptors, and retry loop forever.
+                        let release_state = state.clone();
+                        let release_control = control.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            release_watcher_for_missing_root(&release_state, &release_control);
+                        })
+                        .await;
+                        break;
                     }
                     Err(err) => {
                         let error = format!("{err:#}");
@@ -8403,7 +8547,7 @@ mod tests {
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
 
         let repo = tempdir().unwrap();
-        std::fs::write(repo.path().join("lib.rs"), "pub fn gone() {}\n").unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn unwatchable() {}\n").unwrap();
         let workspace = Workspace::resolve(repo.path()).unwrap();
         let metadata = WorkspaceMetadata {
             id: workspace.id.clone(),
@@ -8416,8 +8560,10 @@ mod tests {
         };
         workspace.ensure_dirs().unwrap();
         workspace.write_metadata(&metadata).unwrap();
-        // A root that vanished cannot be watched; registration must fail.
-        drop(repo);
+        // The root exists but cannot be watched, as with an exhausted inotify
+        // limit. A root that is gone takes no backoff; see
+        // `supervisor_records_unresolvable_root_in_the_ledger`.
+        FAIL_NEXT_WATCHER_REGISTRATION.with(|fail| fail.set(true));
 
         let state = test_state();
         let first = ensure_watcher(&state, &workspace).unwrap_err().to_string();
@@ -8524,15 +8670,35 @@ mod tests {
             .record
             .expect("missing root recorded in the job ledger");
         assert_eq!(record.phase, "failed");
-        assert!(record.last_error.is_some());
+        assert_eq!(
+            record.last_error,
+            Some(missing_root_error(&workspace.root)),
+            "status must say that the directory is missing"
+        );
         assert!(!workspace.is_watcher_alive());
-        assert!(state.watcher_backoff_error(&workspace.id).is_some());
         let status = crate::workspace::list_workspaces()
             .unwrap()
             .into_iter()
             .find(|status| status.id == workspace.id)
             .expect("workspace listed");
         assert_eq!(status.watcher_error, record.last_error);
+
+        // Nothing retries a root that is gone, so there is no backoff entry,
+        // and later passes and requests neither grow state nor rewrite the
+        // ledger.
+        assert!(state.watcher_backoff_error(&workspace.id).is_none());
+        assert!(state.watcher_recovery.lock().is_empty());
+        let ledger = std::fs::read(workspace.job_ledger_path()).unwrap();
+        supervise_watchers(&state);
+        let error = ensure_watcher(&state, &workspace).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("workspace directory no longer exists"),
+            "{error:#}"
+        );
+        supervise_watchers(&state);
+        assert!(state.watcher_recovery.lock().is_empty());
+        assert!(state.watchers.lock().is_empty());
+        assert_eq!(std::fs::read(workspace.job_ledger_path()).unwrap(), ledger);
     }
 
     #[tokio::test]
@@ -11595,6 +11761,104 @@ mod tests {
             "a stopped retry recreated the index"
         );
         assert!(!control.indexing.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn watcher_of_a_deleted_root_is_released_and_a_returning_root_is_watched_again() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("agent-worktree");
+        let create_root = || {
+            // Windows keeps a deleted directory's name until the watch
+            // backend has closed its handle.
+            for _ in 0..100 {
+                if std::fs::create_dir(&root).is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::fs::write(root.join("lib.rs"), "pub fn deleted_root_marker() {}\n").unwrap();
+        };
+        let delete_root = || {
+            std::fs::remove_dir_all(&root).unwrap();
+            // Windows reports a deleted directory as inaccessible, not as
+            // missing, until the watch backend has closed its handle.
+            for _ in 0..200 {
+                if crate::workspace::root_is_gone(&root) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        create_root();
+        let workspace = Workspace::resolve(&root).unwrap();
+        let watcher_record = || {
+            jobs::job_status(&workspace, JobKind::Watcher, 15)
+                .record
+                .expect("watcher record")
+        };
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        let _watcher_cleanup = WatcherCleanup(&state);
+        register_watcher(&state, &root).unwrap();
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        let control = state.watchers.lock()[&workspace.id].control.clone();
+        state.resolve_workspace(&workspace.root).unwrap();
+        state.note_full_index_run_start(&workspace.id);
+
+        // The supervisor pass releases a watcher whose root vanished, and does
+        // not start retrying the dead root.
+        delete_root();
+        supervise_watchers(&state);
+        assert!(!state.watcher_registered(&workspace.id));
+        assert!(!control.active.load(Ordering::Relaxed));
+        assert!(state.watcher_recovery.lock().is_empty());
+        assert!(state.full_index_run_starts.lock().is_empty());
+        assert!(state.resolved_workspaces.lock().is_empty());
+        assert!(
+            workspace.read_metadata().unwrap().unwrap().watch_enabled,
+            "a released watcher must come back with its root"
+        );
+        // Status keeps saying why the workspace is not watched.
+        let record = watcher_record();
+        assert_eq!(record.phase, "failed");
+        assert_eq!(record.last_error, Some(missing_root_error(&workspace.root)));
+
+        // The same path checked out again is watched again, which clears the
+        // recorded failure.
+        create_root();
+        supervise_watchers(&state);
+        assert!(state.watcher_registered(&workspace.id));
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        assert!(workspace.is_watcher_alive());
+        assert_eq!(watcher_record().last_error, None);
+
+        // The watch worker releases the watcher itself when an update fails
+        // because the root is gone, instead of retrying forever.
+        let control = state.watchers.lock()[&workspace.id].control.clone();
+        delete_root();
+        control.mark_paths_dirty([PathBuf::from("lib.rs")]);
+        // The release unregisters first and records the reason last.
+        let released = || {
+            !state.watcher_registered(&workspace.id)
+                && watcher_record().last_error == Some(missing_root_error(&workspace.root))
+        };
+        for _ in 0..600 {
+            if released() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            released(),
+            "watch worker kept a deleted root: {:?} {:?}",
+            control.snapshot_phase(),
+            watcher_record()
+        );
+        assert!(!control.active.load(Ordering::Relaxed));
+        assert!(state.watcher_recovery.lock().is_empty());
     }
 
     #[tokio::test]
