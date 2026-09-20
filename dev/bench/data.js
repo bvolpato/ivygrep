@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789872138926,
+  "lastUpdate": 1789874498018,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -66350,6 +66350,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2503.07,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6bb62b558b71f6877c3f82040447e1798489b91f",
+          "message": "[fix] Let long queries rank by their BM25 margin (#399)\n\n* [fix] Let long queries rank by their BM25 margin\n\nA plain BM25 ranking beat lexical mode by .06 to .19 nDCG@10 on long\nnatural-language queries. Rank votes are nearly flat at the top and the score\nterm is logarithmic, so a BM25 margin barely reached the fused score and\nstructural boosts decided the order. Long one-line prompts also kept code-first\npriors: signatures scored 5x, and a sentence-initial capital was inferred as a\nsymbol name.\n\nFor queries of 13 or more terms, the cut routing already uses, lexical\ncandidates also vote with their share of the best BM25 score. One-line prompts\nof that length score signatures like multi-line prose does, and sentence-case\nwords are not inferred as symbols. The vote never removes a result: files that\nclear the score filter only without it are appended after the kept results,\none chunk per file.\n\nHeld-out halves of seven public tasks gain .04 nDCG@10 on average in lexical\nmode, CodeSearchNet Java goes from .601 to .664, the self-repository gate is\nidentical, file localization is neutral, and MemoryQuest recall@20 is kept.\n\n* [fix] Keep each position's unvoted score through span promotion\n\nReview follow-ups for the long-query vote.\n\nSpan promotion swaps which chunk holds a ranked position and leaves the score\nthere. The unvoted score ratios were keyed by chunk and recorded before those\nswaps, so the unvoted filter pass could use another chunk's ratio for a swapped\nposition. Fusion now records each position's chunk before the promotions and\nre-keys the ratios after them.\n\nThe comments, docs, and changelog said the vote never removes a result. The\nrule is narrower: the vote never makes the score filter return a shorter list,\nand limit then truncates in voted order. Reserving slots for rescued files was\nmeasured and lowers MemoryQuest recall@20.\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-19T22:38:47-04:00",
+          "tree_id": "c22b089ab36621fb40d9e11c718dcd498e120dff",
+          "url": "https://github.com/bvolpato/ivygrep/commit/6bb62b558b71f6877c3f82040447e1798489b91f"
+        },
+        "date": 1789874497199,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 42905.29,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3574.58,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 53456.57,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 193881.77,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 12.14,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1828.21,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1475.89,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 2973.31,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 1928.71,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.61,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 126.06,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 5290.7,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1894.92,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1927.37,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3297.9,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3716.09,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 4461.75,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 523.04,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1876.25,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 389936.47,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 109.64,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 512953.61,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 21209.66,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 99372.71,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 165.61,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2117.92,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 324.74,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 738.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 5310.27,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 101.73,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 603.99,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2724.19,
             "unit": "µs"
           }
         ]
