@@ -72,8 +72,11 @@ fn dense_standing_weight(
 /// runner-up file by `DECISIVE_DENSE_LEAD_RATIO` gains a full first-place vote
 /// on top, which moves it to the first eligible position. Scores are then
 /// reassigned by position, so score thresholds and the learned reranker see
-/// the distribution they were tuned on. `hold_first` keeps a pinned
-/// exact-symbol definition.
+/// the distribution they were tuned on. `pinned_file` is the file that holds
+/// the exact-symbol definition a precise lookup pinned: dense evidence never
+/// moves it down. It is named by file, not by position, because the
+/// file-coherence boost runs after the pin and can put a file with more
+/// matching chunks above it; that file earned no protection.
 ///
 /// `unvoted_ratios` holds, per chunk, the share of its score that does not come
 /// from the long-query lexical vote; the score filter also judges candidates
@@ -87,7 +90,7 @@ pub(super) fn fuse_dense_file_order(
     dense: &HashMap<u64, f32>,
     unvoted_ratios: &mut HashMap<u64, f32>,
     standing_weight: f32,
-    hold_first: bool,
+    pinned_file: Option<u64>,
     admits: impl Fn(&RankedCandidate) -> bool,
 ) {
     struct FileEntry {
@@ -167,12 +170,13 @@ pub(super) fn fuse_dense_file_order(
             .total_cmp(&votes[left])
             .then_with(|| left.cmp(right))
     });
-    if hold_first
-        && files[0].eligible
-        && let Some(index) = order.iter().position(|position| *position == 0)
+    if let Some(pinned) = pinned_file.and_then(|file| positions.get(&file).copied())
+        && let Some(held) = slots.iter().position(|position| *position == pinned)
+        && let Some(fused) = order.iter().position(|position| *position == pinned)
+        && fused > held
     {
-        let first = order.remove(index);
-        order.insert(0, first);
+        let pinned = order.remove(fused);
+        order.insert(held, pinned);
     }
 
     // Per moved file: the factor to its new position's score, and the factor
@@ -681,7 +685,7 @@ pub(super) fn fuse_rrf_with_context(
         .collect::<Vec<_>>();
     tracing::trace!("fuse_score={:?}", fuse_started.elapsed());
 
-    let mut exact_symbol_pinned = false;
+    let mut exact_symbol_file = None;
     if is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens)
         && let Some(max_score) = ranked.iter().map(|item| item.score).reduce(f32::max)
     {
@@ -721,7 +725,7 @@ pub(super) fn fuse_rrf_with_context(
             })
         {
             exact.score = max_score + (max_score * 0.01).max(0.01);
-            exact_symbol_pinned = true;
+            exact_symbol_file = Some(path_key(&exact.chunk.file_path));
         }
     }
 
@@ -740,8 +744,8 @@ pub(super) fn fuse_rrf_with_context(
                 .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
         });
     }
-    // Late dense fusion. A definition the query names stays first, except in
-    // pasted source, whose identifiers are incidental.
+    // Late dense fusion. The file of a definition the query names is never
+    // moved down, except in pasted source, whose identifiers are incidental.
     if let Some(dense) = query.dense.as_ref()
         && let Some(standing_weight) = dense_standing_weight(dense.calibration, query, routing)
     {
@@ -751,7 +755,7 @@ pub(super) fn fuse_rrf_with_context(
             &dense.scores,
             &mut unvoted_ratios,
             standing_weight,
-            exact_symbol_pinned && !query.pasted_source,
+            exact_symbol_file.filter(|_| !query.pasted_source),
             admits,
         );
     }

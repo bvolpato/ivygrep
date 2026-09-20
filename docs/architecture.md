@@ -475,8 +475,11 @@ embedding model barely moved fused results. The late stage works on files:
   learned reranker see the distribution they were tuned on. For a long query a
   position has two scores, with and without the long-query lexical vote,
   because the score filter judges both; a moved file takes over both, so the
-  stage changes the order of results and not which ones are returned. A pinned
-  exact-symbol definition stays first except for pasted source.
+  stage changes the order of results and not which ones are returned. The file
+  that holds a pinned exact-symbol definition is never moved down, except for
+  pasted source. It is protected by file, not by position: the file-coherence
+  boost runs after the pin and can put a file with more matching chunks above
+  it, and that file is reordered like any other.
 
 The weights were fit on the reranker-fit half of public-core plus half of the
 stackoverflow-qa, codefeedback-mt, and apps samples of the `sota-challenge`

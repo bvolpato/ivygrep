@@ -10540,7 +10540,7 @@ export function registerCommands(p: Plugin) {
             &dense,
             &mut HashMap::new(),
             0.0,
-            false,
+            None,
             not_documentation,
         );
         assert_eq!(
@@ -10564,7 +10564,7 @@ export function registerCommands(p: Plugin) {
             &dense,
             &mut HashMap::new(),
             0.0,
-            false,
+            None,
             not_documentation,
         );
         assert_eq!(order(&documentation_leads), order(&ranked(&candidates)));
@@ -10579,7 +10579,7 @@ export function registerCommands(p: Plugin) {
             &dense,
             &mut HashMap::new(),
             0.0,
-            false,
+            None,
             not_documentation,
         );
         assert_eq!(order(&near_tie), order(&ranked(&candidates)));
@@ -10591,9 +10591,15 @@ export function registerCommands(p: Plugin) {
         ];
         let mut pinned = ranked(&sources_only);
         let dense = dense_for(&pinned, &[("third", 0.9), ("first", 0.5), ("second", 0.4)]);
-        fusion::fuse_dense_file_order(&mut pinned, &dense, &mut HashMap::new(), 0.0, true, |_| {
-            true
-        });
+        let pinned_file = Some(path_key(Path::new("src/first.rs")));
+        fusion::fuse_dense_file_order(
+            &mut pinned,
+            &dense,
+            &mut HashMap::new(),
+            0.0,
+            pinned_file,
+            |_| true,
+        );
         assert_eq!(
             order(&pinned)
                 .into_iter()
@@ -10601,6 +10607,187 @@ export function registerCommands(p: Plugin) {
                 .collect::<Vec<_>>(),
             vec!["first", "third", "second"],
             "a pinned exact-symbol definition stays first"
+        );
+    }
+
+    #[test]
+    fn late_dense_fusion_never_moves_the_pinned_file_down() {
+        let ranked = |scores: &[(&str, &str, f32)]| {
+            scores
+                .iter()
+                .map(|(id, path, score)| RankedCandidate {
+                    chunk: make_chunk_with_path(id, path, "fn body() {}"),
+                    score: *score,
+                    sources: SOURCE_LEXICAL,
+                })
+                .collect::<Vec<_>>()
+        };
+        let fuse = |pinned_file: Option<&str>, dense: &[(&str, f32)]| {
+            let mut items = ranked(&[
+                ("competitor", "src/competitor.rs", 4.0),
+                ("exact", "src/exact.rs", 3.0),
+                ("other", "src/other.rs", 2.0),
+                ("leader", "src/leader.rs", 1.0),
+            ]);
+            let dense = dense
+                .iter()
+                .map(|(id, score)| {
+                    let item = items
+                        .iter()
+                        .find(|item| item.chunk.chunk_id == *id)
+                        .expect("dense score names a ranked chunk");
+                    (item.chunk.vector_key, *score)
+                })
+                .collect::<HashMap<_, _>>();
+            fusion::fuse_dense_file_order(
+                &mut items,
+                &dense,
+                &mut HashMap::new(),
+                0.0,
+                pinned_file.map(|file| path_key(Path::new(file))),
+                |_| true,
+            );
+            items
+                .iter()
+                .map(|item| (item.chunk.chunk_id.clone(), item.score))
+                .collect::<Vec<_>>()
+        };
+        let named = |items: &[(&str, f32)]| {
+            items
+                .iter()
+                .map(|(id, score)| (id.to_string(), *score))
+                .collect::<Vec<_>>()
+        };
+        let leader_decisive = [
+            ("leader", 0.9),
+            ("other", 0.6),
+            ("competitor", 0.5),
+            ("exact", 0.4),
+        ];
+
+        // Unpinned, the decisive leader takes the first position and every
+        // other file moves down one.
+        assert_eq!(
+            fuse(None, &leader_decisive),
+            named(&[
+                ("leader", 4.0),
+                ("competitor", 3.0),
+                ("exact", 2.0),
+                ("other", 1.0)
+            ])
+        );
+        // The pinned file sits second, behind a file the coherence boost put
+        // first. It keeps its position and score; the file above it is not
+        // treated as pinned and moves like any other.
+        assert_eq!(
+            fuse(Some("src/exact.rs"), &leader_decisive),
+            named(&[
+                ("leader", 4.0),
+                ("exact", 3.0),
+                ("competitor", 2.0),
+                ("other", 1.0)
+            ])
+        );
+        // Dense evidence may still move the pinned file up.
+        assert_eq!(
+            fuse(
+                Some("src/exact.rs"),
+                &[
+                    ("exact", 0.9),
+                    ("other", 0.6),
+                    ("competitor", 0.5),
+                    ("leader", 0.4)
+                ]
+            ),
+            named(&[
+                ("exact", 4.0),
+                ("competitor", 3.0),
+                ("other", 2.0),
+                ("leader", 1.0)
+            ])
+        );
+        // A pinned file that is not among the candidates protects nothing.
+        assert_eq!(
+            fuse(Some("src/absent.rs"), &leader_decisive),
+            fuse(None, &leader_decisive)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn late_dense_fusion_protects_the_pinned_definition_not_the_file_above_it() {
+        // The query names `parse_config_file`, so its definition is pinned.
+        // The file-coherence boost runs after the pin and puts a file with
+        // five matching chunks above it. The dense tier decisively prefers a
+        // third file. Protection belongs to the file that holds the pinned
+        // definition: it keeps its position, and the coherence-boosted file is
+        // reordered like any other.
+        let query = "Overrides from the environment are ignored after the loader runs \
+                     parse_config_file.\n\nWhere do we merge the loader overrides into the parsed \
+                     config file settings?";
+        let exact = make_chunk_with_path(
+            "exact",
+            "src/parse.rs",
+            "fn parse_config_file(path: &Path) -> Config { read(path) }",
+        );
+        let competitor = (0..5)
+            .map(|index| {
+                make_chunk_with_path(
+                    &format!("competitor-{index}"),
+                    "src/loader.rs",
+                    "fn step() { /* the loader merges overrides from the environment into the \
+                     parsed config file settings */ }",
+                )
+            })
+            .collect::<Vec<_>>();
+        let leader = make_chunk_with_path(
+            "leader",
+            "src/overrides.rs",
+            "fn apply_overrides(config: &mut Config) { /* environment overrides */ }",
+        );
+        let fused = |dense: bool| {
+            let mut lexical = competitor
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| (chunk.clone(), 30.0 - index as f32))
+                .collect::<Vec<_>>();
+            lexical.push((exact.clone(), 6.0));
+            lexical.push((leader.clone(), 5.0));
+            let evidence = dense.then(|| {
+                let mut scores = vec![(&leader, 0.9), (&exact, 0.4)];
+                scores.extend(competitor.iter().map(|chunk| (chunk, 0.5)));
+                dense_evidence(&scores, DenseFusionCalibration::UNCALIBRATED)
+            });
+            fuse_rrf_with_dense(
+                FusionCandidates {
+                    lexical,
+                    semantic: vec![],
+                    literal: vec![],
+                    path: vec![],
+                    path_weight: 1.5,
+                    symbols: vec![(exact.clone(), SymbolCandidateKind::Exact)],
+                },
+                1.0,
+                query,
+                Some(20),
+                evidence,
+            )
+            .into_iter()
+            .map(|(chunk, _, _)| chunk.chunk_id)
+            .collect::<Vec<_>>()
+        };
+
+        let without_dense = fused(false);
+        assert_eq!(
+            without_dense[..2],
+            ["competitor-0", "exact"],
+            "the coherence boost puts the multi-chunk file above the pinned definition"
+        );
+        let with_dense = fused(true);
+        assert_eq!(
+            with_dense[..2],
+            ["leader", "exact"],
+            "the pinned definition keeps its position and the file above it is not held first"
         );
     }
 
