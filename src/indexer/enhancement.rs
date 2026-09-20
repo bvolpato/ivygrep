@@ -140,25 +140,61 @@ const GUARD_PAUSE: std::time::Duration = std::time::Duration::from_secs(10);
 /// One of the `IVYGREP_ENHANCE_MAX_WORKERS` places of a lane, held for as long
 /// as a worker runs. It is a lock on a file under the app home, so the limit
 /// holds across every process that starts workers (daemon, CLI, MCP), and a
-/// worker that dies frees its place.
-pub(crate) struct WorkerSlot(#[allow(dead_code)] File);
+/// worker that dies frees its place. `None` inside means the places cannot be
+/// locked on this host and the worker runs without one.
+pub(crate) struct WorkerSlot(#[allow(dead_code)] Option<File>);
 
-fn slot_path(lane: WorkerLane, index: usize) -> Result<std::path::PathBuf> {
-    let directory = crate::config::app_home()?.join("enhancement-slots");
-    fs::create_dir_all(&directory)?;
-    Ok(directory.join(format!("{}-{index}.lock", lane.name())))
+/// What one place of a lane looks like to a process that tries to take it.
+enum SlotProbe {
+    Free(File),
+    Held,
+    /// The slot directory or file cannot be created or opened, or the file
+    /// system does not support locks. Nobody can hold a place then, so the
+    /// limit cannot be enforced through the places.
+    Unusable(std::io::Error),
 }
 
-/// Take a free place of `lane` without waiting.
-pub(crate) fn try_acquire_worker_slot(lane: WorkerLane) -> Result<Option<WorkerSlot>> {
-    for index in 0..crate::config::enhance_max_workers() {
-        let file = OpenOptions::new()
+fn probe_slot(lane: WorkerLane, index: usize) -> SlotProbe {
+    let open = || -> std::io::Result<File> {
+        let directory = crate::config::app_home()
+            .map_err(std::io::Error::other)?
+            .join("enhancement-slots");
+        fs::create_dir_all(&directory)?;
+        OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
-            .open(slot_path(lane, index)?)?;
-        if fs2::FileExt::try_lock_exclusive(&file).is_ok() {
-            return Ok(Some(WorkerSlot(file)));
+            .open(directory.join(format!("{}-{index}.lock", lane.name())))
+    };
+    let file = match open() {
+        Ok(file) => file,
+        Err(error) => return SlotProbe::Unusable(error),
+    };
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => SlotProbe::Free(file),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            SlotProbe::Held
+        }
+        Err(error) => SlotProbe::Unusable(error),
+    }
+}
+
+/// Take a free place of `lane` without waiting. When the places cannot be
+/// locked at all, the worker runs without one, as every worker did before the
+/// limit existed: waiting would never end, and failing would leave the
+/// workspace without vectors. The daemon still keeps the workers it starts
+/// itself within the limit.
+pub(crate) fn try_acquire_worker_slot(lane: WorkerLane) -> Result<Option<WorkerSlot>> {
+    for index in 0..crate::config::enhance_max_workers() {
+        match probe_slot(lane, index) {
+            SlotProbe::Free(file) => return Ok(Some(WorkerSlot(Some(file)))),
+            SlotProbe::Held => {}
+            SlotProbe::Unusable(error) => {
+                tracing::warn!(
+                    "enhancement worker places cannot be locked ({error}); running without the IVYGREP_ENHANCE_MAX_WORKERS limit"
+                );
+                return Ok(Some(WorkerSlot(None)));
+            }
         }
     }
     Ok(None)
@@ -167,20 +203,11 @@ pub(crate) fn try_acquire_worker_slot(lane: WorkerLane) -> Result<Option<WorkerS
 /// Places of `lane` that nobody holds right now. The probe locks one place at
 /// a time and lets it go at once, so a worker that polls in that instant
 /// misses at most that place and looks again, and two probes can never hold
-/// all places between them.
+/// all places between them. A place that cannot be locked counts as free,
+/// because no worker can hold it either.
 pub(crate) fn free_worker_slots(lane: WorkerLane) -> usize {
     (0..crate::config::enhance_max_workers())
-        .filter(|index| {
-            slot_path(lane, *index)
-                .and_then(|path| {
-                    Ok(OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(false)
-                        .open(path)?)
-                })
-                .is_ok_and(|file| fs2::FileExt::try_lock_exclusive(&file).is_ok())
-        })
+        .filter(|index| !matches!(probe_slot(lane, *index), SlotProbe::Held))
         .count()
 }
 
@@ -378,6 +405,29 @@ mod worker_slot_tests {
             .unwrap();
         drop(slot);
         assert_eq!(free_worker_slots(WorkerLane::Neural), 1);
+        unsafe { std::env::remove_var("IVYGREP_ENHANCE_MAX_WORKERS") };
+    }
+
+    #[test]
+    #[serial]
+    fn places_that_cannot_be_locked_do_not_stop_enhancement() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        unsafe { std::env::set_var("IVYGREP_ENHANCE_MAX_WORKERS", "2") };
+        // A file sits where the slot directory belongs, so no place can be
+        // created, let alone locked. That is not a full lane.
+        fs::write(home.path().join("enhancement-slots"), b"").unwrap();
+
+        // The daemon sees capacity and starts workers within its own count.
+        assert_eq!(free_worker_slots(WorkerLane::Hash), 2);
+        // A worker runs without a place instead of waiting forever or failing.
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let first = admit_worker(&workspace, WorkerLane::Hash, WorkerStage::HashPass).unwrap();
+        let second = admit_worker(&workspace, WorkerLane::Hash, WorkerStage::HashPass).unwrap();
+        let third = admit_worker(&workspace, WorkerLane::Hash, WorkerStage::HashPass).unwrap();
+        assert!(first.is_some() && second.is_some() && third.is_some());
         unsafe { std::env::remove_var("IVYGREP_ENHANCE_MAX_WORKERS") };
     }
 
