@@ -108,9 +108,13 @@ uses lightweight local embeddings for faster startup and no model download,
 with lower semantic quality. Run `ig --help` for full reference.
 
 Standalone uppercase `AND`, `OR`, and `NOT` are Boolean operators. `ig "settings NOT render"` keeps
-only results without `render`, and a malformed expression such as a trailing `OR` fails with an error
-instead of guessing. To search those words as text, write them in lowercase or wrap them in backticks
-or quotes.
+only results without `render`, and a malformed one-line expression such as a trailing `OR` fails with an
+error instead of guessing. A query that spans several lines or has 13 or more words and is not a valid
+Boolean expression, such as pasted issue text with SQL or an emphasized `NOT`, is searched as plain text
+instead: the operator words count as ordinary words, and the results come with a warning that says so
+(on stderr for the CLI, in `warnings` for MCP and the Web UI). A prompt that does parse is still a
+Boolean query, so an uppercase `NOT` in it excludes the next term. To search those words as text, write
+them in lowercase or wrap them in backticks or quotes.
 
 Multi-line queries that read as pasted source rank the code that contains the snippet above one-line
 definition signatures that share a few of its identifiers. Multi-paragraph prompts, pasted issue text,

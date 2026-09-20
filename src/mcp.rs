@@ -34,7 +34,7 @@ use crate::protocol::{
     DaemonRequest, DaemonResponse, FileSearchResult, SearchHit, group_hits_by_file,
 };
 use crate::regex_search::regex_search_with_options;
-use crate::search::{SearchOptions, hybrid_search, literal_search};
+use crate::search::{SearchOptions, hybrid_search_outcome, literal_search};
 use crate::symbols::{SymbolSearchMode, search_symbols_with_options};
 use crate::workspace::{Workspace, WorkspaceMetadata, resolve_workspace_and_scope};
 
@@ -798,7 +798,7 @@ fn search_tool_schema() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Natural-language or keyword query. Uppercase AND, OR, and NOT between terms are Boolean operators (NOT excludes matches); write them in lowercase or wrap them in backticks to search them as words."},
+                "query": {"type": "string", "description": "Natural-language or keyword query. Uppercase AND, OR, and NOT between terms are Boolean operators (NOT excludes matches); write them in lowercase or wrap them in backticks to search them as words. A multi-line or 13+ word query that is not a valid Boolean expression is searched as plain text and says so in warnings; a shorter malformed expression is an error."},
                 "path": {"type": "string", "description": "Workspace path, subdirectory, or file path. Defaults to current directory."},
                 "output": {
                     "type": "string",
@@ -1910,7 +1910,10 @@ fn execute_ivygrep_search(
         // Load a neural query model only after neural vectors exist; a new
         // index returns hash results without downloading/loading model assets.
         let model = mcp_search_model(&workspace);
-        let hits = hybrid_search(&workspace, query, Some(model.as_ref()), &search_options)?;
+        let outcome =
+            hybrid_search_outcome(&workspace, query, Some(model.as_ref()), &search_options)?;
+        search_warnings = outcome.warnings;
+        let hits = outcome.hits;
         // Exact queries build hash vectors; natural-language queries also build neural vectors.
         let query_uses_neural = crate::search::query_uses_neural(query, false);
         if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()

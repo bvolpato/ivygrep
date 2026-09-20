@@ -3,13 +3,37 @@
 use super::presentation::{PreparedHit, prepare_hit};
 use super::*;
 
+/// Hits plus the warnings about how the query was read. The only one today is
+/// [`BOOLEAN_NOT_APPLIED_WARNING`].
 pub(crate) fn hybrid_search_with_context_and_neural_job(
     ctx: &SearchContext,
     workspace: &Workspace,
     query_text: &str,
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
+    neural_query_vector_job: Option<NeuralQueryVectorJob>,
+) -> Result<SearchOutcome> {
+    let mut warnings = Vec::new();
+    let hits = search_hits(
+        ctx,
+        workspace,
+        query_text,
+        embedding_model,
+        options,
+        neural_query_vector_job,
+        &mut warnings,
+    )?;
+    Ok(SearchOutcome { hits, warnings })
+}
+
+fn search_hits(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    options: &SearchOptions,
     mut neural_query_vector_job: Option<NeuralQueryVectorJob>,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<SearchHit>> {
     let query_text = query_text.trim();
     // An empty/whitespace query has no lexical or literal terms; without this
@@ -101,6 +125,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     if options.is_cancelled() {
         return Ok(Vec::new());
     }
+    let mut operators_as_text = false;
     let (boolean_docs, boolean_keys) = match boolean_candidates(
         ctx,
         query_text,
@@ -110,8 +135,13 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         &glob_path_filter,
         candidate_limit,
     )? {
-        Some(pool) => (Some(pool.documents), Some(pool.keys)),
-        None => (None, None),
+        BooleanSearch::Pool(pool) => (Some(pool.documents), Some(pool.keys)),
+        BooleanSearch::Absent => (None, None),
+        BooleanSearch::NotApplied => {
+            operators_as_text = true;
+            warnings.push(BOOLEAN_NOT_APPLIED_WARNING.to_string());
+            (None, None)
+        }
     };
     if boolean_keys.as_ref().is_some_and(|keys| keys.is_empty()) {
         return Ok(Vec::new());
@@ -251,6 +281,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         ],
         cancel_token: options.cancel_token.as_ref(),
         signature_scoring,
+        operators_as_text,
     };
     let collect_docs = |(lexical_query, query_candidate_limit): (&String, usize)| {
         executor.collect_docs(lexical_query, query_candidate_limit)

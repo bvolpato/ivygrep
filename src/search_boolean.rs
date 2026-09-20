@@ -8,6 +8,26 @@ pub(super) struct BooleanCandidates {
     pub keys: Arc<HashSet<u64>>,
 }
 
+/// How the explicit Boolean operators of a request apply to its search.
+pub(super) enum BooleanSearch {
+    /// No explicit operators: the ordinary expansion path.
+    Absent,
+    /// A Boolean expression: every retrieval signal stays inside this pool.
+    Pool(BooleanCandidates),
+    /// Operator words in a prompt or paste that is not a Boolean expression,
+    /// such as issue text with pasted SQL or an emphasized `NOT`. The ordinary
+    /// path reads them as text, and the results carry
+    /// [`BOOLEAN_NOT_APPLIED_WARNING`].
+    NotApplied,
+}
+
+/// Returned with the results of a search that read operator words as text (see
+/// [`BooleanSearch::NotApplied`]).
+pub(crate) const BOOLEAN_NOT_APPLIED_WARNING: &str = "\
+    Boolean operators not applied: this multi-line or long query is not a valid Boolean \
+    expression, so uppercase AND, OR, and NOT were searched as ordinary words. For a Boolean \
+    search, send a short one-line expression such as `alpha AND NOT beta`.";
+
 /// Keep identifier-like input and quoted/escaped/code-span words on the ordinary
 /// expansion path. An unfinished quote must not hide a Boolean operator from
 /// the strict parser, which validates the remaining grammar.
@@ -217,21 +237,13 @@ fn boolean_query_error(text: &str) -> String {
     )
 }
 
-/// A structured request has one bounded pool satisfying the original parsed
-/// query. Other signals may rank that pool, but may not admit new keys through
-/// alias expansion, literal/path recall, symbols, or vector similarity.
-pub(super) fn boolean_candidates(
+/// The strict parse of a request with explicit operators. It fails on syntax
+/// the grammar rejects and on clauses the index cannot serve, such as phrases.
+fn strict_boolean_query(
     ctx: &SearchContext,
     text: &str,
     signature_scoring: SignatureScoring,
-    options: &SearchOptions,
-    paths: &PathGlobMatcher,
-    glob_filter: &GlobPathQueryFilter,
-    limit: usize,
-) -> Result<Option<BooleanCandidates>> {
-    if !has_explicit_boolean_operators(text) {
-        return Ok(None);
-    }
+) -> Result<Box<dyn Query>> {
     let parser = lexical_query_parser(
         ctx,
         signature_scoring,
@@ -243,9 +255,37 @@ pub(super) fn boolean_candidates(
     if signature_scoring == SignatureScoring::Plain {
         boost_explicit_signature_clauses(&mut ast);
     }
-    let query = parser
+    parser
         .build_query_from_user_input_ast(ast)
-        .with_context(|| boolean_query_error(text))?;
+        .with_context(|| boolean_query_error(text))
+}
+
+/// A structured request has one bounded pool satisfying the original parsed
+/// query. Other signals may rank that pool, but may not admit new keys through
+/// alias expansion, literal/path recall, symbols, or vector similarity.
+///
+/// A one-line lookup that does not parse fails, and the error teaches the
+/// syntax. A prompt or paste (see `is_prompt_shaped`) that does not parse is
+/// not a Boolean request: its uppercase `AND`, `OR` or `NOT` is emphasis or
+/// pasted SQL, so it takes the ordinary path with a warning instead of failing.
+/// Input that parses is a Boolean request on any shape.
+pub(super) fn boolean_candidates(
+    ctx: &SearchContext,
+    text: &str,
+    signature_scoring: SignatureScoring,
+    options: &SearchOptions,
+    paths: &PathGlobMatcher,
+    glob_filter: &GlobPathQueryFilter,
+    limit: usize,
+) -> Result<BooleanSearch> {
+    if !has_explicit_boolean_operators(text) {
+        return Ok(BooleanSearch::Absent);
+    }
+    let query = match strict_boolean_query(ctx, text, signature_scoring) {
+        Ok(query) => query,
+        Err(_) if is_prompt_shaped(text) => return Ok(BooleanSearch::NotApplied),
+        Err(error) => return Err(error),
+    };
     let query = constrain_query_to_scope(query, &ctx.fields, options.scope_filter.as_ref())?;
     let query = constrain_query_to_glob_paths(query, &ctx.fields, glob_filter);
     let mut documents = Vec::new();
@@ -268,7 +308,7 @@ pub(super) fn boolean_candidates(
             }
         }
     }
-    Ok(Some(BooleanCandidates {
+    Ok(BooleanSearch::Pool(BooleanCandidates {
         documents,
         keys: Arc::new(keys),
     }))

@@ -953,7 +953,12 @@ async fn write_all_workspace_search_stream(
                     hit.file_path = root.join(&hit.file_path);
                 }
                 all_hits.append(&mut hits);
-                warnings.extend(workspace_warnings);
+                // A warning about how the query was read repeats per workspace.
+                for warning in workspace_warnings {
+                    if !warnings.contains(&warning) {
+                        warnings.push(warning);
+                    }
+                }
             }
             Ok(Err((root, err))) => {
                 let message = format!("{}: {err}", root.display());

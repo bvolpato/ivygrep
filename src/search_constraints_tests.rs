@@ -1,6 +1,7 @@
 use super::*;
 use crate::embedding::{HashEmbeddingModel, NeuralModelIdentity};
 use crate::indexer::{enhance_workspace_neural, index_workspace};
+use crate::search_routing::LONG_QUERY_MIN_TERMS;
 use crate::workspace::WorkspaceMetadata;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -514,6 +515,100 @@ fn public_boolean_constraints_reject_unsupported_syntax_without_relaxing() {
             hybrid_search(&workspace, query, None, &SearchOptions::default()).is_ok(),
             "escaped operator text was treated as Boolean syntax: {query}"
         );
+    }
+}
+
+fn gallery_workspace(root: &Path) -> Workspace {
+    fs::write(
+        root.join("gallery.php"),
+        "<?php\nfunction print_post_images($db, $slug) {\n    $stmt = $db->prepare('SELECT * FROM posts, images WHERE posts.id_post = images.post_id AND slug = :slug');\n    foreach ($stmt as $row) { echo $row['title']; }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("thumbs.php"),
+        "<?php\nfunction gallery_images_thumbnails() { return []; }\n",
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root).unwrap();
+    index_workspace(
+        &workspace,
+        &HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS),
+    )
+    .unwrap();
+    workspace
+}
+
+#[test]
+#[serial]
+fn public_boolean_constraints_read_operator_words_in_prompts_as_text() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let workspace = gallery_workspace(root.path());
+    let options = SearchOptions::default();
+    // Pasted SQL, an emphasized NOT, and a parenthesis that never closes: not a
+    // Boolean expression.
+    let question = "The gallery page should print each post title once with all related images (the query is below.\n\nSELECT * FROM posts, images\nWHERE posts.id_post = images.post_id\nAND slug = :slug\n\nInside the while loop I run a foreach over the images, but that does NOT work.";
+    // One line of plain words that ends in an operator.
+    let one_line =
+        "why does the gallery page print the post title again for every related image AND";
+    assert!(is_long_query(one_line) && !one_line.contains('\n'));
+    for prompt in [question, one_line] {
+        let outcome = hybrid_search_outcome(&workspace, prompt, None, &options)
+            .unwrap_or_else(|error| panic!("a prompt failed on Boolean syntax: {error:#}"));
+        assert!(
+            paths(&outcome.hits).contains(Path::new("gallery.php")),
+            "operator words were not searched as text: {prompt:?}: {:?}",
+            outcome.hits
+        );
+        assert_eq!(outcome.warnings, [BOOLEAN_NOT_APPLIED_WARNING]);
+    }
+
+    // A prompt that parses stays a Boolean request, without the warning.
+    let outcome =
+        hybrid_search_outcome(&workspace, "gallery images\nNOT thumbnails", None, &options)
+            .unwrap();
+    assert_eq!(
+        paths(&outcome.hits),
+        HashSet::from([PathBuf::from("gallery.php")])
+    );
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
+#[serial]
+fn public_boolean_constraints_keep_the_syntax_error_for_one_line_lookups() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let workspace = gallery_workspace(root.path());
+    let options = SearchOptions::default();
+    let words = |count: usize| {
+        (0..count)
+            .map(|index| format!("w{index}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    // `gallery`, `OR`, and the words: one term under the long-query cut.
+    let longest_lookup = format!("(gallery OR {}", words(LONG_QUERY_MIN_TERMS - 3));
+    assert!(!is_long_query(&longest_lookup));
+    for query in ["foo AND", "(a OR b", "NOT (", longest_lookup.as_str()] {
+        let error = hybrid_search_outcome(&workspace, query, None, &options)
+            .expect_err("a malformed one-line lookup must keep its error");
+        let message = error.to_string();
+        assert!(message.contains("invalid or unsupported Boolean query"));
+        assert!(message.contains("matching backticks or a fenced code block"));
+    }
+    // The same malformed text is a prompt once it is long or spans lines.
+    let shortest_prompt = format!("{longest_lookup} w");
+    assert!(is_long_query(&shortest_prompt));
+    for query in [shortest_prompt.as_str(), "(gallery OR\nimages"] {
+        let outcome = hybrid_search_outcome(&workspace, query, None, &options).unwrap();
+        assert!(
+            !outcome.hits.is_empty(),
+            "prompt lost its results: {query:?}"
+        );
+        assert_eq!(outcome.warnings, [BOOLEAN_NOT_APPLIED_WARNING]);
     }
 }
 

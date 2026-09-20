@@ -353,8 +353,18 @@ are restricted to a request-local pool of raw-query matches bounded by the
 normal lexical candidate budget. Semantic scoring ranks only keys in that pool;
 it cannot introduce an otherwise similar document that violates the constraint.
 Unsupported structured queries, including phrases requiring unindexed positions,
-fail explicitly. Quoted or escaped operator words and ordinary natural-language
-input keep their existing expansion behavior.
+fail explicitly when the request is a one-line lookup. Quoted or escaped operator
+words and ordinary natural-language input keep their existing expansion behavior.
+
+A prompt or paste that does not parse is not a Boolean request. The cut is the
+one signature scoring uses: multi-line input, or at least 13 raw terms
+(`is_prompt_shaped` in `search_routing.rs`). Its uppercase `AND`, `OR` or `NOT`
+is emphasis or pasted SQL, so it takes the ordinary expansion path with the
+operator words read as text, and the results carry a warning through the
+`warnings` field of search responses. The lexical pass does not hand that text to
+the Tantivy parser, which would apply the operators; it matches analyzer tokens,
+as for any text the parser rejects. Input that parses is a Boolean request on any
+shape, so the fallback changes results only for requests that used to fail.
 
 Multi-line queries that read as pasted source score lexical matches without the
 boosted signature field. Each pasted identifier would otherwise add a

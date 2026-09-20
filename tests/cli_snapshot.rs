@@ -125,6 +125,42 @@ fn cli_boolean_error_explains_how_to_search_pasted_code() {
 
 #[test]
 #[serial]
+fn cli_searches_a_pasted_prompt_with_operator_words_and_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    init_git_repo(&root);
+    std::fs::write(
+        root.join("query.sql"),
+        "SELECT * FROM records WHERE ready = 1 AND active = 1;\n",
+    )
+    .unwrap();
+    // The one-line query that fails in the test above, pasted into a question.
+    let prompt = "Why does this query return records that are NOT active?\n\nSELECT * FROM records WHERE ready = 1 AND";
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["--json", "--hash", "--no-watch", prompt])
+        .arg(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success()
+        .stderr(
+            predicates::str::contains("warning: Boolean operators not applied")
+                .and(predicates::str::contains("partial search").not()),
+        );
+    let groups: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(
+        groups
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| group["file_path"] == "query.sql"),
+        "{groups:#}"
+    );
+}
+
+#[test]
+#[serial]
 fn cli_force_add_preserves_watch_intent_without_daemon() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");

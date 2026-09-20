@@ -42,17 +42,20 @@ mod presentation;
 #[path = "search_semantic_visibility.rs"]
 mod semantic_visibility;
 
+pub(crate) use boolean::BOOLEAN_NOT_APPLIED_WARNING;
 use boolean::{
-    boolean_candidates, has_explicit_boolean_operators, lexical_query_parser, parse_lexical_query,
+    BooleanSearch, boolean_candidates, has_explicit_boolean_operators, lexical_query_parser,
+    parse_lexical_query,
 };
 use eligibility::CandidateEligibility;
 use file_cache::{CachedFileContent, FileContentCache};
 use semantic_visibility::{refill_semantic_matches, score_constrained_semantic_keys};
 
 use crate::search_routing::{
-    QueryIntent, QueryRouting, corpus_candidate_multiplier, is_long_query, neural_fallback_needed,
-    raw_query_terms,
+    QueryIntent, QueryRouting, corpus_candidate_multiplier, is_long_query, is_prompt_shaped,
+    neural_fallback_needed, raw_query_terms,
 };
+use crate::search_service::SearchOutcome;
 use crate::text::{build_code_analyzer, singularize_token, split_identifier_segments};
 use crate::vector_store::{
     HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorMatch, VectorStore,
@@ -1591,6 +1594,7 @@ fn simple_lexical_query(
     query: &str,
     conjunction_by_default: bool,
     signature_scoring: SignatureScoring,
+    operators_as_text: bool,
 ) -> Option<Box<dyn Query>> {
     if !query
         .chars()
@@ -1598,7 +1602,7 @@ fn simple_lexical_query(
     {
         return None;
     }
-    if has_explicit_boolean_operators(query) {
+    if !operators_as_text && has_explicit_boolean_operators(query) {
         return None;
     }
     lexical_terms_query(fields, query, conjunction_by_default, signature_scoring)
@@ -1671,6 +1675,9 @@ struct LexicalQueryExecutor<'a> {
     eligibility: [CandidateEligibility; 2],
     cancel_token: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
     signature_scoring: SignatureScoring,
+    /// The request is a prompt or paste that is not a Boolean expression (see
+    /// `BooleanSearch::NotApplied`), so its operator words are ordinary words.
+    operators_as_text: bool,
 }
 
 impl LexicalQueryExecutor<'_> {
@@ -1684,6 +1691,7 @@ impl LexicalQueryExecutor<'_> {
             lexical_query,
             self.conjunctive_numeric_query,
             self.signature_scoring,
+            self.operators_as_text,
         ) {
             query
         } else {
@@ -1691,16 +1699,25 @@ impl LexicalQueryExecutor<'_> {
             if terms.is_empty() {
                 return Ok(Vec::new());
             }
-            match parse_lexical_query(self.parser, lexical_query, self.signature_scoring) {
-                Ok(query) => query,
-                Err(err) => {
-                    tracing::debug!(
-                        query_variant = lexical_query,
-                        error = %err,
-                        "lexical query rejected by Tantivy parser"
-                    );
-                    if has_explicit_boolean_operators(lexical_query) {
-                        return Ok(Vec::new());
+            // The Tantivy parser would apply the operator words this request
+            // reads as text, so such a variant goes to its analyzer tokens like
+            // any text the parser rejects.
+            let operators_as_text =
+                self.operators_as_text && has_explicit_boolean_operators(lexical_query);
+            let parsed = (!operators_as_text)
+                .then(|| parse_lexical_query(self.parser, lexical_query, self.signature_scoring));
+            match parsed {
+                Some(Ok(query)) => query,
+                rejected => {
+                    if let Some(Err(err)) = rejected {
+                        tracing::debug!(
+                            query_variant = lexical_query,
+                            error = %err,
+                            "lexical query rejected by Tantivy parser"
+                        );
+                        if has_explicit_boolean_operators(lexical_query) {
+                            return Ok(Vec::new());
+                        }
                     }
                     if terms.len() > MAX_PUNCTUATED_TOKEN_QUERY_TERMS {
                         tracing::debug!(
@@ -1987,6 +2004,18 @@ pub fn hybrid_search(
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    hybrid_search_outcome(workspace, query_text, embedding_model, options)
+        .map(|outcome| outcome.hits)
+}
+
+/// [`hybrid_search`] plus the warnings about how the query was read, for
+/// callers that report them.
+pub(crate) fn hybrid_search_outcome(
+    workspace: &Workspace,
+    query_text: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    options: &SearchOptions,
+) -> Result<SearchOutcome> {
     let fallback_model;
     let reconciliation_model = if let Some(model) = embedding_model {
         model
@@ -2009,7 +2038,14 @@ pub fn hybrid_search(
         wants_semantic_vectors
             && embedding_model.is_some_and(|model| model.model_identity().is_some()),
     )?;
-    hybrid_search_with_context(&ctx, workspace, query_text, embedding_model, options)
+    hybrid_search_with_context_and_neural_job(
+        &ctx,
+        workspace,
+        query_text,
+        embedding_model,
+        options,
+        None,
+    )
 }
 
 pub(crate) fn query_uses_neural(query_text: &str, force_neural: bool) -> bool {
@@ -2031,6 +2067,7 @@ pub fn hybrid_search_with_context(
         options,
         None,
     )
+    .map(|outcome| outcome.hits)
 }
 
 fn natural_language_path_recall_query(query_text: &str) -> Option<String> {
@@ -2507,7 +2544,7 @@ impl SignatureScoring {
     fn for_query(query_text: &str, pasted_source: bool) -> Self {
         if pasted_source {
             Self::Omitted
-        } else if query_text.trim().contains('\n') || is_long_query(query_text) {
+        } else if is_prompt_shaped(query_text) {
             Self::Plain
         } else {
             Self::Boosted
@@ -8067,6 +8104,7 @@ mod tests {
                 eligibility: Default::default(),
                 cancel_token: None,
                 signature_scoring: SignatureScoring::Boosted,
+                operators_as_text: false,
             };
             let lexical_paths = executor
                 .collect_docs("OrchidRetryBudget", 1)
@@ -8189,6 +8227,7 @@ mod tests {
             eligibility: Default::default(),
             cancel_token: None,
             signature_scoring: SignatureScoring::Boosted,
+            operators_as_text: false,
         };
 
         let mut paths = executor
@@ -8890,11 +8929,12 @@ function sendfile(res, path, options, callback) {
 
         let scoring = SignatureScoring::Boosted;
         assert!(
-            simple_lexical_query(&fields, "calculate invoice_tax 42", false, scoring).is_some()
+            simple_lexical_query(&fields, "calculate invoice_tax 42", false, scoring, false)
+                .is_some()
         );
-        assert!(simple_lexical_query(&fields, "src/search.rs", false, scoring).is_none());
-        assert!(simple_lexical_query(&fields, "\"exact phrase\"", false, scoring).is_none());
-        assert!(simple_lexical_query(&fields, "alpha OR beta", false, scoring).is_none());
+        assert!(simple_lexical_query(&fields, "src/search.rs", false, scoring, false).is_none());
+        assert!(simple_lexical_query(&fields, "\"exact phrase\"", false, scoring, false).is_none());
+        assert!(simple_lexical_query(&fields, "alpha OR beta", false, scoring, false).is_none());
     }
 
     #[test]
@@ -12327,6 +12367,7 @@ export function registerCommands(p: Plugin) {
             eligibility: Default::default(),
             cancel_token: None,
             signature_scoring: SignatureScoring::Boosted,
+            operators_as_text: false,
         };
         let mut paths = executor
             .collect_docs(variant, 20)

@@ -424,23 +424,30 @@ impl App {
                 });
                 self.hits = outcome.hits;
                 self.grouped_files = group_hits_by_file(&self.hits, None);
+                // A warning about how the query was read does not make the
+                // results partial.
+                let (empty_label, label) = if outcome
+                    .warnings
+                    .iter()
+                    .all(|warning| warning == crate::search::BOOLEAN_NOT_APPLIED_WARNING)
+                {
+                    ("warning", "Warning")
+                } else {
+                    ("partial search", "Partial results")
+                };
                 if self.grouped_files.is_empty() {
                     self.file_list_state.select(None);
                     self.status_message = Some(if outcome.warnings.is_empty() {
                         "No results".to_string()
                     } else {
-                        format!(
-                            "No results; partial search: {}",
-                            outcome.warnings.join("; ")
-                        )
+                        format!("No results; {empty_label}: {}", outcome.warnings.join("; "))
                     });
                 } else if outcome.warnings.is_empty() {
                     self.file_list_state.select(Some(0));
                     self.status_message = None;
                 } else {
                     self.file_list_state.select(Some(0));
-                    self.status_message =
-                        Some(format!("Partial results: {}", outcome.warnings.join("; ")));
+                    self.status_message = Some(format!("{label}: {}", outcome.warnings.join("; ")));
                 }
                 self.snippet_index = 0;
                 self.file_view_cache = None;
@@ -584,7 +591,13 @@ fn local_search_detached(
         let mut ws_opts = options.clone();
         ws_opts.progress_tx = Some(std_tx.clone());
         ws_opts.cancel_token = Some(cancel_token.clone());
-        let result = crate::search::hybrid_search(&ws, query, Some(model.as_ref()), &ws_opts);
+        let result =
+            crate::search::hybrid_search_outcome(&ws, query, Some(model.as_ref()), &ws_opts).map(
+                |outcome| {
+                    batch.warn(outcome.warnings);
+                    outcome.hits
+                },
+            );
         batch.record(&ws.root, cli.all_indices, result);
     }
     let outcome = batch.finish(tui_limit(cli), HitOrdering::Score)?;

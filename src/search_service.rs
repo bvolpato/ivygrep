@@ -112,6 +112,16 @@ impl SearchBatch {
         }
     }
 
+    /// Adds warnings about how the query was read. They are the same for
+    /// every workspace, so each is kept once.
+    pub(crate) fn warn(&mut self, warnings: Vec<String>) {
+        for warning in warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+    }
+
     pub(crate) fn finish(
         mut self,
         limit: Option<usize>,

@@ -19,8 +19,8 @@ use crate::protocol::{
 };
 use crate::regex_search::{expand_regex_context_absolute, regex_search_with_options};
 use crate::search::{
-    MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_RESULT_LIMIT, SearchOptions, hybrid_search,
-    literal_search, validate_forced_neural_workspaces,
+    BOOLEAN_NOT_APPLIED_WARNING, MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_RESULT_LIMIT, SearchOptions,
+    hybrid_search_outcome, literal_search, validate_forced_neural_workspaces,
 };
 use crate::search_service::{HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
@@ -2074,13 +2074,14 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 if cli.all_indices {
                     workspace_options.scope_filter = None;
                 }
-                let result = search_workspace_with_optional_repair(
+                record_local_hybrid_search(
+                    &mut batch,
                     &ws,
-                    cli.skip_gitignore,
-                    !cli.all_indices,
-                    || hybrid_search(&ws, query, search_model.as_deref(), &workspace_options),
+                    cli.all_indices,
+                    query,
+                    search_model.as_deref(),
+                    &workspace_options,
                 );
-                batch.record(&ws.root, cli.all_indices, result);
             }
             finish_local_search(batch, backend_limit, HitOrdering::Score)?
         }
@@ -2210,7 +2211,13 @@ fn render_hits(
 
 fn report_search_warnings(warnings: &[String]) {
     for warning in warnings {
-        eprintln!("warning: partial search: {warning}");
+        // Every other warning reports a workspace or a deadline that cut the
+        // results short. This one reports how a complete search read the query.
+        if warning == BOOLEAN_NOT_APPLIED_WARNING {
+            eprintln!("warning: {warning}");
+        } else {
+            eprintln!("warning: partial search: {warning}");
+        }
     }
 }
 
@@ -2376,15 +2383,43 @@ fn local_fallback_search(
         if all_indices {
             workspace_options.scope_filter = None;
         }
-        let result = search_workspace_with_optional_repair(
+        record_local_hybrid_search(
+            &mut batch,
             &ws,
-            options.skip_gitignore,
-            !all_indices,
-            || hybrid_search(&ws, query, model.as_deref(), &workspace_options),
+            all_indices,
+            query,
+            model.as_deref(),
+            &workspace_options,
         );
-        batch.record(&ws.root, all_indices, result);
     }
     finish_local_search(batch, options.limit, HitOrdering::Score)
+}
+
+/// Records one workspace's hybrid search in a local batch, with the warnings
+/// about how the query was read.
+fn record_local_hybrid_search(
+    batch: &mut SearchBatch,
+    workspace: &Workspace,
+    all_indices: bool,
+    query: &str,
+    model: Option<&dyn crate::embedding::EmbeddingModel>,
+    options: &SearchOptions,
+) {
+    let mut query_warnings = Vec::new();
+    let result = search_workspace_with_optional_repair(
+        workspace,
+        options.skip_gitignore,
+        !all_indices,
+        || {
+            // The search runs again after an index repair.
+            query_warnings.clear();
+            let outcome = hybrid_search_outcome(workspace, query, model, options)?;
+            query_warnings = outcome.warnings;
+            Ok(outcome.hits)
+        },
+    );
+    batch.record(&workspace.root, all_indices, result);
+    batch.warn(query_warnings);
 }
 
 fn local_symbol_search_hits(
