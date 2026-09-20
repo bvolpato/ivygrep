@@ -27,6 +27,10 @@ class CIWorkflowTest(unittest.TestCase):
             "HTTP_PROXY=http://127.0.0.1:9", maxsplit=1
         )
         self.assertIn("uv run scripts/cache_neural_model.py", priming)
+        # CPU neural jobs validate the default profile, not a pinned older one.
+        self.assertEqual(builds.count('model_profile: "potion-code-v2"'), 2)
+        self.assertEqual(builds.count('validate_backend: "Model2Vec token mean via Rust"'), 2)
+        self.assertNotIn('model_profile: "static"', builds)
         self.assertNotIn("HTTP_PROXY", priming)
         self.assertIn("NO_PROXY=''", offline_load)
         self.assertIn("./scripts/e2e_neural_backend.sh", offline_load)

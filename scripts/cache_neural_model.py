@@ -25,6 +25,14 @@ class ModelProfile:
 
 
 PROFILES = {
+    # Default profile (`NeuralProfile::DEFAULT` in src/embedding.rs).
+    "potion-code-v2": ModelProfile(
+        repo_id="minishlab/potion-code-16M-v2",
+        revision="e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b",
+        assets=("tokenizer.json", "model.safetensors"),
+        weights_asset="model.safetensors",
+        weights_sha256="75cf7a6c2171b230ad19b1e7d8e0b1aee86da5a02af8e7cacedd9921d227623c",
+    ),
     "static": ModelProfile(
         repo_id="sentence-transformers/static-retrieval-mrl-en-v1",
         revision="f60985c706f192d45d218078e49e5a8b6f15283a",

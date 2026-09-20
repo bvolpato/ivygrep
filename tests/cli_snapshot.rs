@@ -186,7 +186,7 @@ fn cli_hardware_works_without_writable_app_storage() {
 
     assert!(text.contains("Installed build:"));
     assert!(text.contains("Recommended build:"));
-    assert!(text.contains("Model profile: static-retrieval-v1"));
+    assert!(text.contains("Model profile: potion-code-16m-v2"));
     assert!(text.contains("Profile acceleration: CPU optimized"));
 }
 
@@ -205,7 +205,7 @@ fn cli_hardware_json_is_machine_readable() {
     let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
     assert!(report["cpu_threads"].as_u64().unwrap() > 0);
-    assert_eq!(report["model_profile"], "static-retrieval-v1");
+    assert_eq!(report["model_profile"], "potion-code-16m-v2");
     assert_eq!(report["accelerator_applies_to_profile"], false);
     assert!(report["recommended_runtime_ready"].is_boolean());
     assert!(report["optimal_build"].is_boolean());

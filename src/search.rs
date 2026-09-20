@@ -16,7 +16,7 @@ use tantivy::query::{
 use tantivy::schema::IndexRecordOption;
 use tantivy::tokenizer::TokenStream;
 
-use crate::embedding::EmbeddingModel;
+use crate::embedding::{DenseFusionCalibration, EmbeddingModel};
 use crate::indexer::{
     IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key,
     fetch_chunk_metadata_by_vector_keys_batch, fetch_chunk_texts_by_vector_keys_batch,
@@ -59,7 +59,7 @@ use crate::vector_store::{
 };
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 pub(crate) use execution::hybrid_search_with_context_and_neural_job;
-use fusion::fuse_rrf_with_context;
+use fusion::{DenseEvidence, fuse_rrf_with_context};
 use presentation::{
     HitPresentation, PresentationQuery, should_use_compact_identifier_matching, snippet_bounds,
 };
@@ -4414,6 +4414,8 @@ struct FusionQuery<'a> {
     /// Multi-line pasted source or error output, whose `owner.member` calls are
     /// not requests for one definition. Search execution sets it once per query.
     pasted_source: bool,
+    /// Neural cosine of the candidate chunks, set when the neural tier ran.
+    dense: Option<DenseEvidence>,
 }
 
 impl<'a> FusionQuery<'a> {
@@ -4458,6 +4460,7 @@ impl<'a> FusionQuery<'a> {
             compact_candidate_text,
             pasted_error: false,
             pasted_source: false,
+            dense: None,
         }
     }
 }
@@ -4737,8 +4740,20 @@ fn fuse_rrf(
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+    fuse_rrf_with_dense(candidates, hash_direct_weight, query_text, limit, None)
+}
+
+#[cfg(test)]
+fn fuse_rrf_with_dense(
+    candidates: FusionCandidates,
+    hash_direct_weight: f32,
+    query_text: &str,
+    limit: Option<usize>,
+    dense: Option<DenseEvidence>,
+) -> Vec<(IndexedChunk, f32, Vec<String>)> {
     let mut query = FusionQuery::new(query_text);
     query.pasted_source = is_pasted_source_query(query_text);
+    query.dense = dense;
     let routing = QueryRouting::classify(query_text);
     fuse_rrf_with_context(
         None,
@@ -4997,6 +5012,51 @@ fn filter_semantic_only_scores(
         })
         .take(max_results)
         .collect()
+}
+
+/// Whether late dense fusion may move a direct candidate.
+///
+/// The candidate must pass the authority test `filter_meaningful_scores_with_query`
+/// applies: a promoted file the filter then drops would still set the adaptive
+/// score threshold. It must also have the most authoritative path role among
+/// the direct candidates. The heuristics rank implementation above
+/// documentation, tests, and support files at equal evidence, and prose queries
+/// sit closest to prose files, so cosine alone must not reverse that order.
+/// Secondary intent does not lift the rule: late dense fusion only sees pasted
+/// source and long prose, where "test", "docs", or "example" is usually
+/// incidental, and direct search still ranks those files.
+fn dense_promotion_test<'a>(
+    ranked: &[RankedCandidate],
+    query: &'a FusionQuery<'_>,
+) -> impl Fn(&RankedCandidate) -> bool + 'a {
+    let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
+    let implementation_intent = query_targets_implementation(&query.tokens);
+    let raw_terms = raw_query_terms(query.text);
+    let short_literal_lookup =
+        !raw_terms.is_empty() && raw_terms.len() <= 2 && !query.location_intent;
+    let floor_ceiling =
+        direct_candidate_authority_ceiling(ranked, &query.tokens, query.secondary_intent);
+    let role_authority = |item: &RankedCandidate| {
+        file_authority_score_for_path(lower_index_path(&item.chunk.file_path).as_ref())
+    };
+    let best_role_authority = ranked
+        .iter()
+        .filter(|item| has_direct_source(item.sources))
+        .map(role_authority)
+        .fold(0.0f32, f32::max);
+    move |item| {
+        role_authority(item) >= best_role_authority
+            && direct_candidate_has_enough_authority(
+                &item.chunk,
+                item.sources,
+                &query.tokens,
+                precise_query,
+                query.secondary_intent,
+                implementation_intent,
+                short_literal_lookup,
+                floor_ceiling,
+            )
+    }
 }
 
 fn has_direct_source(sources: SourceMask) -> bool {
@@ -6284,6 +6344,41 @@ mod tests {
         }
     }
 
+    /// Bag-of-tokens encoder that reports a static profile's identity.
+    struct TestStaticEmbeddingModel(crate::embedding::NeuralProfile);
+
+    impl EmbeddingModel for TestStaticEmbeddingModel {
+        fn dimensions(&self) -> usize {
+            256
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            let mut vector = vec![0.0; 256];
+            for token in tokenize_query(text) {
+                let idx = token.bytes().fold(7usize, |acc, b| acc * 31 + b as usize) % 256;
+                vector[idx] += 1.0;
+            }
+            vector
+        }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some(self.0.name())
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            static STATIC: std::sync::OnceLock<crate::embedding::NeuralModelIdentity> =
+                std::sync::OnceLock::new();
+            static POTION_V2: std::sync::OnceLock<crate::embedding::NeuralModelIdentity> =
+                std::sync::OnceLock::new();
+            Some(match self.0 {
+                crate::embedding::NeuralProfile::PotionCodeV2 => {
+                    POTION_V2.get_or_init(|| self.0.identity())
+                }
+                _ => STATIC.get_or_init(|| crate::embedding::NeuralProfile::Static.identity()),
+            })
+        }
+    }
+
     struct CountingTestEmbeddingModel384(std::sync::atomic::AtomicUsize);
 
     impl EmbeddingModel for CountingTestEmbeddingModel384 {
@@ -6725,6 +6820,165 @@ mod tests {
                 > 0,
             "forced neural routing must execute for non-ASCII queries"
         );
+    }
+
+    /// A definition direct search prefers (name, path, and symbol signals) next
+    /// to a short function the bag-of-tokens encoder prefers.
+    fn static_encoder_fixture(
+        model: &TestStaticEmbeddingModel,
+    ) -> (tempfile::TempDir, tempfile::TempDir, Workspace) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/upload_retry_policy.rs"),
+            "pub fn retry_failed_upload(client: &Client, request: &Request, attempts: usize) -> Result<Response> {\n    let mut delay = Duration::from_millis(250);\n    for attempt in 0..attempts {\n        match client.send(request) {\n            Ok(response) => return Ok(response),\n            Err(error) if attempt + 1 == attempts => return Err(error),\n            Err(_) => { sleep(delay); delay *= 2; }\n        }\n    }\n    unreachable!()\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("src/transfer.rs"),
+            "pub fn upload(failed: &Transfer) {\n    failed.retry();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("src/other.rs"),
+            "pub fn render_progress_bar(width: usize) -> String { \"#\".repeat(width) }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &hash_model).unwrap();
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, model).unwrap();
+        (tmp, home, workspace)
+    }
+
+    /// Multi-line prose with enough terms for the neural route.
+    const STATIC_ENCODER_QUERY: &str = "Uploads over a slow link fail and are never sent again.\n\nWhere do we retry a failed upload, and how long do we wait between attempts?";
+
+    fn first_hit_path(hits: &[SearchHit]) -> String {
+        hits[0].file_path.to_string_lossy().replace('\\', "/")
+    }
+
+    #[test]
+    #[serial]
+    fn calibrated_static_encoders_run_without_the_lexical_confidence_gate() {
+        for (profile, consulted) in [
+            (crate::embedding::NeuralProfile::PotionCodeV2, true),
+            (crate::embedding::NeuralProfile::Static, false),
+        ] {
+            let model = TestStaticEmbeddingModel(profile);
+            let (_tmp, _home, workspace) = static_encoder_fixture(&model);
+            let hits = hybrid_search(
+                &workspace,
+                STATIC_ENCODER_QUERY,
+                Some(&model),
+                &SearchOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                hits.iter().any(|hit| hit.neural_executed),
+                consulted,
+                "{}: confident lexical evidence skips only uncalibrated or costly encoders",
+                profile.name()
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn late_dense_fusion_ranks_a_decisive_corroborated_leader_first_end_to_end() {
+        let model = TestStaticEmbeddingModel(crate::embedding::NeuralProfile::Static);
+        let (_tmp, _home, workspace) = static_encoder_fixture(&model);
+        let direct = hybrid_search(
+            &workspace,
+            STATIC_ENCODER_QUERY,
+            Some(&HashEmbeddingModel::new(EMBEDDING_DIMENSIONS)),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            first_hit_path(&direct).ends_with("src/upload_retry_policy.rs"),
+            "fixture: direct search should prefer the definition, got {}",
+            first_hit_path(&direct)
+        );
+
+        let hits = hybrid_search(
+            &workspace,
+            STATIC_ENCODER_QUERY,
+            Some(&model),
+            &SearchOptions {
+                force_neural: true,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            first_hit_path(&hits).ends_with("src/transfer.rs"),
+            "the decisive dense leader, which lexical search also found, ranks first; got {}",
+            first_hit_path(&hits)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn index_built_with_the_previous_default_model_survives_a_default_change() {
+        unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
+        let previous = TestStaticEmbeddingModel(crate::embedding::NeuralProfile::Static);
+        let (_tmp, _home, workspace) = static_encoder_fixture(&previous);
+        let previous_identity = crate::embedding::NeuralProfile::Static.identity();
+        assert_eq!(
+            workspace.neural_model_identity(),
+            Some(previous_identity.clone())
+        );
+        let persisted_vectors = workspace.neural_vector_count();
+        assert!(persisted_vectors > 0);
+
+        // The binary now defaults to another profile.
+        let current = TestStaticEmbeddingModel(crate::embedding::NeuralProfile::configured());
+        assert_ne!(current.model_identity(), Some(&previous_identity));
+
+        // Search keeps working from lexical and hash evidence; the old neural
+        // vectors are ignored, never mixed with the new model's query vector.
+        let hits = hybrid_search(
+            &workspace,
+            STATIC_ENCODER_QUERY,
+            Some(&current),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(first_hit_path(&hits).ends_with("src/upload_retry_policy.rs"));
+        assert!(hits.iter().all(|hit| {
+            !hit.neural_executed && hit.sources.iter().all(|source| source != "neural")
+        }));
+        let forced = validate_forced_neural_workspaces(std::slice::from_ref(&workspace), true)
+            .expect_err("forced neural search must refuse the previous model's vectors");
+        assert!(forced.to_string().contains("incompatible neural model"));
+
+        // The index is healthy and reports what it holds; re-embedding is due.
+        let report = crate::doctor::inspect_workspace(&workspace);
+        assert!(report.healthy, "{:?}", report.findings);
+        assert_eq!(report.neural_profile, "static-retrieval-v1");
+        assert!(workspace.needs_neural_enhancement());
+
+        // The next enhancement rebuilds the neural store under the new identity.
+        crate::indexer::enhance_workspace_neural(&workspace, &current).unwrap();
+        assert_eq!(
+            workspace.neural_model_identity().as_ref(),
+            current.model_identity()
+        );
+        assert_eq!(workspace.neural_vector_count(), persisted_vectors);
+        assert!(!workspace.needs_neural_enhancement());
+        validate_forced_neural_workspaces(std::slice::from_ref(&workspace), true).unwrap();
+        let hits = hybrid_search(
+            &workspace,
+            STATIC_ENCODER_QUERY,
+            Some(&current),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(hits.iter().any(|hit| hit.neural_executed));
     }
 
     #[test]
@@ -10065,6 +10319,597 @@ export function registerCommands(p: Plugin) {
         assert!(
             (hash_first - neural_only).abs() < 1e-6,
             "a neural hit on a direct candidate should vote from its neural rank, not the merged rank: hash_first={hash_first} neural_only={neural_only}"
+        );
+    }
+
+    fn dense_evidence(
+        scores: &[(&IndexedChunk, f32)],
+        calibration: DenseFusionCalibration,
+    ) -> DenseEvidence {
+        DenseEvidence {
+            scores: scores
+                .iter()
+                .map(|(chunk, score)| (chunk.vector_key, *score))
+                .collect(),
+            calibration,
+        }
+    }
+
+    const DENSE_PROSE_QUERY: &str =
+        "The loader ignores my overrides.\n\nWhere do we parse the config file?";
+
+    fn fuse_config_candidates(
+        query: &str,
+        lexical: &[&IndexedChunk],
+        dense: Option<&[(&IndexedChunk, f32)]>,
+    ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+        fuse_rrf_with_dense(
+            FusionCandidates {
+                lexical: lexical
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, chunk)| ((*chunk).clone(), 20.0 - 6.0 * rank as f32))
+                    .collect(),
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![],
+            },
+            0.0,
+            query,
+            Some(10),
+            dense.map(|scores| dense_evidence(scores, DenseFusionCalibration::UNCALIBRATED)),
+        )
+    }
+
+    #[test]
+    #[serial]
+    fn late_dense_fusion_promotes_a_decisive_leader_direct_search_also_found() {
+        let strong = make_chunk_with_path(
+            "strong",
+            "src/strong.rs",
+            "fn parse_config_file() { /* parse the config file, loader overrides */ }",
+        );
+        let weak = make_chunk_with_path("weak", "src/weak.rs", "fn load() { /* config loader */ }");
+        let first = |results: &[(IndexedChunk, f32, Vec<String>)]| results[0].0.chunk_id.clone();
+
+        let without_dense = fuse_config_candidates(DENSE_PROSE_QUERY, &[&strong, &weak], None);
+        assert_eq!(first(&without_dense), "strong");
+
+        let decisive = fuse_config_candidates(
+            DENSE_PROSE_QUERY,
+            &[&strong, &weak],
+            Some(&[(&weak, 0.8), (&strong, 0.5)]),
+        );
+        assert_eq!(
+            first(&decisive),
+            "weak",
+            "a decisive dense lead on a file direct search found ranks it first"
+        );
+        assert!(
+            (decisive[0].1 - without_dense[0].1).abs() < 1e-6,
+            "scores are reassigned by position: {} != {}",
+            decisive[0].1,
+            without_dense[0].1
+        );
+
+        let near_tie = fuse_config_candidates(
+            DENSE_PROSE_QUERY,
+            &[&strong, &weak],
+            Some(&[(&weak, 0.8), (&strong, 0.78)]),
+        );
+        assert_eq!(
+            first(&near_tie),
+            "strong",
+            "a near-tied dense lead changes nothing for an uncalibrated model"
+        );
+
+        let short_query = fuse_config_candidates(
+            "parse config file",
+            &[&strong, &weak],
+            Some(&[(&weak, 0.8), (&strong, 0.5)]),
+        );
+        assert_eq!(
+            first(&short_query),
+            "strong",
+            "short natural-language queries skip late dense fusion"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn late_dense_fusion_never_promotes_documentation_or_files_direct_search_missed() {
+        let strong = make_chunk_with_path(
+            "strong",
+            "src/strong.rs",
+            "fn parse_config_file() { /* parse the config file, loader overrides */ }",
+        );
+        let weak = make_chunk_with_path("weak", "src/weak.rs", "fn load() { /* config loader */ }");
+        let guide = make_chunk_with_path(
+            "guide",
+            "docs/configuration.md",
+            "Where do we parse the config file? The loader ignores overrides.",
+        );
+        let unmatched = make_chunk_with_path("unmatched", "src/unmatched.rs", "fn other() {}");
+        let first = |results: &[(IndexedChunk, f32, Vec<String>)]| results[0].0.chunk_id.clone();
+
+        // Prose queries sit closest to prose files. Naming an identifier lowers
+        // the authority floor far enough for the guide to stay in the results,
+        // so the path-role rule, not the floor, keeps it from being promoted.
+        for query in [
+            DENSE_PROSE_QUERY,
+            "load_config ignores my overrides.\n\nWhere do we parse the config file?",
+        ] {
+            let documentation_leader = fuse_config_candidates(
+                query,
+                &[&strong, &weak, &guide],
+                Some(&[(&guide, 0.9), (&strong, 0.5), (&weak, 0.4)]),
+            );
+            assert_eq!(first(&documentation_leader), "strong", "{query:?}");
+            let baseline = fuse_config_candidates(query, &[&strong, &weak, &guide], None);
+            let ids_and_scores = |results: &[(IndexedChunk, f32, Vec<String>)]| {
+                results
+                    .iter()
+                    .map(|(chunk, score, _)| (chunk.chunk_id.clone(), *score))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                ids_and_scores(&documentation_leader),
+                ids_and_scores(&baseline),
+                "a documentation leader leaves results and scores untouched: {query:?}"
+            );
+        }
+
+        let uncorroborated = fuse_rrf_with_dense(
+            FusionCandidates {
+                lexical: vec![(strong.clone(), 20.0), (weak.clone(), 14.0)],
+                semantic: vec![(unmatched.clone(), 0.9, HashSet::from(["neural"]), Some(0.9))],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![],
+            },
+            0.0,
+            DENSE_PROSE_QUERY,
+            Some(10),
+            Some(dense_evidence(
+                &[(&unmatched, 0.9), (&strong, 0.5), (&weak, 0.4)],
+                DenseFusionCalibration::UNCALIBRATED,
+            )),
+        );
+        assert_eq!(
+            first(&uncorroborated),
+            "strong",
+            "a dense leader direct search did not find is not promoted"
+        );
+    }
+
+    #[test]
+    fn late_dense_fusion_reorders_eligible_files_among_their_own_positions() {
+        let ranked = |scores: &[(&str, &str, f32)]| {
+            scores
+                .iter()
+                .map(|(id, path, score)| RankedCandidate {
+                    chunk: make_chunk_with_path(id, path, "fn body() {}"),
+                    score: *score,
+                    sources: SOURCE_LEXICAL,
+                })
+                .collect::<Vec<_>>()
+        };
+        let order = |ranked: &[RankedCandidate]| {
+            ranked
+                .iter()
+                .map(|item| (item.chunk.chunk_id.clone(), item.score))
+                .collect::<Vec<_>>()
+        };
+        let dense_for = |ranked: &[RankedCandidate], scores: &[(&str, f32)]| {
+            scores
+                .iter()
+                .map(|(id, score)| {
+                    let item = ranked
+                        .iter()
+                        .find(|item| item.chunk.chunk_id == *id)
+                        .expect("dense score names a ranked chunk");
+                    (item.chunk.vector_key, *score)
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let candidates = [
+            ("guide", "docs/guide.md", 4.0),
+            ("first", "src/first.rs", 3.0),
+            ("second", "src/second.rs", 2.0),
+            ("third", "src/third.rs", 1.0),
+        ];
+        let not_documentation = |item: &RankedCandidate| !item.chunk.file_path.starts_with("docs");
+
+        // The decisive leader takes the first eligible position; the guide,
+        // which may not take part, keeps its place and its score.
+        let mut promoted = ranked(&candidates);
+        let dense = dense_for(
+            &promoted,
+            &[
+                ("third", 0.9),
+                ("guide", 0.8),
+                ("first", 0.5),
+                ("second", 0.4),
+            ],
+        );
+        fusion::fuse_dense_file_order(
+            &mut promoted,
+            &dense,
+            &mut HashMap::new(),
+            0.0,
+            None,
+            not_documentation,
+        );
+        assert_eq!(
+            order(&promoted),
+            vec![
+                ("guide".to_string(), 4.0),
+                ("third".to_string(), 3.0),
+                ("first".to_string(), 2.0),
+                ("second".to_string(), 1.0),
+            ]
+        );
+
+        // An ineligible leader, a near tie, and a pinned first file change nothing.
+        let mut documentation_leads = ranked(&candidates);
+        let dense = dense_for(
+            &documentation_leads,
+            &[("guide", 0.9), ("third", 0.8), ("first", 0.5)],
+        );
+        fusion::fuse_dense_file_order(
+            &mut documentation_leads,
+            &dense,
+            &mut HashMap::new(),
+            0.0,
+            None,
+            not_documentation,
+        );
+        assert_eq!(order(&documentation_leads), order(&ranked(&candidates)));
+
+        let mut near_tie = ranked(&candidates);
+        let dense = dense_for(
+            &near_tie,
+            &[("third", 0.9), ("first", 0.88), ("second", 0.4)],
+        );
+        fusion::fuse_dense_file_order(
+            &mut near_tie,
+            &dense,
+            &mut HashMap::new(),
+            0.0,
+            None,
+            not_documentation,
+        );
+        assert_eq!(order(&near_tie), order(&ranked(&candidates)));
+
+        let sources_only = [
+            ("first", "src/first.rs", 3.0),
+            ("second", "src/second.rs", 2.0),
+            ("third", "src/third.rs", 1.0),
+        ];
+        let mut pinned = ranked(&sources_only);
+        let dense = dense_for(&pinned, &[("third", 0.9), ("first", 0.5), ("second", 0.4)]);
+        let pinned_file = Some(path_key(Path::new("src/first.rs")));
+        fusion::fuse_dense_file_order(
+            &mut pinned,
+            &dense,
+            &mut HashMap::new(),
+            0.0,
+            pinned_file,
+            |_| true,
+        );
+        assert_eq!(
+            order(&pinned)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec!["first", "third", "second"],
+            "a pinned exact-symbol definition stays first"
+        );
+    }
+
+    #[test]
+    fn late_dense_fusion_never_moves_the_pinned_file_down() {
+        let ranked = |scores: &[(&str, &str, f32)]| {
+            scores
+                .iter()
+                .map(|(id, path, score)| RankedCandidate {
+                    chunk: make_chunk_with_path(id, path, "fn body() {}"),
+                    score: *score,
+                    sources: SOURCE_LEXICAL,
+                })
+                .collect::<Vec<_>>()
+        };
+        let fuse = |pinned_file: Option<&str>, dense: &[(&str, f32)]| {
+            let mut items = ranked(&[
+                ("competitor", "src/competitor.rs", 4.0),
+                ("exact", "src/exact.rs", 3.0),
+                ("other", "src/other.rs", 2.0),
+                ("leader", "src/leader.rs", 1.0),
+            ]);
+            let dense = dense
+                .iter()
+                .map(|(id, score)| {
+                    let item = items
+                        .iter()
+                        .find(|item| item.chunk.chunk_id == *id)
+                        .expect("dense score names a ranked chunk");
+                    (item.chunk.vector_key, *score)
+                })
+                .collect::<HashMap<_, _>>();
+            fusion::fuse_dense_file_order(
+                &mut items,
+                &dense,
+                &mut HashMap::new(),
+                0.0,
+                pinned_file.map(|file| path_key(Path::new(file))),
+                |_| true,
+            );
+            items
+                .iter()
+                .map(|item| (item.chunk.chunk_id.clone(), item.score))
+                .collect::<Vec<_>>()
+        };
+        let named = |items: &[(&str, f32)]| {
+            items
+                .iter()
+                .map(|(id, score)| (id.to_string(), *score))
+                .collect::<Vec<_>>()
+        };
+        let leader_decisive = [
+            ("leader", 0.9),
+            ("other", 0.6),
+            ("competitor", 0.5),
+            ("exact", 0.4),
+        ];
+
+        // Unpinned, the decisive leader takes the first position and every
+        // other file moves down one.
+        assert_eq!(
+            fuse(None, &leader_decisive),
+            named(&[
+                ("leader", 4.0),
+                ("competitor", 3.0),
+                ("exact", 2.0),
+                ("other", 1.0)
+            ])
+        );
+        // The pinned file sits second, behind a file the coherence boost put
+        // first. It keeps its position and score; the file above it is not
+        // treated as pinned and moves like any other.
+        assert_eq!(
+            fuse(Some("src/exact.rs"), &leader_decisive),
+            named(&[
+                ("leader", 4.0),
+                ("exact", 3.0),
+                ("competitor", 2.0),
+                ("other", 1.0)
+            ])
+        );
+        // Dense evidence may still move the pinned file up.
+        assert_eq!(
+            fuse(
+                Some("src/exact.rs"),
+                &[
+                    ("exact", 0.9),
+                    ("other", 0.6),
+                    ("competitor", 0.5),
+                    ("leader", 0.4)
+                ]
+            ),
+            named(&[
+                ("exact", 4.0),
+                ("competitor", 3.0),
+                ("other", 2.0),
+                ("leader", 1.0)
+            ])
+        );
+        // A pinned file that is not among the candidates protects nothing.
+        assert_eq!(
+            fuse(Some("src/absent.rs"), &leader_decisive),
+            fuse(None, &leader_decisive)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn late_dense_fusion_protects_the_pinned_definition_not_the_file_above_it() {
+        // The query names `parse_config_file`, so its definition is pinned.
+        // The file-coherence boost runs after the pin and puts a file with
+        // five matching chunks above it. The dense tier decisively prefers a
+        // third file. Protection belongs to the file that holds the pinned
+        // definition: it keeps its position, and the coherence-boosted file is
+        // reordered like any other.
+        let query = "Overrides from the environment are ignored after the loader runs \
+                     parse_config_file.\n\nWhere do we merge the loader overrides into the parsed \
+                     config file settings?";
+        let exact = make_chunk_with_path(
+            "exact",
+            "src/parse.rs",
+            "fn parse_config_file(path: &Path) -> Config { read(path) }",
+        );
+        let competitor = (0..5)
+            .map(|index| {
+                make_chunk_with_path(
+                    &format!("competitor-{index}"),
+                    "src/loader.rs",
+                    "fn step() { /* the loader merges overrides from the environment into the \
+                     parsed config file settings */ }",
+                )
+            })
+            .collect::<Vec<_>>();
+        let leader = make_chunk_with_path(
+            "leader",
+            "src/overrides.rs",
+            "fn apply_overrides(config: &mut Config) { /* environment overrides */ }",
+        );
+        let fused = |dense: bool| {
+            let mut lexical = competitor
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| (chunk.clone(), 30.0 - index as f32))
+                .collect::<Vec<_>>();
+            lexical.push((exact.clone(), 6.0));
+            lexical.push((leader.clone(), 5.0));
+            let evidence = dense.then(|| {
+                let mut scores = vec![(&leader, 0.9), (&exact, 0.4)];
+                scores.extend(competitor.iter().map(|chunk| (chunk, 0.5)));
+                dense_evidence(&scores, DenseFusionCalibration::UNCALIBRATED)
+            });
+            fuse_rrf_with_dense(
+                FusionCandidates {
+                    lexical,
+                    semantic: vec![],
+                    literal: vec![],
+                    path: vec![],
+                    path_weight: 1.5,
+                    symbols: vec![(exact.clone(), SymbolCandidateKind::Exact)],
+                },
+                1.0,
+                query,
+                Some(20),
+                evidence,
+            )
+            .into_iter()
+            .map(|(chunk, _, _)| chunk.chunk_id)
+            .collect::<Vec<_>>()
+        };
+
+        let without_dense = fused(false);
+        assert_eq!(
+            without_dense[..2],
+            ["competitor-0", "exact"],
+            "the coherence boost puts the multi-chunk file above the pinned definition"
+        );
+        let with_dense = fused(true);
+        assert_eq!(
+            with_dense[..2],
+            ["leader", "exact"],
+            "the pinned definition keeps its position and the file above it is not held first"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn late_dense_fusion_keeps_the_results_the_long_query_vote_keeps() {
+        // One clear BM25 leader and fifteen sessions with a fifth of its score;
+        // the long-query lexical vote stretches that gap, and the score filter
+        // returns all sixteen because it also judges unvoted scores. The dense
+        // tier prefers one tail session decisively. It may take the first
+        // position, but the displaced BM25 leader and the tail stay returned.
+        let lexical = (0..16)
+            .map(|index| {
+                let mut chunk = make_chunk_with_path(
+                    &format!("session-{index:02}"),
+                    &format!("notes/session_{index:02}.py"),
+                    "unrelated session notes",
+                );
+                chunk.kind = "Module".to_string();
+                (chunk, if index == 0 { 100.0 } else { 20.0 })
+            })
+            .collect::<Vec<_>>();
+        let dense_scores = lexical
+            .iter()
+            .enumerate()
+            .map(|(index, (chunk, _))| (chunk, if index == 5 { 0.9 } else { 0.5 }))
+            .collect::<Vec<_>>();
+        let prompt = "Given a string of text, count the vowels and consonants in each word and \
+                      report the frequency of every unique word";
+        assert!(is_long_query(prompt));
+        let ranked = fuse_rrf_with_dense(
+            FusionCandidates {
+                lexical: lexical.clone(),
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![],
+            },
+            1.0,
+            prompt,
+            Some(20),
+            Some(dense_evidence(
+                &dense_scores,
+                DenseFusionCalibration::UNCALIBRATED,
+            )),
+        );
+        let ids = ranked
+            .iter()
+            .map(|(chunk, _, _)| chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids[..2], ["session-05", "session-00"], "{ids:?}");
+        assert_eq!(
+            ranked.len(),
+            16,
+            "late dense fusion reorders results; it does not decide which ones are returned: {ids:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn late_dense_fusion_applies_the_calibrated_standing_weight() {
+        let chunks = (0..4)
+            .map(|index| {
+                make_chunk_with_path(
+                    &format!("file-{index}"),
+                    &format!("src/file_{index}.rs"),
+                    "fn handler() { /* retry the failed upload after a delay */ }",
+                )
+            })
+            .collect::<Vec<_>>();
+        // Lexical order 0, 1, 2, 3; dense order 3, 2, 1, 0 with no decisive lead.
+        let dense_scores = [0.60, 0.61, 0.62, 0.63];
+        let top = |query: &str, calibration: DenseFusionCalibration| {
+            fuse_rrf_with_dense(
+                FusionCandidates {
+                    lexical: chunks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, chunk)| (chunk.clone(), 12.0 - index as f32))
+                        .collect(),
+                    semantic: vec![],
+                    literal: vec![],
+                    path: vec![],
+                    path_weight: 1.5,
+                    symbols: vec![],
+                },
+                0.0,
+                query,
+                Some(10),
+                Some(dense_evidence(
+                    &chunks.iter().zip(dense_scores).collect::<Vec<_>>(),
+                    calibration,
+                )),
+            )
+            .first()
+            .map(|(chunk, _, _)| chunk.chunk_id.clone())
+            .expect("fusion returns a result")
+        };
+        let prose = "Uploads fail on a slow link.\n\nWhere do we retry the failed upload?";
+        assert_eq!(top(prose, DenseFusionCalibration::UNCALIBRATED), "file-0");
+        assert_eq!(
+            top(
+                prose,
+                DenseFusionCalibration {
+                    code: 0.0,
+                    prose: 4.0,
+                }
+            ),
+            "file-3",
+            "a standing weight lets the dense order outvote the direct order"
+        );
+        assert_eq!(
+            top(
+                prose,
+                DenseFusionCalibration {
+                    code: 4.0,
+                    prose: 0.0,
+                }
+            ),
+            "file-0",
+            "the weight of another query shape does not apply"
         );
     }
 

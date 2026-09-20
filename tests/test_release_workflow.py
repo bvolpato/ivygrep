@@ -181,7 +181,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("MSVCP", workflow)
         self.assertIn("scripts/e2e_cached_model.sh", windows_acceptance)
         self.assertIn("IVYGREP_RELEASE_HF_CACHE", windows_acceptance)
-        self.assertIn("StaticEmbedding token mean via Rust", windows_acceptance)
+        self.assertIn("Model2Vec token mean via Rust", windows_acceptance)
+        self.assertNotIn("StaticEmbedding token mean via Rust", windows_acceptance)
+        self.assertIn("PROFILE=potion-code-v2", workflow)
         self.assertIn("HTTP_PROXY=http://127.0.0.1:9", windows_acceptance)
 
     def test_release_accepts_exact_installer_inputs(self) -> None:

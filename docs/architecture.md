@@ -285,8 +285,16 @@ matching, the only pass that can find it.
 - neural ANN when routing requests it and compatible vectors exist
 - bounded memory probes for qualifying note-heavy implicit questions
 
-Neural retrieval is conditional. Lexical confidence can make it unnecessary,
-and lexical results remain available while neural vectors are incomplete.
+Neural retrieval is conditional, and lexical results remain available while
+neural vectors are incomplete. Identifier, path, and short literal routes skip
+it. On the remaining routes a transformer profile runs only when lexical
+confidence is low (top BM25 score under 2.0 or a top-two gap under 0.25),
+because its query embedding costs a forward pass. A static token-mean profile
+embeds a query with table lookups in about a millisecond; when its dense order
+also has measured standing value (`potion-code-16m-v2`, the default), it runs
+for every query on those routes and late dense fusion decides per query how far
+to trust it. `static-retrieval-v1` keeps the lexical-confidence gate: its extra
+first-stage votes lowered file-localization recall.
 `--force-neural` requires compatible persisted neural vectors and makes neural
 execution observable in structured output.
 
@@ -425,6 +433,62 @@ scores per file stay as the voted pass produced them. `limit` then truncates in
 voted order, so in a full list a file the vote ranks under the cutoff is
 ordinary reranking. On a notes benchmark whose questions need several sessions
 each, the vote without this rule returned shorter lists and lost recall@20.
+
+Late dense fusion runs after the heuristic scoring and before result filtering
+and the learned reranker. First-stage neural votes are one reciprocal-rank list
+of weight 1.0 among lexical, literal, path, and symbol lists worth several
+times more, and rank votes are nearly flat across fifty neighbours, so a better
+embedding model barely moved fused results. The late stage works on files:
+
+- Search execution scores every candidate chunk direct search found against
+  the neural query vector (exact cosine, a few hundred vectors), so a file has
+  a dense rank even when it is not among the nearest neighbours.
+- A file takes part only if lexical, literal, path, or symbol search found it,
+  it passes the authority test the result filter applies, and it has the most
+  authoritative path role among the direct candidates. Secondary intent does
+  not lift the role rule, because "test", "docs", or "example" in pasted source
+  or long prose is usually incidental. Cosine alone never promotes a file: on
+  the tuning split a dense leader direct search missed was the relevant file
+  4% of the time for the static profiles and 31% for a small transformer. The
+  role rule exists because prose queries sit closest to prose files: on the
+  file-localization benchmark every file a first version wrongly moved to the
+  top was a README, changelog, guide, or test. The authority test exists
+  because a promoted file the filter then drops still sets its adaptive score
+  threshold.
+- Pasted source and multi-line or long prose take part. Short natural-language
+  queries skip the stage: there a decisive dense leader was the relevant file
+  36-39% of the time on the tuning split, against 70-90% for the other shapes.
+- Eligible files are reordered among the positions they already hold; every
+  other file keeps its place, so dense evidence never moves documentation or
+  tests relative to the implementation in either direction. Each eligible file
+  keeps a reciprocal-rank vote for its current rank and gains
+  `weight / (60 + dense_rank)`, where `weight` is the profile's standing weight
+  for the query shape. `DenseFusionCalibration` in `src/embedding.rs` holds the
+  weights next to the profile: `potion-code-16m-v2` uses 0.25 for both shapes,
+  and `static-retrieval-v1` and unmeasured profiles use 0, because no constant
+  works across models.
+- Per query, a dense leader whose best cosine beats the runner-up file by a
+  ratio of 1.05 gains a full first-place vote and moves to the first eligible
+  position. The ratio held for static and transformer score scales alike;
+  smaller leads produced every measured loss.
+- Scores are reassigned by position, so the adaptive score filter and the
+  learned reranker see the distribution they were tuned on. For a long query a
+  position has two scores, with and without the long-query lexical vote,
+  because the score filter judges both; a moved file takes over both, so the
+  stage changes the order of results and not which ones are returned. The file
+  that holds a pinned exact-symbol definition is never moved down, except for
+  pasted source. It is protected by file, not by position: the file-coherence
+  boost runs after the pin and can put a file with more matching chunks above
+  it, and that file is reordered like any other.
+
+The weights were fit on the reranker-fit half of public-core plus half of the
+stackoverflow-qa, codefeedback-mt, and apps samples of the `sota-challenge`
+benchmark profile, and fit again, unchanged, after the long-query lexical vote
+landed. Those corpora have one answer per file and no path roles, so
+the eligibility rules above come from the file-localization benchmark and the
+self-repository relevance gate. To calibrate another embedding profile, fit the
+two weights the same way, keep a weight only when every tuning task stays
+non-negative, and check both repository benchmarks.
 
 `src/search_presentation.rs` selects representative spans, loads source text,
 and builds explanations. Output records source signals and whether neural
@@ -799,15 +863,20 @@ listener) and otherwise fails naming the active address.
 Every index can use lightweight hash vectors. Neural-enabled builds also support
 pinned model-backed profiles:
 
-- default 256-dimensional static retrieval profile
-- Model2Vec PotionCode profiles (`potion-code` v1, `potion-code-v2`)
+- default 256-dimensional Model2Vec profile `potion-code-16m-v2` (33.5 MB download)
+- `static-retrieval-v1`, the default through v1.2.16 (125.7 MB), and `potion-code` v1
 - optional 384-dimensional Candle transformer profiles
 - platform acceleration through Accelerate, Metal, or CUDA builds
 
 Profile name, model revision, dimensions, pooling, normalization, and weight
 digest form the neural identity. A mismatch prevents incompatible vectors from
-being reused. Model-backed profiles download pinned assets on first use unless
-the Hugging Face cache is already populated.
+being reused: search ignores them and answers from lexical, literal, symbol, and
+hash evidence, `--force-neural` reports the incompatible model, and the next
+neural enhancement deletes the store and re-embeds every chunk. A changed
+default profile therefore needs no index format bump. Model-backed profiles
+download pinned assets on first use unless the Hugging Face cache is already
+populated; `scripts/cache_neural_model.py --profile potion-code-v2` fills a
+cache for offline hosts.
 
 ## Environment variables
 
@@ -818,7 +887,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | Variable | Effect |
 | --- | --- |
 | `IVYGREP_HOME` | Data directory for indexes. Default `~/.local/share/ivygrep` on every OS, or `$XDG_DATA_HOME/ivygrep` when `XDG_DATA_HOME` is set. Empty values are ignored. |
-| `IVYGREP_MODEL_PROFILE` | Neural profile: `static-retrieval-v1` (default, 256 dimensions, CPU), the opt-in Model2Vec profiles `potion-code-16m-v1` and `potion-code-16m-v2` (also `potion-code-v2`), or transformer profiles `general`, `code`, and `code-hq` (384 dimensions). CUDA and Metal builds accelerate only transformer profiles. Unknown values use the default. Vectors from another profile are not reused. |
+| `IVYGREP_MODEL_PROFILE` | Neural profile: `potion-code-16m-v2` (default, also `potion-code-v2`; Model2Vec, 256 dimensions, CPU), the opt-in static profiles `static-retrieval-v1` (also `static`; the default through v1.2.16) and `potion-code-16m-v1`, or transformer profiles `general`, `code`, and `code-hq` (384 dimensions). CUDA and Metal builds accelerate only transformer profiles. Unknown values use the default. Vectors from another profile are not reused. |
 | `IVYGREP_CUDA_LIBRARY_PATH` | Library search path `ig hardware` checks for CUDA runtime libraries, in place of `LD_LIBRARY_PATH`, before falling back to `ldconfig`. `install.sh` instead treats it as an exclusive colon-separated search path, without checking `ldconfig` or standard CUDA directories; an incomplete override can select the portable build. Empty values are ignored. |
 | `IVYGREP_AGENT_HOME` | Home directory `ig agent install` and `ig agent doctor` use to find client configuration files. Default: the user's home directory. |
 | `IVYGREP_RERANKER` | `learned` (default; also `auto`) or `deterministic` (also `disabled`, `off`). Unknown values report an error in status and use `learned`. |

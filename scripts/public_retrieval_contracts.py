@@ -245,8 +245,9 @@ DIGEST_ENVIRONMENT = (
     "CUDA_VISIBLE_DEVICES",
     "RUST_LOG",
 )
+# The empty key is the binary's default (`NeuralProfile::DEFAULT` in src/embedding.rs).
 PROFILE_ALIASES = {
-    "": "static-retrieval-v1",
+    "": "potion-code-16m-v2",
     "static": "static-retrieval-v1",
     "portable": "static-retrieval-v1",
     "static-retrieval": "static-retrieval-v1",

@@ -5,7 +5,7 @@
 //! | Model | Feature | Dimensions | Quality | Binary size |
 //! |-------|---------|------------|---------|-------------|
 //! | [`HashEmbeddingModel`] | *(always)* | 256 | Moderate — token overlap heuristic | Tiny |
-//! | Static retrieval embedding | `neural` | 256 | High — portable learned retrieval | Model download on first use |
+//! | Static token-mean embedding (default `potion-code-16m-v2`) | `neural` | 256 | High — portable learned retrieval | Model download on first use |
 //! | [`CandleEmbeddingModel`] | `neural` | 384 | Optional transformer profiles | Model download on first use |
 //!
 //! Use [`create_model`] to build the right model based on the `neural` flag.
@@ -46,7 +46,78 @@ pub struct NeuralModelIdentity {
     pub model_weights_sha256: String,
 }
 
+/// How far late dense fusion trusts one embedding profile's file order.
+///
+/// Each field is the standing vote of the dense order for one query shape,
+/// relative to a vote of 1.0 for the order direct search and the ranking
+/// heuristics produced. Zero leaves only the per-query signal: a decisive
+/// dense leader that direct search also found. Values are fit on the tuning
+/// split described in `docs/architecture.md`; no constant works across
+/// models, so a profile without a measurement gets none. Short
+/// natural-language queries have no weight: late dense fusion skips them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DenseFusionCalibration {
+    /// Pasted source: code-to-code lookups.
+    pub code: f32,
+    /// Multi-line or long prose: issues, questions, error reports.
+    pub prose: f32,
+}
+
+impl DenseFusionCalibration {
+    pub const UNCALIBRATED: Self = Self {
+        code: 0.0,
+        prose: 0.0,
+    };
+
+    pub fn for_profile(profile: &str) -> Self {
+        match profile {
+            "potion-code-16m-v2" => Self {
+                code: 0.25,
+                prose: 0.25,
+            },
+            // static-retrieval-v1 was measured too: a standing weight gained
+            // nothing on the tuning split, so it keeps the per-query signal only.
+            _ => Self::UNCALIBRATED,
+        }
+    }
+
+    /// Whether this profile's dense order has measured standing value.
+    pub fn has_standing_weight(self) -> bool {
+        self.code > 0.0 || self.prose > 0.0
+    }
+}
+
+impl NeuralModelIdentity {
+    /// Static token-mean encoders embed a query with table lookups, about a
+    /// millisecond. Transformer profiles cost a forward pass.
+    pub fn query_embedding_is_cheap(&self) -> bool {
+        matches!(
+            self.architecture.as_str(),
+            "static-embedding" | "model2vec-static"
+        )
+    }
+
+    pub fn dense_fusion_calibration(&self) -> DenseFusionCalibration {
+        DenseFusionCalibration::for_profile(&self.profile)
+    }
+
+    /// Whether search consults this model for every query whose route allows
+    /// neural retrieval, instead of only when lexical confidence is low. That
+    /// takes a cheap query embedding and a dense order with measured standing
+    /// value. For `static-retrieval-v1` the extra first-stage votes lowered
+    /// file-localization recall, so it keeps the lexical-confidence gate.
+    pub fn consult_for_every_neural_route(&self) -> bool {
+        self.query_embedding_is_cheap() && self.dense_fusion_calibration().has_standing_weight()
+    }
+}
+
 impl NeuralProfile {
+    /// Profile used when `IVYGREP_MODEL_PROFILE` is unset or unknown. It has the
+    /// best fused relevance of the static encoders and the smallest download.
+    /// Persisted vectors from another profile are ignored by search and rebuilt
+    /// by the next neural enhancement, because the model identity differs.
+    pub const DEFAULT: Self = Self::PotionCodeV2;
+
     pub fn configured() -> Self {
         match std::env::var("IVYGREP_MODEL_PROFILE")
             .unwrap_or_default()
@@ -62,7 +133,9 @@ impl NeuralProfile {
             "general" | "minilm" | "all-minilm-l6-v2" => Self::General,
             "code" | "codesearchnet" | "code-minilm-l6-v1" => Self::Code,
             "code-hq" | "code-high-quality" | "code-minilm-l12-v1" => Self::CodeHighQuality,
-            _ => Self::Static,
+            // Unset and unknown values use the default profile. `static`,
+            // `static-retrieval-v1`, and its other aliases keep the previous default.
+            _ => Self::DEFAULT,
         }
     }
 
@@ -344,8 +417,8 @@ pub fn model_dimensions(hash: bool) -> usize {
 
 /// Create the appropriate embedding model.
 ///
-/// By default (when `hash` is `false`), returns the portable static retrieval
-/// model selected by the public embedding bake-off.
+/// By default (when `hash` is `false`), returns the configured neural profile:
+/// `NeuralProfile::DEFAULT` unless `IVYGREP_MODEL_PROFILE` selects another.
 /// Pass `hash = true` to use the lightweight [`HashEmbeddingModel`] instead.
 ///
 /// If the `neural` feature is not compiled in, always falls back to hash.
@@ -1382,7 +1455,25 @@ mod tests {
     #[serial]
     fn neural_profile_selection_is_explicit_and_stable() {
         unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
-        assert_eq!(NeuralProfile::configured(), NeuralProfile::Static);
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::PotionCodeV2);
+        assert_eq!(configured_neural_profile_name(), "potion-code-16m-v2");
+        unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "not-a-profile") };
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::PotionCodeV2);
+
+        // The previous default stays selectable under every name it had.
+        for pinned in [
+            "static",
+            "portable",
+            "static-retrieval",
+            "static-retrieval-v1",
+        ] {
+            unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", pinned) };
+            assert_eq!(
+                NeuralProfile::configured(),
+                NeuralProfile::Static,
+                "{pinned}"
+            );
+        }
         assert_eq!(NeuralProfile::Static.name(), "static-retrieval-v1");
         assert_eq!(NeuralProfile::Static.dimensions(), 256);
         assert_eq!(NeuralProfile::General.name(), "general");
@@ -1553,6 +1644,52 @@ mod tests {
         );
         assert_ne!(potion_v2.profile, potion.profile);
         assert_ne!(potion_v2.model_weights_sha256, potion.model_weights_sha256);
+    }
+
+    #[test]
+    fn dense_fusion_calibration_is_per_profile_and_defaults_to_none() {
+        let potion_v2 = NeuralProfile::PotionCodeV2.identity();
+        let calibration = potion_v2.dense_fusion_calibration();
+        assert!(calibration.code > 0.0 && calibration.prose > 0.0);
+        assert!(calibration.has_standing_weight());
+        assert!(potion_v2.consult_for_every_neural_route());
+        for profile in [
+            NeuralProfile::Static,
+            NeuralProfile::PotionCode,
+            NeuralProfile::General,
+            NeuralProfile::Code,
+            NeuralProfile::CodeHighQuality,
+        ] {
+            assert_eq!(
+                profile.identity().dense_fusion_calibration(),
+                DenseFusionCalibration::UNCALIBRATED,
+                "{}",
+                profile.name()
+            );
+            assert!(!profile.identity().consult_for_every_neural_route());
+        }
+        assert_eq!(
+            DenseFusionCalibration::for_profile("a-profile-added-later"),
+            DenseFusionCalibration::UNCALIBRATED
+        );
+    }
+
+    #[test]
+    fn only_static_encoders_have_cheap_query_embeddings() {
+        for profile in [
+            NeuralProfile::Static,
+            NeuralProfile::PotionCode,
+            NeuralProfile::PotionCodeV2,
+        ] {
+            assert!(profile.identity().query_embedding_is_cheap());
+        }
+        for profile in [
+            NeuralProfile::General,
+            NeuralProfile::Code,
+            NeuralProfile::CodeHighQuality,
+        ] {
+            assert!(!profile.identity().query_embedding_is_cheap());
+        }
     }
 
     /// `parallel_embed` must return vectors in input order no matter how the
