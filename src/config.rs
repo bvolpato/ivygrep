@@ -115,6 +115,20 @@ pub fn mcp_index_wait() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+pub const DEFAULT_ENHANCE_MAX_WORKERS: usize = 2;
+
+/// Background enhancement workers that may run at once per tier, across every
+/// workspace of this app home. `IVYGREP_ENHANCE_MAX_WORKERS` overrides the
+/// default of two; values that are not a positive integer use the default.
+pub fn enhance_max_workers() -> usize {
+    env::var("IVYGREP_ENHANCE_MAX_WORKERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|workers| *workers > 0)
+        .unwrap_or(DEFAULT_ENHANCE_MAX_WORKERS)
+        .min(64)
+}
+
 pub const DEFAULT_INDEX_GC_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// How long a workspace root must stay missing before its index is removed.

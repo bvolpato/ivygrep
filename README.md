@@ -123,6 +123,9 @@ still embed the original text.
 On macOS laptops, background neural enhancement pauses on battery power (`ig --status`
 shows `Paused: Battery Power`); set `IVYGREP_ENHANCE_ON_BATTERY=1` to keep it running.
 The lightweight hash tier keeps computing on battery so semantic results stay available.
+However many workspaces change at once, at most two hash and two neural enhancement
+workers run at a time (`IVYGREP_ENHANCE_MAX_WORKERS`); the rest wait in the daemon, and the
+workspace searched or edited last goes first.
 
 ## Search notes and memories
 

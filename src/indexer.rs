@@ -44,7 +44,10 @@ mod storage;
 use compression::compress_text;
 pub use compression::{decompress_text, try_decompress_text};
 use enhancement::IndexLock;
-pub(crate) use enhancement::{EnhancementSnapshot, EnhancementSuperseded};
+pub(crate) use enhancement::{
+    EnhancementSnapshot, EnhancementSuperseded, QUEUED_PHASE, WorkerLane, WorkerStage,
+    admit_worker, free_worker_slots, readmit_for_neural_pass,
+};
 use git_state::{
     clean_git_checkout_state, files_have_same_contents, indexed_git_state_path,
     record_indexed_git_state, refresh_clean_base_metadata,

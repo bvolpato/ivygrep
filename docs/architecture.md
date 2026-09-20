@@ -793,8 +793,27 @@ service manager is never redirected.
 
 Search responses never wait on background enhancement bookkeeping. After the
 hits are computed, the daemon schedules a blocking task that checks whether
-hash or neural enhancement is needed and triggers the worker, at most once per
+hash or neural enhancement is needed and queues the workspace, at most once per
 workspace and mode every ten seconds.
+
+Enhancement runs in worker processes, and at most `IVYGREP_ENHANCE_MAX_WORKERS`
+of them (default 2) run at once per lane, for all workspaces of the app home.
+Hash workers and neural workers are separate lanes, and a workspace that waits
+for a neural place gets its hash vectors from a hash worker meanwhile, so a
+fresh worktree has semantic search without waiting behind a long neural run.
+The daemon keeps the workspaces that need work in a queue
+(`enhancement_queue.rs`) and starts a worker only when a worker place is free.
+The workspace that was searched or edited last goes first, and a workspace
+whose directory is gone leaves the queue. A worker takes its place through a
+lock file under `$IVYGREP_HOME/enhancement-slots/` before it loads a model or
+opens a store. So the limit also holds for workers that `ig` or an MCP session
+starts without the daemon, a worker that dies frees its place, and a worker
+that finds the host under memory, battery, or load pressure waits with nothing
+loaded and without a place. The guards follow the pass, not the worker: a
+neural worker starts with the hash pass under the hash tier's guards, so hash
+vectors are built on battery, and checks the neural tier's guards before it
+loads the model; held back there, it gives up its place and takes one again
+when the guards allow. `--wait-for-enhancement` says when its worker is queued.
 
 Heavy work is bounded by a CPU-permit semaphore sized to the core count. Index,
 search, and watcher tasks take their per-workspace lease on the blocking pool
@@ -1009,6 +1028,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_DISABLE_QUERY_CACHE` | Set to disable the daemon query-result cache. |
 | `IVYGREP_ENHANCE_ON_BATTERY` | `1`, `true`, `yes`, or `on` keeps neural enhancement running on battery power (macOS). The hash tier never pauses for battery. |
 | `IVYGREP_ENHANCE_MAX_LOAD_RATIO` | Load-average multiple of CPU count that pauses background enhancement on macOS and Linux. Default `2.0`; `0` or below disables the check. |
+| `IVYGREP_ENHANCE_MAX_WORKERS` | Background enhancement worker processes that run at once, per lane (hash, neural), across all workspaces of the app home. Default `2`, at most `64`. Further workspaces wait in the daemon's queue, most recently searched or edited first. The daemon reads it from the environment it was started with. |
 | `IVYGREP_WEB_EDITOR`, `IVYGREP_EDITOR` | Command the Web UI uses to open files, checked in that order before `EDITOR`, `VISUAL` (terminal editors skipped), and detected GUI editors. The TUI uses `EDITOR` or `VISUAL`. |
 | `IVYGREP_NO_BROWSER` | Set to stop `ig --web` from opening a browser. |
 
@@ -1029,7 +1049,7 @@ additionally reads `IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
 | Walking and chunking | `walker.rs`, `chunking.rs`, `text.rs` |
 | Index orchestration | `indexer.rs` |
 | Index storage concerns | `src/indexer/compression.rs`, `src/indexer/git_state.rs`, `src/indexer/resources.rs`, `src/indexer/staging.rs`, `src/indexer/storage.rs` |
-| Background enhancement | `src/indexer/enhancement.rs`: vector-writer lock and publication into the captured store incarnation |
+| Background enhancement | `src/indexer/enhancement.rs`: vector-writer lock, publication into the captured store incarnation, and the worker places of `IVYGREP_ENHANCE_MAX_WORKERS`; `enhancement_queue.rs`: the daemon's queue of workspaces that wait for a worker place |
 | Job state | `jobs.rs`: background job ledger and status records |
 | Index garbage collection | `index_gc.rs`: removes indexes whose workspace root stayed missing past the grace period |
 | Change detection | `merkle.rs` |
