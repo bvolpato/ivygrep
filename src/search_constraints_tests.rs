@@ -613,6 +613,42 @@ fn public_boolean_constraints_keep_the_syntax_error_for_one_line_lookups() {
 }
 
 #[test]
+fn sign_before_bare_star_check_matches_what_panics_the_query_grammar() {
+    // The check answers for the grammar without calling it, so it must agree
+    // with the grammar: true exactly where the grammar panics, and false for
+    // everything it parses or rejects, such as the valid clause `+(*)`.
+    for query in [
+        "-\n\n* tailwindcss",
+        "+ * x",
+        "foo - * bar",
+        "foo (- * bar)",
+        "a -  *  b",
+        "foo AND - * bar",
+        "* tailwindcss",
+        "-* tailwindcss",
+        "- *foo bar",
+        "- *",
+        "foo - *",
+        "+(*)",
+        "foo AND +(*)",
+        "foo AND -(*)",
+        "- (*) x",
+        "select * from t",
+        "a-b * c",
+    ] {
+        let panics =
+            std::panic::catch_unwind(|| tantivy::query_grammar::parse_query(query).is_ok())
+                .is_err();
+        assert_eq!(
+            boolean::has_sign_before_bare_star(query),
+            panics,
+            "{query:?}: the grammar {}",
+            if panics { "panics" } else { "does not panic" }
+        );
+    }
+}
+
+#[test]
 #[serial]
 fn markdown_list_markers_do_not_panic_the_query_grammar() {
     let home = tempdir().unwrap();

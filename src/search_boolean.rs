@@ -181,15 +181,25 @@ pub(super) fn parse_lexical_query(
 /// clause without a field ("Exist query without a field isn't allowed"). A
 /// Markdown list in a pasted question (`-` on one line, `* item` on the next)
 /// is enough.
-fn has_sign_before_bare_star(text: &str) -> bool {
-    let mut tokens = text
-        .split(|character: char| character.is_whitespace() || matches!(character, '(' | ')'))
-        .filter(|token| !token.is_empty())
-        .peekable();
-    while let Some(token) = tokens.next() {
-        if matches!(token, "-" | "+") && tokens.peek() == Some(&"*") {
-            return true;
+pub(super) fn has_sign_before_bare_star(text: &str) -> bool {
+    let boundary = |character: Option<char>| {
+        character.is_none_or(|value| value.is_whitespace() || matches!(value, '(' | ')'))
+    };
+    let mut previous = None;
+    for (index, character) in text.char_indices() {
+        if matches!(character, '-' | '+') && boundary(previous) {
+            // Only whitespace may sit between the sign and the star: `+(*)` is
+            // a valid clause that the grammar parses.
+            let rest = &text[index + character.len_utf8()..];
+            let after_space = rest.trim_start();
+            if after_space.len() < rest.len()
+                && let Some(tail) = after_space.strip_prefix('*')
+                && boundary(tail.chars().next())
+            {
+                return true;
+            }
         }
+        previous = Some(character);
     }
     false
 }
