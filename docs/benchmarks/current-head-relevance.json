@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "c075e0d268fa50f9a438e3a5c3c2594accec93ec2ce4b437298c4cb866530dad",
+    "sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
     "version": "ivygrep 1.2.16"
   },
   "fixture": {
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "9dbc5197b6af8402481e6b541b2629d7be4b11f4",
+  "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -25,7 +25,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 23724.303308408707,
+      "elapsed_ms": 5067.940489854664,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -34,8 +34,8 @@
       ],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.98,
-      "mean_mrr": 0.925,
-      "mean_ndcg10": 0.8990189646290027,
+      "mean_mrr": 0.9257142857142857,
+      "mean_ndcg10": 0.9037574058184213,
       "mean_p1": 0.88,
       "mean_p5": 0.20800000000000002,
       "mean_recall5": 0.92,
@@ -60,7 +60,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 24170.265042223036,
+      "elapsed_ms": 5496.413928922266,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -69,8 +69,8 @@
       ],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.98,
-      "mean_mrr": 0.925,
-      "mean_ndcg10": 0.8990189646290027,
+      "mean_mrr": 0.9257142857142857,
+      "mean_ndcg10": 0.9037574058184213,
       "mean_p1": 0.88,
       "mean_p5": 0.20800000000000002,
       "mean_recall5": 0.92,
@@ -95,20 +95,20 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 9170.406775083393,
+      "elapsed_ms": 7752.7129631489515,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.925,
-      "mean_ndcg10": 0.8990189646290027,
+      "mean_mrr": 0.9257142857142857,
+      "mean_ndcg10": 0.9037574058184213,
       "mean_p1": 0.88,
       "mean_p5": 0.20800000000000002,
       "mean_recall5": 0.92,
       "mode": "neural",
       "neural_queries_executed": 25,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 16,
+      "neural_queries_with_results": 23,
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
@@ -134,6 +134,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "755cb2c9c37c82e8fc045bf8d24590f3ada1d7125515fb3c38cb4041ed788f0f"
+    "sha256": "a635f570d1bc564601c5a4c0c95696c49ee2bd9538d2faf98812a358003e0325"
   }
 }
