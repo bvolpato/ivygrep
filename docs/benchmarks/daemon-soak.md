@@ -98,8 +98,12 @@ settles for 100 seconds before each baseline and end sample so an idle daemon
 has returned freed memory first. The harness only signals processes whose
 environment names its own `IVYGREP_HOME`, and it passes none of the caller's
 `IVYGREP_*` variables on; `--env KEY=VALUE` sets one for the sessions and the
-daemon. `--calls` restricts the load phase to chosen kinds of call, to see
-which kind moves a resource.
+daemon. The report records the value of `IVYGREP_*` and `MALLOC_*` settings,
+which decide what was measured, and only the name of any other variable or of
+one that looks like a credential. `--work-dir` must be outside `--repo`, and
+`--output` outside `--work-dir`, which is removed after a successful run.
+`--calls` restricts the load phase to chosen kinds of call, to see which kind
+moves a resource.
 
 ### What the memory gate measures
 

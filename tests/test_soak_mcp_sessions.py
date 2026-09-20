@@ -221,6 +221,29 @@ class WorkloadTest(unittest.TestCase):
             soak.tool_payload({"error": {"code": -32603, "message": "boom"}})
 
 
+class ReportSafetyTest(unittest.TestCase):
+    def test_published_reports_keep_measurement_settings_and_never_other_environment_values(self):
+        self.assertEqual(
+            soak.reported_environment([
+                "MALLOC_ARENA_MAX=2", "IVYGREP_ENHANCE_MAX_LOAD_RATIO=0", "HF_TOKEN=hf_secret",
+                "IVYGREP_API_TOKEN=secret", "HTTPS_PROXY=http://user:pass@proxy:8080",
+            ]),
+            [
+                "HF_TOKEN=<redacted>", "HTTPS_PROXY=<redacted>", "IVYGREP_API_TOKEN=<redacted>",
+                "IVYGREP_ENHANCE_MAX_LOAD_RATIO=0", "MALLOC_ARENA_MAX=2",
+            ],
+        )
+
+    def test_work_dir_inside_the_corpus_and_output_inside_the_work_dir_are_rejected(self):
+        repo, work = Path("/corpus"), Path("/scratch/soak")
+        self.assertIsNone(soak.path_layout_error(repo, work, Path("/results/soak.json")))
+        # A full workspace copies the corpus, scratch directory included.
+        self.assertIn("outside --repo", soak.path_layout_error(repo, repo / ".soak", Path("/results/soak.json")))
+        self.assertIn("outside --repo", soak.path_layout_error(repo, repo, Path("/results/soak.json")))
+        # The work directory is removed after a successful run, report included.
+        self.assertIn("outside --work-dir", soak.path_layout_error(repo, work, work / "out" / "soak.json"))
+
+
 class FakeProcess:
     """Stands in for `ig --mcp`: replies arrive on a pipe the client reads with `select`."""
 

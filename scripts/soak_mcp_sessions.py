@@ -1054,6 +1054,37 @@ def stop_owned_processes(home: Path) -> None:
             time.sleep(0.1)
 
 
+def reported_environment(items: list[str]) -> list[str]:
+    """`--env` settings as the report records them.
+
+    Reports are published, and `--env` may carry a credential such as a model
+    hub token. Only the settings that decide what was measured keep their
+    value: ivygrep's own variables and the allocator's. Every other variable is
+    recorded by name.
+    """
+    reported = []
+    for item in items:
+        key = item.partition("=")[0]
+        secret = any(word in key.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "KEY"))
+        keeps_value = key.startswith(("IVYGREP_", "MALLOC_")) and not secret
+        reported.append(item if keeps_value else f"{key}=<redacted>")
+    return sorted(reported)
+
+
+def path_layout_error(source: Path, work: Path, output: Path) -> str | None:
+    """Why these resolved paths cannot be used together, or `None`.
+
+    A work directory inside the corpus is copied into itself with every full
+    workspace, and an output inside the work directory is deleted with it after
+    a successful run.
+    """
+    if work == source or source in work.parents:
+        return f"--work-dir {work} must be outside --repo {source}"
+    if output == work or work in output.parents:
+        return f"--output {output} must be outside --work-dir {work}, which is removed after a successful run"
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--binary", type=Path, required=True)
@@ -1139,6 +1170,9 @@ def main() -> None:
         parser.error("clients and workspaces must be positive")
     args.binary, source = args.binary.resolve(), args.repo.resolve()
     work = args.work_dir.resolve()
+    args.output = args.output.resolve()
+    if (layout_error := path_layout_error(source, work, args.output)) is not None:
+        parser.error(layout_error)
     if work.exists() and any(work.iterdir()):
         parser.error(f"--work-dir {work} must be empty")
     home = work / "home"
@@ -1166,7 +1200,7 @@ def main() -> None:
         "source_commit": run(["git", "rev-parse", "HEAD"], source, env).strip(),
         "source_dirty": bool(run(["git", "status", "--porcelain"], source, env).strip()),
         "harness_sha256": sha256_file(Path(__file__)), "phases": phases,
-        "background_enhancement": args.enable_enhancement, "extra_environment": sorted(args.env),
+        "background_enhancement": args.enable_enhancement, "extra_environment": reported_environment(args.env),
         "malloc_arenas": args.malloc_arenas,
         "settings": {key: getattr(args, key) for key in ("clients", "workspaces", "duration", "churn", "stampede",
                                                           "lifecycle_cycles", "corpus", "think_time", "seed", "load_warmup",
