@@ -16,7 +16,12 @@ fn is_zero(value: &usize) -> bool {
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 8;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 9;
+/// Oldest client protocol a daemon still serves. Version 9 only added the
+/// `ContextPack` request, so a version 8 client, such as an MCP session that
+/// outlived an upgrade, keeps working against a newer daemon instead of
+/// restarting it on every call.
+pub const MIN_DAEMON_PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -117,6 +122,28 @@ pub enum DaemonRequest {
         #[serde(default)]
         skip_gitignore: bool,
     },
+    /// Build a context pack for one workspace. Cancellable like a search:
+    /// through the request id, and when the client disconnects.
+    ContextPack {
+        path: PathBuf,
+        query: String,
+        budget_tokens: usize,
+        #[serde(default)]
+        since: Option<String>,
+        context: usize,
+        #[serde(default)]
+        type_filter: Option<String>,
+        #[serde(default)]
+        include_globs: Vec<String>,
+        #[serde(default)]
+        exclude_globs: Vec<String>,
+        #[serde(default)]
+        scope_path: Option<PathBuf>,
+        #[serde(default)]
+        scope_is_file: bool,
+        #[serde(default)]
+        skip_gitignore: bool,
+    },
     CancelSearch {
         search_id: uuid::Uuid,
     },
@@ -189,6 +216,11 @@ pub enum DaemonResponse {
         /// Non-fatal workspace failures; default and omission preserve v5 compatibility.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         warnings: Vec<String>,
+    },
+    /// Reply to `ContextPack`: the serialized `ContextBundle`. It travels as a
+    /// JSON value so a client embeds exactly what an in-process build embeds.
+    ContextPack {
+        bundle: serde_json::Value,
     },
     SearchProgress {
         stage: String,

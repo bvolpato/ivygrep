@@ -1768,33 +1768,57 @@ fn execute_ivygrep_search(
     };
 
     if wants_context_pack {
-        let model = mcp_search_model(&workspace);
-        let bundle = crate::context::build_context_bundle_with_options(
-            &workspace,
-            query,
-            Some(model.as_ref()),
-            &SearchOptions {
-                limit: None,
-                ..search_options.clone()
-            },
-            args.budget_tokens.unwrap_or(8_000),
-            &crate::context::ContextBuildOptions {
-                since: args.since.as_deref(),
-            },
-        )?;
-        let query_uses_neural = crate::search::query_uses_neural(query, false);
-        if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-            && workspace.needs_search_enhancement(query_uses_neural)
-        {
-            let _ = workspace.trigger_background_search_enhancement(query_uses_neural);
+        // The daemon builds the pack with its shared model, preview cache,
+        // leases, and CPU permits. Building here instead keeps tens of MiB
+        // and the index thread pools in this process for the session's life,
+        // so it is only the fallback when no daemon answers, as for searches.
+        let budget_tokens = args.budget_tokens.unwrap_or(8_000);
+        let daemon_request = DaemonRequest::ContextPack {
+            path: workspace.root.clone(),
+            query: query.to_string(),
+            budget_tokens,
+            since: args.since.clone(),
+            context: search_options.context,
+            type_filter: args.type_filter.clone(),
+            include_globs: include_globs.clone(),
+            exclude_globs: exclude_globs.clone(),
+            scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
+            scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
+            skip_gitignore: search_options.skip_gitignore,
+        };
+        let daemon_bundle = match cancellation.daemon_search(&daemon_request)? {
+            Some(DaemonResponse::ContextPack { bundle }) => Some(bundle),
+            Some(DaemonResponse::Error { message }) => {
+                tracing::warn!("MCP daemon context pack unavailable, building locally: {message}");
+                None
+            }
+            Some(response) => {
+                tracing::warn!("unexpected MCP daemon context pack response: {response:?}");
+                None
+            }
+            None => None,
+        };
+        // A cancelled daemon build must not fall back to a local build.
+        if cancellation.is_cancelled() {
+            bail!("request cancelled");
         }
+        let bundle = match daemon_bundle {
+            Some(bundle) => bundle,
+            None => local_context_pack(
+                &workspace,
+                query,
+                &search_options,
+                budget_tokens,
+                args.since.as_deref(),
+            )?,
+        };
         let payload = json!({
             "workspace_root": current_workspace.root,
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
             "mode": "context",
-            "result_count": bundle.items.len(),
+            "result_count": bundle.get("items").and_then(Value::as_array).map_or(0, Vec::len),
             "include": include_globs,
             "exclude": exclude_globs,
             "context_pack": bundle,
@@ -1995,6 +2019,36 @@ fn execute_ivygrep_search(
     };
 
     Ok(tool_success_result_with_text(payload, text))
+}
+
+/// In-process context pack, used only when no daemon answers. Serialized the
+/// way the daemon sends it, so both paths embed the same JSON value.
+fn local_context_pack(
+    workspace: &Workspace,
+    query: &str,
+    search_options: &SearchOptions,
+    budget_tokens: usize,
+    since: Option<&str>,
+) -> Result<Value> {
+    let model = mcp_search_model(workspace);
+    let bundle = crate::context::build_context_bundle_with_options(
+        workspace,
+        query,
+        Some(model.as_ref()),
+        &SearchOptions {
+            limit: None,
+            ..search_options.clone()
+        },
+        budget_tokens,
+        &crate::context::ContextBuildOptions { since },
+    )?;
+    let query_uses_neural = crate::search::query_uses_neural(query, false);
+    if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+        && workspace.needs_search_enhancement(query_uses_neural)
+    {
+        let _ = workspace.trigger_background_search_enhancement(query_uses_neural);
+    }
+    Ok(serde_json::to_value(bundle)?)
 }
 
 /// Hit budget requested from the search layer for one hits-mode call.

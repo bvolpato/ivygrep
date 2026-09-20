@@ -730,9 +730,17 @@ active jobs, stalled work, watcher health, and compaction recommendations.
 Daemon uses a versioned JSON-line request envelope. Protocol version 6 added
 request IDs and explicit cancellation for hybrid, literal, and regex searches;
 version 7 added the fire-and-forget `StartIndex` request (answered with
-`IndexStarted`) and the `index_in_flight` runtime-status field; version 8 adds
+`IndexStarted`) and the `index_in_flight` runtime-status field; version 8 added
 `EnsureWatcher`, which re-registers missing watchers instead of restarting the
-daemon. `DAEMON_PROTOCOL_VERSION` in `src/protocol.rs` holds the current value. Cancellation
+daemon; version 9 adds `ContextPack`, which builds a context pack in the daemon
+and answers with the serialized bundle. `DAEMON_PROTOCOL_VERSION` in
+`src/protocol.rs` holds the current value, and `MIN_DAEMON_PROTOCOL_VERSION`
+the oldest client version a daemon still serves. Version 9 only added a
+request, so a daemon serves version 8 clients unchanged: an MCP session that
+was running before an upgrade keeps using the new daemon. Without that, every
+call of such a session would read the new daemon as incompatible and restart
+it, taking down the daemon the new sessions use. A version 9 client that meets
+a version 8 daemon restarts it, as before, and that one call runs in-process. Cancellation
 also removes queued searches from daemon CPU backpressure. Existing requests
 cover version/status, indexing, Web startup, workspace removal, watcher
 recovery (`EnsureWatcher`), restart, progress, and structured errors. A client that reaches a daemon speaking an
@@ -803,6 +811,15 @@ stays open. It exposes:
 
 - `ig_search` for hybrid, literal, regex, symbol, caller, and context-pack work
 - `ig_status` for indexed-workspace and runtime state
+
+Context packs are built by the daemon through the `ContextPack` request, so
+the query model, the preview cache, and the index thread pools live there once
+instead of in every session, and the build takes the daemon's workspace lease
+and a CPU permit. The pack travels as the JSON value an in-process build would
+embed, which keeps the tool result byte-identical. A cancelled request cancels
+the daemon build through its request id, and a client that disconnects ends
+it, as for searches. The in-process builder is the fallback when no daemon
+answers.
 
 MCP can auto-index a requested workspace, so search is idempotent but not
 read-only. A first index is never awaited for its full duration: `ig_search`
