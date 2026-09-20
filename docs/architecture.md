@@ -771,8 +771,9 @@ freed memory in one malloc arena per thread, up to eight per core, and a daemon
 that served a burst from many sessions has about a hundred threads that each
 touched one: after 32 sessions stopped calling, it kept 668 MiB of anonymous
 memory, nearly all of it free space inside 127 arenas. The daemon counts
-requests and watch updates, samples the count every 30 seconds, and calls
-`malloc_trim` once after two quiet samples, 60 to 90 seconds without activity.
+requests (IPC and Web UI), index runs, and watch updates, samples the count
+every 30 seconds, and calls `malloc_trim` once after two quiet samples, 60 to
+90 seconds without activity.
 It never trims while requests arrive. In the same workload a daemon with the
 trim went from 697 MiB to 228 MiB 80 seconds after the last request. Capping
 the arenas instead (`MALLOC_ARENA_MAX=4`) kept memory low under load too but

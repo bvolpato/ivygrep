@@ -1543,17 +1543,17 @@ pub(crate) struct DaemonState {
     /// backoff that keeps a broken watcher from being retried on every
     /// client request.
     watcher_recovery: Arc<Mutex<HashMap<String, WatcherRecovery>>>,
-    /// Requests and watch updates, for the idle memory trim.
+    /// Requests, index runs, and watch updates, for the idle memory trim.
     activity: Arc<DaemonActivity>,
 }
 
 /// What the daemon is doing, as far as the idle memory trim needs to know.
 #[derive(Default)]
 struct DaemonActivity {
-    /// Requests and watch updates started so far. Only samples of it are
+    /// Requests, index runs, and watch updates started so far. Only samples of it are
     /// compared, so it may wrap.
     started: AtomicU64,
-    /// Requests being served and watch updates being indexed right now.
+    /// Requests being served and index runs and watch updates in progress right now.
     in_flight: AtomicUsize,
 }
 
@@ -1565,7 +1565,7 @@ impl DaemonActivity {
     }
 }
 
-/// One request or watch update in flight; counted until dropped.
+/// One request, index run, or watch update in flight; counted until dropped.
 struct InFlightWork(Arc<DaemonActivity>);
 
 impl Drop for InFlightWork {
@@ -3082,6 +3082,7 @@ pub(crate) async fn handle_web_request(
     state: DaemonState,
     request: DaemonRequest,
 ) -> DaemonResponse {
+    let _in_flight = state.activity.begin();
     if !is_search_request(&request) {
         return handle_request(state, request).await;
     }
@@ -3714,6 +3715,9 @@ async fn run_index_request(
     lead: Option<InflightIndexLead>,
     arrived_at: std::time::Instant,
 ) -> DaemonResponse {
+    // Counted here, not only in the request that asked for it: a `StartIndex`
+    // request answers at once and the index runs on in a detached task.
+    let _in_flight = state.activity.begin();
     // Generation observed on arrival: if a full walk that started after this
     // request arrived advances it while the request waits for the exclusive
     // lease, the rescan is redundant. Earlier walks cannot vouch for edits made
@@ -6159,6 +6163,8 @@ struct IdleMemoryTrim {
     last_activity: u64,
     quiet_samples: u32,
     trimmed_at: Option<u64>,
+    /// The previous sample saw work in flight.
+    was_in_flight: bool,
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -6168,6 +6174,12 @@ impl IdleMemoryTrim {
         if activity != self.last_activity || in_flight > 0 {
             self.last_activity = activity;
             self.quiet_samples = 0;
+            self.was_in_flight = in_flight > 0;
+            return false;
+        }
+        if std::mem::take(&mut self.was_in_flight) {
+            // The work ended at some point since the last sample, possibly
+            // just now. The quiet period starts here, not a sample ago.
             return false;
         }
         self.quiet_samples = self.quiet_samples.saturating_add(1);
@@ -13212,6 +13224,9 @@ mod tests {
         // A long index run or context pack: nothing new arrives, but work is
         // in flight, however long it takes. The quiet period starts after it.
         assert!((0..100).all(|_| !trim.sample(22, 1)));
+        // It may have ended right before this sample, so this one only starts
+        // the quiet period, and the trim still comes two samples later.
+        assert!(!trim.sample(22, 0));
         assert!(!trim.sample(22, 0));
         assert!(trim.sample(22, 0));
         // A daemon that never served anything has nothing to give back twice.
