@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::embedding::DenseFusionCalibration;
 use crate::indexer::IndexedChunk;
 use crate::search_routing::{QueryIntent, QueryRouting, is_long_query};
 
@@ -10,14 +11,210 @@ use super::{
     REPRESENTATIVE_SPAN_MIN_COVERAGE, RankedCandidate, SOURCE_BACKFILL, SOURCE_EXACT_SYMBOL,
     SearchContext, SourceMask, SymbolCandidateKind, alias_file_stem_multiplier,
     apply_file_coherence_boost, backfill_enabled, chunk_density_exponent, chunk_kind_boost,
-    definition_name_boost, effective_authority_score_with_intent, file_stem_signals,
-    filter_meaningful_scores_with_query, is_definition_kind, is_precise_lookup_query_with_tokens,
-    literal_match_boost_with_query, location_intent_boost, normalize_lexical_score,
-    normalize_semantic_score, path_exact_match_boost_with_query, path_key, path_segment_boost,
-    primary_file_stem_multiplier, promote_literal_spans, promote_qualified_symbol_span,
-    promote_representative_span, rerank_candidate_limit_for_routing, should_run_literal_pass,
-    source_bit, term_coverage_boost,
+    definition_name_boost, dense_promotion_test, effective_authority_score_with_intent,
+    file_stem_signals, filter_meaningful_scores_with_query, has_direct_source, is_definition_kind,
+    is_precise_lookup_query_with_tokens, literal_match_boost_with_query, location_intent_boost,
+    normalize_lexical_score, normalize_semantic_score, path_exact_match_boost_with_query, path_key,
+    path_segment_boost, primary_file_stem_multiplier, promote_literal_spans,
+    promote_qualified_symbol_span, promote_representative_span, rerank_candidate_limit_for_routing,
+    should_run_literal_pass, source_bit, term_coverage_boost,
 };
+
+/// Neural cosine of the candidate chunks and the calibration of the model that
+/// produced it. Search execution builds it when the neural tier ran.
+pub(super) struct DenseEvidence {
+    pub(super) scores: HashMap<u64, f32>,
+    pub(super) calibration: DenseFusionCalibration,
+}
+
+/// Cosine ratio by which the dense tier's best file must beat the runner-up
+/// file to count as a confident answer. Rank votes are nearly flat
+/// (`1 / (k + rank)`), so they cannot tell a clear winner from fifty near-ties;
+/// the score lead can. On the tuning split a corroborated leader at this ratio
+/// was the relevant file far more often than the file it displaced, for static
+/// and transformer models alike, and every loss came from smaller leads.
+const DECISIVE_DENSE_LEAD_RATIO: f32 = 1.05;
+const DENSE_RANK_CONSTANT: f32 = 60.0;
+
+/// Standing vote of the dense file order for this model and query shape, or
+/// `None` for a shape late dense fusion skips. Short natural-language queries
+/// are skipped: on the tuning split a decisive dense leader was the relevant
+/// file 36-39% of the time there, against 70-90% for prose and pasted source,
+/// and on ivygrep's own repository it displaced a correct first result.
+fn dense_standing_weight(
+    calibration: DenseFusionCalibration,
+    query: &FusionQuery<'_>,
+    routing: QueryRouting,
+) -> Option<f32> {
+    if query.pasted_source {
+        Some(calibration.code)
+    } else if matches!(
+        routing.intent,
+        QueryIntent::LiteralOrError | QueryIntent::NaturalLanguage
+    ) {
+        Some(calibration.prose)
+    } else {
+        None
+    }
+}
+
+/// Late dense fusion: fuse the file order in `ranked` (sorted by score) with
+/// the dense tier's file order.
+///
+/// A file takes part only when direct search found it and `admits` accepts it
+/// (see `dense_promotion_test`). Eligible files are reordered among the
+/// positions they already hold; every other file keeps its place. The dense
+/// tier therefore reorders what lexical, literal, path, or symbol evidence
+/// surfaced, never promotes a file on cosine alone, and never moves
+/// documentation, tests, or support files relative to the implementation. Each
+/// eligible file keeps a reciprocal-rank vote for its current rank and gains
+/// `standing_weight / (k + dense_rank)`. A leader whose best cosine beats the
+/// runner-up file by `DECISIVE_DENSE_LEAD_RATIO` gains a full first-place vote
+/// on top, which moves it to the first eligible position. Scores are then
+/// reassigned by position, so score thresholds and the learned reranker see
+/// the distribution they were tuned on. `hold_first` keeps a pinned
+/// exact-symbol definition.
+///
+/// `unvoted_ratios` holds, per chunk, the share of its score that does not come
+/// from the long-query lexical vote; the score filter also judges candidates
+/// by that unvoted score. A position has a voted and an unvoted score, and a
+/// moved file takes over both. Otherwise a promoted file would pair the
+/// leader's voted score with its own high ratio and raise the unvoted
+/// threshold, and the file it displaced would pair a tail score with the
+/// leader's low ratio and fail both filters.
+pub(super) fn fuse_dense_file_order(
+    ranked: &mut [RankedCandidate],
+    dense: &HashMap<u64, f32>,
+    unvoted_ratios: &mut HashMap<u64, f32>,
+    standing_weight: f32,
+    hold_first: bool,
+    admits: impl Fn(&RankedCandidate) -> bool,
+) {
+    struct FileEntry {
+        file: u64,
+        score: f32,
+        unvoted_ratio: f32,
+        eligible: bool,
+        dense: Option<f32>,
+    }
+    let mut positions = HashMap::<u64, usize>::new();
+    let mut files = Vec::<FileEntry>::new();
+    for item in ranked.iter() {
+        let file = path_key(&item.chunk.file_path);
+        let position = *positions.entry(file).or_insert_with(|| {
+            files.push(FileEntry {
+                file,
+                score: item.score,
+                unvoted_ratio: unvoted_ratios
+                    .get(&item.chunk.vector_key)
+                    .copied()
+                    .unwrap_or(1.0),
+                eligible: false,
+                dense: None,
+            });
+            files.len() - 1
+        });
+        let eligible = has_direct_source(item.sources) && admits(item);
+        let entry = &mut files[position];
+        entry.eligible |= eligible;
+        if let Some(score) = dense.get(&item.chunk.vector_key) {
+            entry.dense = Some(entry.dense.map_or(*score, |best| best.max(*score)));
+        }
+    }
+
+    let mut by_dense = (0..files.len())
+        .filter_map(|position| files[position].dense.map(|score| (position, score)))
+        .collect::<Vec<_>>();
+    if by_dense.len() < 2 {
+        return;
+    }
+    by_dense.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    let (leader, leader_score) = by_dense[0];
+    let runner_up_score = by_dense[1].1;
+    let decisive = files[leader].eligible
+        && runner_up_score > f32::EPSILON
+        && leader_score / runner_up_score >= DECISIVE_DENSE_LEAD_RATIO;
+    if standing_weight <= 0.0 && !decisive {
+        return;
+    }
+
+    // Votes are counted among eligible files only: `slots` are the positions
+    // they hold, and the fused order is written back into those positions.
+    let slots = (0..files.len())
+        .filter(|position| files[*position].eligible)
+        .collect::<Vec<_>>();
+    let k = DENSE_RANK_CONSTANT;
+    let mut votes = slots
+        .iter()
+        .enumerate()
+        .map(|(rank, position)| (*position, 1.0 / (k + rank as f32 + 1.0)))
+        .collect::<HashMap<_, _>>();
+    if standing_weight > 0.0 {
+        for (dense_rank, (position, _)) in by_dense
+            .iter()
+            .filter(|(position, _)| files[*position].eligible)
+            .enumerate()
+        {
+            *votes.entry(*position).or_default() += standing_weight / (k + dense_rank as f32 + 1.0);
+        }
+    }
+    if decisive {
+        *votes.entry(leader).or_default() += 1.0 / (k + 1.0);
+    }
+    let mut order = slots.clone();
+    order.sort_by(|left, right| {
+        votes[right]
+            .total_cmp(&votes[left])
+            .then_with(|| left.cmp(right))
+    });
+    if hold_first
+        && files[0].eligible
+        && let Some(index) = order.iter().position(|position| *position == 0)
+    {
+        let first = order.remove(index);
+        order.insert(0, first);
+    }
+
+    // Per moved file: the factor to its new position's score, and the factor
+    // to that position's unvoted ratio.
+    let mut scale = HashMap::<u64, (f32, Option<f32>, f32)>::new();
+    for (old_position, new_position) in order.iter().zip(&slots) {
+        let (moved, slot) = (&files[*old_position], &files[*new_position]);
+        if new_position != old_position && moved.score > f32::EPSILON {
+            let ratio_factor = (moved.unvoted_ratio > f32::EPSILON)
+                .then(|| slot.unvoted_ratio / moved.unvoted_ratio);
+            scale.insert(
+                moved.file,
+                (slot.score / moved.score, ratio_factor, slot.unvoted_ratio),
+            );
+        }
+    }
+    if scale.is_empty() {
+        return;
+    }
+    let lexical_vote_applies = !unvoted_ratios.is_empty();
+    for item in ranked.iter_mut() {
+        if let Some((factor, ratio_factor, slot_ratio)) =
+            scale.get(&path_key(&item.chunk.file_path))
+        {
+            item.score *= factor;
+            if lexical_vote_applies {
+                let ratio = unvoted_ratios
+                    .get(&item.chunk.vector_key)
+                    .copied()
+                    .unwrap_or(1.0);
+                let moved_ratio = ratio_factor.map_or(*slot_ratio, |factor| ratio * factor);
+                unvoted_ratios.insert(item.chunk.vector_key, moved_ratio.clamp(0.0, 1.0));
+            }
+        }
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
+    });
+}
 
 pub(super) fn fuse_rrf_with_context(
     ctx: Option<&SearchContext>,
@@ -484,6 +681,7 @@ pub(super) fn fuse_rrf_with_context(
         .collect::<Vec<_>>();
     tracing::trace!("fuse_score={:?}", fuse_started.elapsed());
 
+    let mut exact_symbol_pinned = false;
     if is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens)
         && let Some(max_score) = ranked.iter().map(|item| item.score).reduce(f32::max)
     {
@@ -523,6 +721,7 @@ pub(super) fn fuse_rrf_with_context(
             })
         {
             exact.score = max_score + (max_score * 0.01).max(0.01);
+            exact_symbol_pinned = true;
         }
     }
 
@@ -540,6 +739,21 @@ pub(super) fn fuse_rrf_with_context(
                 .total_cmp(&left.score)
                 .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
         });
+    }
+    // Late dense fusion. A definition the query names stays first, except in
+    // pasted source, whose identifiers are incidental.
+    if let Some(dense) = query.dense.as_ref()
+        && let Some(standing_weight) = dense_standing_weight(dense.calibration, query, routing)
+    {
+        let admits = dense_promotion_test(&ranked, query);
+        fuse_dense_file_order(
+            &mut ranked,
+            &dense.scores,
+            &mut unvoted_ratios,
+            standing_weight,
+            exact_symbol_pinned && !query.pasted_source,
+            admits,
+        );
     }
     // Span promotion below swaps which chunk represents a scored position
     // and leaves the score where it is. An unvoted ratio describes a score,

@@ -127,7 +127,7 @@ jobs:
           HF_HOME: ${{ runner.temp }}/ivygrep-benchmark-hf-cache
         run: |
           uv run scripts/cache_neural_model.py \
-            --profile static \
+            --profile potion-code-v2 \
             --cache "$HF_HOME"
 
       - name: Measure current-head retrieval relevance
@@ -136,7 +136,7 @@ jobs:
         env:
           CURRENT_RELEVANCE_REPORT: ${{ runner.temp }}/current-head-relevance.json
           HF_HOME: ${{ runner.temp }}/ivygrep-benchmark-hf-cache
-          IVYGREP_MODEL_PROFILE: static
+          IVYGREP_MODEL_PROFILE: potion-code-v2
         run: |
           cargo build --release --locked --bin ig
           python3 scripts/run_current_head_benchmark.py \

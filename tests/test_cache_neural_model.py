@@ -16,6 +16,16 @@ SPEC.loader.exec_module(MODULE)
 
 
 class CacheNeuralModelTest(unittest.TestCase):
+    def test_default_profile_matches_pinned_runtime_model(self) -> None:
+        potion = MODULE.PROFILES["potion-code-v2"]
+        embedding = (ROOT / "src" / "embedding.rs").read_text(encoding="utf-8")
+
+        self.assertIn("pub const DEFAULT: Self = Self::PotionCodeV2;", embedding)
+        self.assertEqual(potion.repo_id, "minishlab/potion-code-16M-v2")
+        self.assertEqual(potion.assets, ("tokenizer.json", "model.safetensors"))
+        for pinned in (potion.repo_id, potion.revision, potion.weights_sha256):
+            self.assertIn(f'"{pinned}"', embedding)
+
     def test_profiles_match_pinned_runtime_models(self) -> None:
         static = MODULE.PROFILES["static"]
         general = MODULE.PROFILES["general"]

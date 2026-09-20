@@ -528,12 +528,20 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         };
         persisted_identity == active_identity
     });
-    let execute_neural = neural_fallback_needed(
-        routing,
-        options.force_neural,
-        lexical_chunks.first().map(|(_, score)| *score),
-        lexical_chunks.get(1).map(|(_, score)| *score),
-    );
+    // A static encoder whose dense order has measured standing value is
+    // consulted for every query whose route allows neural retrieval, and late
+    // dense fusion decides per query how far to trust it. Other profiles keep
+    // the lexical-confidence gate.
+    let consult_every_route = embedding_model
+        .and_then(|model| model.model_identity())
+        .is_some_and(|identity| identity.consult_for_every_neural_route());
+    let execute_neural = (routing.use_neural && consult_every_route)
+        || neural_fallback_needed(
+            routing,
+            options.force_neural,
+            lexical_chunks.first().map(|(_, score)| *score),
+            lexical_chunks.get(1).map(|(_, score)| *score),
+        );
     let neural_available = execute_neural
         && embedding_model.is_some_and(|model| model.model_identity().is_some())
         && has_neural_vectors
@@ -568,6 +576,9 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         .chain(symbol_chunks.iter().map(|(chunk, _)| chunk.vector_key))
         .collect::<HashSet<_>>();
 
+    // The neural query vector, kept so late dense fusion can score every
+    // candidate direct search found, not only the nearest neighbours.
+    let mut dense_query: Option<Vec<f32>> = None;
     if embedding_model.is_some() && (has_hash_vectors || neural_model.is_some()) {
         let semantic_started = std::time::Instant::now();
         let mut semantic_by_id = SemanticCandidatesById::new();
@@ -601,6 +612,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     options,
                 )?;
                 merge_semantic_candidates(&mut semantic_by_id, hits, 1.08, "neural");
+                dense_query = Some(query);
             }
         } else if !semantic_filters_active {
             let mut sources = Vec::with_capacity(2);
@@ -675,6 +687,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                 },
             )?;
             tracing::trace!("semantic_hydrate={:?}", semantic_started.elapsed());
+            dense_query = neural_query_for_refill;
         } else {
             let filter_plan = build_semantic_filter_plan(ctx, &path_matcher, options)?;
             if has_hash_vectors {
@@ -709,6 +722,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     Some(&filter_plan),
                 )?;
                 merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08, "neural");
+                dense_query = Some(neural_query_vector);
             }
         }
 
@@ -730,9 +744,58 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         return Ok(Vec::new());
     }
 
+    // Dense evidence for late fusion: the exact neural cosine of every
+    // candidate chunk, so a file direct search found has a dense rank even when
+    // it is not among the nearest neighbours.
+    let dense_evidence = dense_query.as_deref().map(|query| {
+        let keys = direct_ids
+            .iter()
+            .copied()
+            .chain(
+                semantic_chunks
+                    .iter()
+                    .filter(|(_, _, _, neural_score)| neural_score.is_some())
+                    .map(|(chunk, _, _, _)| chunk.vector_key),
+            )
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut scores = HashMap::with_capacity(keys.len());
+        for store in [
+            ctx.neural_vectors.as_ref(),
+            ctx.base_neural_vectors.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for hit in store.score_many_top_k(&keys, query, keys.len()) {
+                scores
+                    .entry(hit.key)
+                    .and_modify(|best: &mut f32| *best = best.max(hit.score))
+                    .or_insert(hit.score);
+            }
+        }
+        DenseEvidence {
+            scores,
+            calibration: neural_model
+                .and_then(|model| model.model_identity())
+                .map_or(DenseFusionCalibration::UNCALIBRATED, |identity| {
+                    identity.dense_fusion_calibration()
+                }),
+        }
+    });
+    tracing::trace!(
+        "dense_evidence={:?} scored={}",
+        t0.elapsed(),
+        dense_evidence
+            .as_ref()
+            .map_or(0, |evidence| evidence.scores.len())
+    );
+
     let mut fusion_query = FusionQuery::new(trimmed);
     fusion_query.pasted_error = pasted_error.is_some();
     fusion_query.pasted_source = pasted_source;
+    fusion_query.dense = dense_evidence;
     let merged = fuse_rrf_with_context(
         Some(ctx),
         FusionCandidates {

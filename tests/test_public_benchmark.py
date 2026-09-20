@@ -88,7 +88,7 @@ def cached_result_fixture(root: Path, *, mode: str = "blended", query_limit=None
         {"eval.py": "harness"},
     )
     configuration = {
-        "neural_profile": "static-retrieval-v1",
+        "neural_profile": "potion-code-16m-v2",
         "neural_model": {"model_id": "fixture"},
         "reranker_mode": "learned",
         "reranker_model": "fixture",

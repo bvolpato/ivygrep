@@ -75,7 +75,7 @@ winget install --id BrunoVolpato.ivygrep --exact
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. GPU builds only speed up transformer profiles (`IVYGREP_MODEL_PROFILE=code|code-hq|general`); the default `static-retrieval-v1` profile runs on CPU. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
+Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. GPU builds only speed up transformer profiles (`IVYGREP_MODEL_PROFILE=code|code-hq|general`); the default `potion-code-16m-v2` profile runs on CPU. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
 
 Build from source on macOS or Linux:
 

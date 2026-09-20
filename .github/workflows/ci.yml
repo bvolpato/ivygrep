@@ -227,8 +227,8 @@ jobs:
             cargo_flags: ""
             rust_flags: "-D warnings"
             name: "Linux ARM64 (Neural CPU)"
-            validate_backend: "StaticEmbedding token mean via Rust"
-            model_profile: "static"
+            validate_backend: "Model2Vec token mean via Rust"
+            model_profile: "potion-code-v2"
           - os: ubuntu-24.04-arm
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
@@ -255,8 +255,8 @@ jobs:
             cargo_flags: ""
             rust_flags: "-D warnings -C target-feature=+crt-static"
             name: "Windows x86_64 (Neural CPU)"
-            validate_backend: "StaticEmbedding token mean via Rust"
-            model_profile: "static"
+            validate_backend: "Model2Vec token mean via Rust"
+            model_profile: "potion-code-v2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

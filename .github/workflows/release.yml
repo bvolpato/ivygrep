@@ -452,7 +452,7 @@ jobs:
         if: matrix.cuda || matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
         shell: bash
         run: |
-          PROFILE=static
+          PROFILE=potion-code-v2
           if [[ "${{ matrix.archive_name }}" == "macos-aarch64-metal" || "${{ matrix.archive_name }}" == "linux-x86_64-cuda" ]]; then
             PROFILE=general
           fi
@@ -587,7 +587,7 @@ jobs:
             ./scripts/e2e_cached_model.sh \
               --binary "$BINARY" \
               --cache "$CACHE" \
-              --expect-backend "StaticEmbedding token mean via Rust" \
+              --expect-backend "Model2Vec token mean via Rust" \
               --expect-file "lib.rs"
           HTTP_PROXY=http://127.0.0.1:9 \
           HTTPS_PROXY=http://127.0.0.1:9 \
@@ -596,7 +596,7 @@ jobs:
             ./scripts/e2e_cached_model.sh \
               --binary "$BINARY" \
               --cache "$CACHE" \
-              --expect-backend "StaticEmbedding token mean via Rust" \
+              --expect-backend "Model2Vec token mean via Rust" \
               --expect-file "lib.rs"
 
   release:

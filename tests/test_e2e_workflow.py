@@ -101,7 +101,7 @@ class E2EWorkflowTest(unittest.TestCase):
         self.assertIn("cargo test --locked --lib --bins --tests", windows)
         self.assertNotIn("--no-default-features", windows)
         self.assertIn("scripts/e2e_neural_backend.sh", windows)
-        self.assertIn("StaticEmbedding token mean via Rust", windows)
+        self.assertIn("Model2Vec token mean via Rust", windows)
         self.assertIn("ivygrep-数据-é", windows)
         self.assertIn("segment_08_abcdefghijklmnopqrstuvwxyz", windows)
 
