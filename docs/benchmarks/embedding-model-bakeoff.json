@@ -1,122 +1,123 @@
 {
-  "binary_sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
+  "binary_sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
   "candidates": [
     {
       "binary": {
-        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
-        "version": "ivygrep 0.10.1"
+        "sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
+        "version": "ivygrep 1.2.16"
       },
       "evaluation": "complete-screening-matrix",
-      "evidence_sha256": "6204398e565eca9bfb1ee9ccc8307229f4cddf5a5868f99ccd29e7e18980a507",
+      "evidence_sha256": "84d35442b0f7ef5fe186756929db857416bbb935afd1faffb0eb3d2b29237c84",
       "harness_sha256": {
-        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3",
-        "export_public_retrieval.py": "a652e970ba59926632e11055c77dfb71a7874a899bc4bf2445dd1f38b92f112e",
-        "run_public_benchmark_matrix.py": "a5f42bdc8403b7c325e52ac0f299be63ba3288ea26f937e71e60f54bac4ec31b"
+        "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17",
+        "export_public_retrieval.py": "8d1f35b7c73a9bc256ccecc55464ab8286666e12cd882faaf1640f3d6ad0992b",
+        "public_retrieval_contracts.py": "7559242d4958b03ce5d5e25dc2efb2d39712697d0195b459a1855f75a9ef1b84",
+        "run_public_benchmark_matrix.py": "67eaf68bda9ce8c1f6ee6f0fb9dc88ff47c358fa8cee90f20c2556bf6a31b67e"
       },
-      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
-      "license": "Apache-2.0",
+      "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
+      "license": "MIT",
       "metrics": {
         "index_size_bytes": {
           "coefficient_of_variation": 0.0,
-          "maximum": 12152492.0,
-          "mean": 12152492.0,
-          "minimum": 12152492.0,
+          "maximum": 9433557.0,
+          "mean": 9433557.0,
+          "minimum": 9433557.0,
           "standard_deviation": 0.0
         },
         "mrr_at_10": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.5189722222222223,
-          "mean": 0.5189722222222223,
-          "minimum": 0.5189722222222223,
+          "maximum": 0.6492738095238095,
+          "mean": 0.6492738095238095,
+          "minimum": 0.6492738095238095,
           "standard_deviation": 0.0
         },
         "ndcg_at_10": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.5909747010371926,
-          "mean": 0.5909747010371926,
-          "minimum": 0.5909747010371926,
+          "maximum": 0.7125034082839548,
+          "mean": 0.7125034082839548,
+          "minimum": 0.7125034082839548,
           "standard_deviation": 0.0
         },
         "neural_enhancement_ms": {
           "coefficient_of_variation": 0.0,
-          "maximum": 2969.0287510165945,
-          "mean": 2969.0287510165945,
-          "minimum": 2969.0287510165945,
+          "maximum": 1739.0790171921253,
+          "mean": 1739.0790171921253,
+          "minimum": 1739.0790171921253,
           "standard_deviation": 0.0
         },
         "peak_child_rss_bytes": {
           "coefficient_of_variation": 0.0,
-          "maximum": 331898880.0,
-          "mean": 331898880.0,
-          "minimum": 331898880.0,
+          "maximum": 259596288.0,
+          "mean": 259596288.0,
+          "minimum": 259596288.0,
           "standard_deviation": 0.0
         },
         "recall_at_20": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.88,
-          "mean": 0.88,
-          "minimum": 0.88,
+          "maximum": 0.96,
+          "mean": 0.96,
+          "minimum": 0.96,
           "standard_deviation": 0.0
         },
         "warm_latency_p95_ms": {
           "coefficient_of_variation": 0.0,
-          "maximum": 294.63157802820206,
-          "mean": 294.63157802820206,
-          "minimum": 294.63157802820206,
+          "maximum": 593.7984259799123,
+          "mean": 593.7984259799123,
+          "minimum": 593.7984259799123,
           "standard_deviation": 0.0
         }
       },
       "model": {
-        "architecture": "static-embedding",
+        "architecture": "model2vec-static",
         "dimensions": 256,
-        "document_character_limit": 1024,
-        "license": "Apache-2.0",
-        "max_input_tokens": 0,
-        "model_asset_bytes": 125729604,
-        "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+        "document_character_limit": 16384,
+        "license": "MIT",
+        "max_input_tokens": 512,
+        "model_asset_bytes": 33514412,
+        "model_id": "minishlab/potion-code-16M-v2",
         "model_weight_dtype": "f32",
-        "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+        "model_weights_sha256": "75cf7a6c2171b230ad19b1e7d8e0b1aee86da5a02af8e7cacedd9921d227623c",
         "normalize_embeddings": true,
-        "parameter_count": 31254528,
+        "parameter_count": 16244992,
         "pooling": "token-mean",
-        "profile": "static-retrieval-v1",
-        "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
-        "schema_version": 1,
+        "profile": "potion-code-16m-v2",
+        "revision": "e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b",
+        "schema_version": 2,
         "vector_quantization": "f16"
       },
-      "profile": "static-retrieval-v1",
+      "profile": "potion-code-16m-v2",
       "queries": 100,
-      "reason": "Best quality-cost Pareto point and promoted to the full public matrix.",
+      "reason": "Highest nDCG@10, MRR@10, and recall@20 of the candidates with a complete screening matrix, with the smallest model download. It builds vectors more slowly and uses more memory than static-retrieval-v1. Promoted to the full public matrix.",
       "repetitions": 1,
-      "source": "https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1",
+      "source": "https://huggingface.co/minishlab/potion-code-16M-v2",
       "status": "selected-default",
       "task_ndcg_at_10": {
         "codefeedback-st": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.7093195897959768,
-          "mean": 0.7093195897959768,
-          "minimum": 0.7093195897959768,
+          "maximum": 0.9,
+          "mean": 0.9,
+          "minimum": 0.9,
           "standard_deviation": 0.0
         },
         "codetrans-contest": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.5666207786835465,
-          "mean": 0.5666207786835465,
-          "minimum": 0.5666207786835465,
+          "maximum": 0.742443026389066,
+          "mean": 0.742443026389066,
+          "minimum": 0.742443026389066,
           "standard_deviation": 0.0
         },
         "codetrans-dl": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.502508449293588,
-          "mean": 0.502508449293588,
-          "minimum": 0.502508449293588,
+          "maximum": 0.5958824607066954,
+          "mean": 0.5958824607066954,
+          "minimum": 0.5958824607066954,
           "standard_deviation": 0.0
         },
         "cosqa": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.5854499863756594,
-          "mean": 0.5854499863756594,
-          "minimum": 0.5854499863756594,
+          "maximum": 0.6116881460400577,
+          "mean": 0.6116881460400577,
+          "minimum": 0.6116881460400577,
           "standard_deviation": 0.0
         }
       },
@@ -129,43 +130,43 @@
     },
     {
       "binary": {
-        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
-        "version": "ivygrep 0.10.1"
+        "sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
+        "version": "ivygrep 1.2.16"
       },
       "evaluation": "resource-stop-after-one-task",
-      "evidence_sha256": "487ec05c4c73141a0494a56bda721db421d51e382686f5ed90ee3d7556346d16",
+      "evidence_sha256": "f57deac88173d593d0633d0745aab4a63a54a4ac175c4812d0a46ea181715786",
       "harness_sha256": {
-        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3"
+        "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17"
       },
-      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
       "license": "Apache-2.0",
       "metrics": {
         "index_size_bytes": {
-          "mean": 4938721
+          "mean": 3536131
         },
         "mrr_at_10": {
-          "mean": 0.40753968253968254
+          "mean": 0.44733333333333336
         },
         "ndcg_at_10": {
-          "mean": 0.5272623590963638
+          "mean": 0.5814884616500777
         },
         "neural_enhancement_ms": {
-          "mean": 319223.0020320276
+          "mean": 614642.5511012785
         },
         "peak_child_rss_bytes": {
-          "mean": 1434591232
+          "mean": 4355153920
         },
         "recall_at_20": {
-          "mean": 0.96
+          "mean": 1.0
         },
         "warm_latency_p95_ms": {
-          "mean": 1847.214613982942
+          "mean": 1511.4333517849445
         }
       },
       "model": {
         "architecture": "bert",
         "dimensions": 384,
-        "document_character_limit": 1024,
+        "document_character_limit": 2048,
         "license": "Apache-2.0",
         "max_input_tokens": 512,
         "model_asset_bytes": 134174389,
@@ -177,21 +178,21 @@
         "pooling": "attention-mask-mean",
         "profile": "code-minilm-l12-v1",
         "revision": "0574cd81b67ad333192c62bb5da302bec71818fe",
-        "schema_version": 1,
+        "schema_version": 2,
         "vector_quantization": "f16"
       },
       "profile": "code-minilm-l12-v1",
       "queries": 25,
-      "reason": "Stopped after one task because it exceeded both screening budgets and did not beat code MiniLM L6 quality.",
+      "reason": "Stopped after one task because it exceeded both screening budgets, with the longest vector build of the candidates. Its single-task nDCG@10 is the highest of the transformer candidates and below potion-code-16m-v2 on the same task.",
       "repetitions": 1,
       "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
       "status": "resource-stop",
       "task_ndcg_at_10": {
         "codetrans-dl": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.5272623590963638,
-          "mean": 0.5272623590963638,
-          "minimum": 0.5272623590963638,
+          "maximum": 0.5814884616500777,
+          "mean": 0.5814884616500777,
+          "minimum": 0.5814884616500777,
           "standard_deviation": 0.0
         }
       },
@@ -201,43 +202,43 @@
     },
     {
       "binary": {
-        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
-        "version": "ivygrep 0.10.1"
+        "sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
+        "version": "ivygrep 1.2.16"
       },
       "evaluation": "resource-stop-after-one-task",
-      "evidence_sha256": "a8f930ad5b1e26abad416a952cd7a59f0fa0fbbc68dbd48196157f8397533942",
+      "evidence_sha256": "f338e88562b86e4b58f9e3cf8811cd22461aa998165536902aeca4ed18354ac6",
       "harness_sha256": {
-        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3"
+        "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17"
       },
-      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
       "license": "Apache-2.0",
       "metrics": {
         "index_size_bytes": {
-          "mean": 4887746
+          "mean": 3536388
         },
         "mrr_at_10": {
-          "mean": 0.42482539682539683
+          "mean": 0.4193333333333333
         },
         "ndcg_at_10": {
-          "mean": 0.5330106357823786
+          "mean": 0.561725919789271
         },
         "neural_enhancement_ms": {
-          "mean": 187393.67989002494
+          "mean": 309749.71920158714
         },
         "peak_child_rss_bytes": {
-          "mean": 1094172672
+          "mean": 4332683264
         },
         "recall_at_20": {
           "mean": 1.0
         },
         "warm_latency_p95_ms": {
-          "mean": 1155.552031006664
+          "mean": 884.4892741180956
         }
       },
       "model": {
         "architecture": "bert",
         "dimensions": 384,
-        "document_character_limit": 1024,
+        "document_character_limit": 2048,
         "license": "Apache-2.0",
         "max_input_tokens": 512,
         "model_asset_bytes": 91576452,
@@ -249,7 +250,7 @@
         "pooling": "attention-mask-mean",
         "profile": "code-minilm-l6-v1",
         "revision": "13b266a617039c16d924b49a56ae978dbd8727ff",
-        "schema_version": 1,
+        "schema_version": 2,
         "vector_quantization": "f16"
       },
       "profile": "code-minilm-l6-v1",
@@ -261,9 +262,9 @@
       "task_ndcg_at_10": {
         "codetrans-dl": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.5330106357823786,
-          "mean": 0.5330106357823786,
-          "minimum": 0.5330106357823786,
+          "maximum": 0.561725919789271,
+          "mean": 0.561725919789271,
+          "minimum": 0.561725919789271,
           "standard_deviation": 0.0
         }
       },
@@ -273,37 +274,37 @@
     },
     {
       "binary": {
-        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
-        "version": "ivygrep 0.10.1"
+        "sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
+        "version": "ivygrep 1.2.16"
       },
       "evaluation": "resource-stop-after-one-task",
-      "evidence_sha256": "f0bac11a581d1bcdfd637243e5bc03ccd18a6e9ca4017b3d50fca42945dbda28",
+      "evidence_sha256": "00d03cba62c86a4ab84993290f1b5e6d78f91c0dc4527b6c88e919b414ec236b",
       "harness_sha256": {
-        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3"
+        "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17"
       },
-      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
       "license": "Apache-2.0",
       "metrics": {
         "index_size_bytes": {
-          "mean": 4929109
+          "mean": 3535602
         },
         "mrr_at_10": {
-          "mean": 0.32404761904761903
+          "mean": 0.43799999999999994
         },
         "ndcg_at_10": {
-          "mean": 0.4466104937065086
+          "mean": 0.5757774272141727
         },
         "neural_enhancement_ms": {
-          "mean": 196297.97260195483
+          "mean": 261880.8464971371
         },
         "peak_child_rss_bytes": {
-          "mean": 1075355648
+          "mean": 3362443264
         },
         "recall_at_20": {
-          "mean": 0.96
+          "mean": 1.0
         },
         "warm_latency_p95_ms": {
-          "mean": 1309.5091250143014
+          "mean": 879.7315289266407
         }
       },
       "model": {
@@ -321,7 +322,7 @@
         "pooling": "attention-mask-mean",
         "profile": "general",
         "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
-        "schema_version": 1,
+        "schema_version": 2,
         "vector_quantization": "f16"
       },
       "profile": "general",
@@ -333,14 +334,141 @@
       "task_ndcg_at_10": {
         "codetrans-dl": {
           "coefficient_of_variation": 0.0,
-          "maximum": 0.4466104937065086,
-          "mean": 0.4466104937065086,
-          "minimum": 0.4466104937065086,
+          "maximum": 0.5757774272141727,
+          "mean": 0.5757774272141727,
+          "minimum": 0.5757774272141727,
           "standard_deviation": 0.0
         }
       },
       "tasks": [
         "codetrans-dl"
+      ]
+    },
+    {
+      "binary": {
+        "sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
+        "version": "ivygrep 1.2.16"
+      },
+      "evaluation": "complete-screening-matrix",
+      "evidence_sha256": "5a89a1e955ba86596961d9502f40b61f74185e0642d39b0245cefa094a7222c5",
+      "harness_sha256": {
+        "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17",
+        "export_public_retrieval.py": "8d1f35b7c73a9bc256ccecc55464ab8286666e12cd882faaf1640f3d6ad0992b",
+        "public_retrieval_contracts.py": "7559242d4958b03ce5d5e25dc2efb2d39712697d0195b459a1855f75a9ef1b84",
+        "run_public_benchmark_matrix.py": "67eaf68bda9ce8c1f6ee6f0fb9dc88ff47c358fa8cee90f20c2556bf6a31b67e"
+      },
+      "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
+      "license": "Apache-2.0",
+      "metrics": {
+        "index_size_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 9434608.0,
+          "mean": 9434608.0,
+          "minimum": 9434608.0,
+          "standard_deviation": 0.0
+        },
+        "mrr_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.6411666666666666,
+          "mean": 0.6411666666666666,
+          "minimum": 0.6411666666666666,
+          "standard_deviation": 0.0
+        },
+        "ndcg_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.7058346247844159,
+          "mean": 0.7058346247844159,
+          "minimum": 0.7058346247844159,
+          "standard_deviation": 0.0
+        },
+        "neural_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 1176.9934864714742,
+          "mean": 1176.9934864714742,
+          "minimum": 1176.9934864714742,
+          "standard_deviation": 0.0
+        },
+        "peak_child_rss_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 208748544.0,
+          "mean": 208748544.0,
+          "minimum": 208748544.0,
+          "standard_deviation": 0.0
+        },
+        "recall_at_20": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.94,
+          "mean": 0.94,
+          "minimum": 0.94,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 578.1082701869309,
+          "mean": 578.1082701869309,
+          "minimum": 578.1082701869309,
+          "standard_deviation": 0.0
+        }
+      },
+      "model": {
+        "architecture": "static-embedding",
+        "dimensions": 256,
+        "document_character_limit": 16384,
+        "license": "Apache-2.0",
+        "max_input_tokens": 0,
+        "model_asset_bytes": 125729604,
+        "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+        "model_weight_dtype": "f32",
+        "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+        "normalize_embeddings": true,
+        "parameter_count": 31254528,
+        "pooling": "token-mean",
+        "profile": "static-retrieval-v1",
+        "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+        "schema_version": 2,
+        "vector_quantization": "f16"
+      },
+      "profile": "static-retrieval-v1",
+      "queries": 100,
+      "reason": "Default through v1.2.16. Scores slightly lower than potion-code-16m-v2 on the same screening matrix and needs a model download almost four times larger; it builds vectors faster and uses less memory. Still available as an opt-in profile (IVYGREP_MODEL_PROFILE=static).",
+      "repetitions": 1,
+      "source": "https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1",
+      "status": "previous-default",
+      "task_ndcg_at_10": {
+        "codefeedback-st": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.9,
+          "mean": 0.9,
+          "minimum": 0.9,
+          "standard_deviation": 0.0
+        },
+        "codetrans-contest": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.7358263607177484,
+          "mean": 0.7358263607177484,
+          "minimum": 0.7358263607177484,
+          "standard_deviation": 0.0
+        },
+        "codetrans-dl": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5614884616500777,
+          "mean": 0.5614884616500777,
+          "minimum": 0.5614884616500777,
+          "standard_deviation": 0.0
+        },
+        "cosqa": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.6260236767698375,
+          "mean": 0.6260236767698375,
+          "minimum": 0.6260236767698375,
+          "standard_deviation": 0.0
+        }
+      },
+      "tasks": [
+        "codetrans-dl",
+        "codetrans-contest",
+        "cosqa",
+        "codefeedback-st"
       ]
     },
     {
@@ -368,14 +496,14 @@
       "status": "excluded"
     }
   ],
-  "generated_at": "2026-06-16T00:09:50.594004+00:00",
-  "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
-  "renderer_commit": "46da244d38f288ed952576f6ba4fefd737aa9946",
-  "schema_version": 2,
+  "generated_at": "2026-09-20T16:54:49.269309+00:00",
+  "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
+  "renderer_sha256": "5bc6d7f2314040ef13a8bc886b5350ca6ed603efb3caf1a8238a789fe3899926",
+  "schema_version": 3,
   "screening_budget": {
     "max_peak_rss_bytes": 1073741824,
     "max_task_neural_enhancement_ms": 120000,
     "notes": "Candidates crossing either laptop screening limit are stopped after one completed task."
   },
-  "selection": "static-retrieval-v1"
+  "selection": "potion-code-16m-v2"
 }

@@ -267,6 +267,42 @@ def native_training_fixture(
     return dataset, result_path, result, receipt
 
 
+def write_screening_matrix(path: Path, profile: str) -> None:
+    """Write the smallest complete screening matrix the bake-off renderer reads."""
+    metrics = {
+        name: {
+            "mean": 1.0,
+            "standard_deviation": 0.0,
+            "coefficient_of_variation": 0.0,
+            "minimum": 1.0,
+            "maximum": 1.0,
+        }
+        for name in embedding_renderer.METRICS
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "ivygrep_commit": "abc123",
+                "harness_sha256": {
+                    "eval_code_retrieval.py": embedding_renderer.sha256_file(
+                        ROOT / "scripts" / "eval_code_retrieval.py"
+                    )
+                },
+                "neural_models": [{"profile": profile}],
+                "summary": {"neural": {"metrics": metrics}},
+                "queries": 100,
+                "tasks": ["public"],
+                "repetitions": 1,
+                "task_summary": {
+                    "public": {"neural": {"ndcg_at_10": metrics["ndcg_at_10"]}}
+                },
+                "results": [{"binary": {"sha256": "selected"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class PublicBenchmarkTest(unittest.TestCase):
     def test_current_head_source_hash_ignores_gitignored_build_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -790,6 +826,24 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn("--profile public-core", report)
         self.assertNotIn("/home/", report)
 
+    def test_measured_note_names_the_commit_behind_a_reused_version(self):
+        # main keeps reporting the last release's version until the next bump,
+        # so the version alone would credit a release with a later build.
+        matrix = {
+            "generated_at": "2026-09-20T00:00:00+00:00",
+            "ivygrep_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
+            "results": [{"binary": {"version": "ivygrep 1.2.16"}}],
+        }
+        self.assertEqual(
+            renderer.measured_release_note(matrix),
+            "Measured with v1.2.16 at commit 2f4208d79493 (2026-09-20).",
+        )
+        matrix["ivygrep_commit"] = "mixed"
+        self.assertEqual(
+            renderer.measured_release_note(matrix),
+            "Measured with v1.2.16 (2026-09-20).",
+        )
+
     def test_renderer_reproduce_command_uses_matrix_profile(self):
         metrics = {
             name: {
@@ -994,43 +1048,99 @@ class PublicBenchmarkTest(unittest.TestCase):
             },
         )
 
+    def test_embedding_selection_comes_from_the_candidates_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            matrices = {
+                "potion-code-16m-v2": root / "potion.json",
+                "static-retrieval-v1": root / "static.json",
+            }
+            for profile, path in matrices.items():
+                write_screening_matrix(path, profile)
+            candidates = {
+                "static-retrieval-v1": {
+                    "status": "previous-default",
+                    "reason": "Previous default.",
+                },
+                "potion-code-16m-v2": {
+                    "status": "selected-default",
+                    "reason": "Current default.",
+                },
+            }
+            report = embedding_renderer.build_report(
+                ROOT, {"screening_budget": {}, "candidates": candidates}, matrices, {}
+            )
+            self.assertEqual(report["selection"], "potion-code-16m-v2")
+            self.assertEqual(
+                [(item["profile"], item["status"]) for item in report["candidates"]],
+                [
+                    ("potion-code-16m-v2", "selected-default"),
+                    ("static-retrieval-v1", "previous-default"),
+                ],
+            )
+            page = embedding_renderer.html(report)
+            self.assertIn("selected <code>potion-code-16m-v2</code>", page)
+            self.assertNotIn("selected <code>static-retrieval-v1</code>", page)
+            # Each row states how much evidence its numbers rest on.
+            self.assertIn("<td>100 in 1 task</td>", page)
+
+            # A selected default without a complete matrix has no evidence.
+            with self.assertRaisesRegex(ValueError, "complete screening matrix"):
+                embedding_renderer.build_report(
+                    ROOT,
+                    {"screening_budget": {}, "candidates": candidates},
+                    {"static-retrieval-v1": matrices["static-retrieval-v1"]},
+                    {},
+                )
+            for statuses in (
+                ("selected-default", "selected-default"),
+                ("previous-default", "rejected"),
+            ):
+                ambiguous = {
+                    name: {**metadata, "status": status}
+                    for (name, metadata), status in zip(
+                        candidates.items(), statuses, strict=True
+                    )
+                }
+                with (
+                    self.subTest(statuses=statuses),
+                    self.assertRaisesRegex(ValueError, "exactly one selected-default"),
+                ):
+                    embedding_renderer.build_report(
+                        ROOT,
+                        {"screening_budget": {}, "candidates": ambiguous},
+                        matrices,
+                        {},
+                    )
+
+    def test_published_embedding_report_matches_the_candidates_file(self):
+        candidates = json.loads(
+            (ROOT / "benchmarks/public/model_candidates.json").read_text()
+        )["candidates"]
+        report = json.loads(
+            (ROOT / "docs/benchmarks/embedding-model-bakeoff.json").read_text()
+        )
+        self.assertEqual(
+            report["selection"],
+            embedding_renderer.selected_profile({"candidates": candidates}),
+        )
+        self.assertEqual(
+            {item["profile"]: item["status"] for item in report["candidates"]},
+            {name: metadata["status"] for name, metadata in candidates.items()},
+        )
+        selected = next(
+            item
+            for item in report["candidates"]
+            if item["profile"] == report["selection"]
+        )
+        self.assertEqual(selected["evaluation"], "complete-screening-matrix")
+
     def test_embedding_partial_must_match_selected_binary(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             matrix_path = root / "matrix.json"
             partial_path = root / "partial.json"
-            metrics = {
-                name: {
-                    "mean": 1.0,
-                    "standard_deviation": 0.0,
-                    "coefficient_of_variation": 0.0,
-                    "minimum": 1.0,
-                    "maximum": 1.0,
-                }
-                for name in embedding_renderer.METRICS
-            }
-            matrix_path.write_text(
-                json.dumps(
-                    {
-                        "ivygrep_commit": "abc123",
-                        "harness_sha256": {
-                            "eval_code_retrieval.py": embedding_renderer.sha256_file(
-                                ROOT / "scripts" / "eval_code_retrieval.py"
-                            )
-                        },
-                        "neural_models": [{"profile": "static-retrieval-v1"}],
-                        "summary": {"neural": {"metrics": metrics}},
-                        "queries": 100,
-                        "tasks": ["public"],
-                        "repetitions": 1,
-                        "task_summary": {
-                            "public": {"neural": {"ndcg_at_10": metrics["ndcg_at_10"]}}
-                        },
-                        "results": [{"binary": {"sha256": "selected"}}],
-                    }
-                ),
-                encoding="utf-8",
-            )
+            write_screening_matrix(matrix_path, "static-retrieval-v1")
             partial_path.write_text(
                 json.dumps(
                     {

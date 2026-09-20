@@ -6,11 +6,17 @@
     "notes": "Candidates crossing either laptop screening limit are stopped after one completed task."
   },
   "candidates": {
-    "static-retrieval-v1": {
+    "potion-code-16m-v2": {
       "status": "selected-default",
+      "source": "https://huggingface.co/minishlab/potion-code-16M-v2",
+      "license": "MIT",
+      "reason": "Highest nDCG@10, MRR@10, and recall@20 of the candidates with a complete screening matrix, with the smallest model download. It builds vectors more slowly and uses more memory than static-retrieval-v1. Promoted to the full public matrix."
+    },
+    "static-retrieval-v1": {
+      "status": "previous-default",
       "source": "https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1",
       "license": "Apache-2.0",
-      "reason": "Best quality-cost Pareto point and promoted to the full public matrix."
+      "reason": "Default through v1.2.16. Scores slightly lower than potion-code-16m-v2 on the same screening matrix and needs a model download almost four times larger; it builds vectors faster and uses less memory. Still available as an opt-in profile (IVYGREP_MODEL_PROFILE=static)."
     },
     "general": {
       "status": "rejected",
@@ -28,7 +34,7 @@
       "status": "resource-stop",
       "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
       "license": "Apache-2.0",
-      "reason": "Stopped after one task because it exceeded both screening budgets and did not beat code MiniLM L6 quality."
+      "reason": "Stopped after one task because it exceeded both screening budgets, with the longest vector build of the candidates. Its single-task nDCG@10 is the highest of the transformer candidates and below potion-code-16m-v2 on the same task."
     },
     "nomic-ai/CodeRankEmbed": {
       "status": "excluded",

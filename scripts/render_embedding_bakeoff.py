@@ -9,7 +9,6 @@ from html import escape
 import hashlib
 import json
 from pathlib import Path
-import subprocess
 
 
 METRICS = (
@@ -29,16 +28,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def git_revision(root: Path) -> str:
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    ).stdout.strip()
 
 
 def parse_evidence(values: list[str]) -> dict[str, Path]:
@@ -118,12 +107,28 @@ def partial_candidate(
     }
 
 
+def selected_profile(manifest: dict) -> str:
+    """The candidates file, not this renderer, names the selected default."""
+    selected = [
+        name
+        for name, metadata in manifest["candidates"].items()
+        if metadata.get("status") == "selected-default"
+    ]
+    if len(selected) != 1:
+        raise ValueError(
+            "the candidates file must mark exactly one selected-default profile, "
+            f"found {len(selected)}"
+        )
+    return selected[0]
+
+
 def build_report(
     root: Path,
     manifest: dict,
     matrices: dict[str, Path],
     partials: dict[str, Path],
 ) -> dict:
+    selection = selected_profile(manifest)
     candidates = []
     evaluated = set(matrices) | set(partials)
     for profile, path in matrices.items():
@@ -131,11 +136,7 @@ def build_report(
             matrix_candidate(profile, path, manifest["candidates"][profile])
         )
     selected = next(
-        (
-            candidate
-            for candidate in candidates
-            if candidate["status"] == "selected-default"
-        ),
+        (candidate for candidate in candidates if candidate["profile"] == selection),
         None,
     )
     if selected is None:
@@ -173,15 +174,42 @@ def build_report(
         )
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "ivygrep_commit": evidence_commit,
-        "renderer_commit": git_revision(root),
+        # A content hash identifies the renderer even when it lands in the same
+        # change as the report; a checkout revision cannot.
+        "renderer_sha256": sha256_file(
+            root / "scripts" / "render_embedding_bakeoff.py"
+        ),
         "binary_sha256": binary_sha256,
         "screening_budget": manifest["screening_budget"],
-        "selection": "static-retrieval-v1",
+        "selection": selection,
         "candidates": candidates,
     }
+
+
+def scope_note(report: dict) -> str:
+    """Say which rows are comparable, from the evidence each candidate has."""
+    complete = [
+        candidate["profile"]
+        for candidate in report["candidates"]
+        if candidate.get("evaluation") == "complete-screening-matrix"
+    ]
+    note = (
+        f"{report['selection']} is the selected default. Complete screening "
+        f"matrix: {', '.join(complete)}."
+    )
+    if any(
+        candidate.get("evaluation") == "resource-stop-after-one-task"
+        for candidate in report["candidates"]
+    ):
+        note += (
+            " Candidates that crossed a screening limit were stopped after one "
+            "completed task; those rows are single-task observations and are not "
+            "comparable with complete rows."
+        )
+    return note
 
 
 def format_bytes(value: float) -> str:
@@ -233,10 +261,7 @@ def markdown(report: dict) -> str:
             "",
             "## Decision",
             "",
-            "The static retrieval profile is the portable Pareto winner and the only "
-            "candidate promoted through the complete screening matrix. Transformer "
-            "candidates that crossed a laptop screening limit were stopped after one "
-            "completed task, so their partial results stay single-task results.",
+            scope_note(report),
             "",
             "The selected model was promoted to the full 1,000-query public matrix; "
             "screening-only results are not used as headline quality numbers.",
@@ -246,11 +271,12 @@ def markdown(report: dict) -> str:
             "```bash",
             "uv run scripts/export_public_retrieval.py --profile model-bakeoff \\",
             "  --output /tmp/ivygrep-model-bakeoff-datasets",
-            "IVYGREP_MODEL_PROFILE=static uv run scripts/run_public_benchmark_matrix.py \\",
+            f"IVYGREP_MODEL_PROFILE={report['selection']} \\",
+            "  uv run scripts/run_public_benchmark_matrix.py \\",
             "  --profile model-bakeoff --modes neural --runs 1 \\",
             "  --datasets-root /tmp/ivygrep-model-bakeoff-datasets \\",
-            "  --work-root /tmp/ivygrep-model-bakeoff-static \\",
-            "  --output /tmp/ivygrep-model-bakeoff-static.json",
+            "  --work-root /tmp/ivygrep-model-bakeoff-selected \\",
+            "  --output /tmp/ivygrep-model-bakeoff-selected.json",
             "```",
             "",
         )
@@ -269,11 +295,22 @@ def html(report: dict) -> str:
         rss = (
             format_bytes(metrics["peak_child_rss_bytes"]["mean"]) if metrics else "-"
         )
+        build = (
+            f"{metrics['neural_enhancement_ms']['mean'] / 1000:.2f} s" if metrics else "-"
+        )
+        # A single-task row must not read like a complete matrix.
+        tasks = len(candidate.get("tasks") or [])
+        scope = (
+            f"{candidate['queries']} in {tasks} task{'' if tasks == 1 else 's'}"
+            if metrics
+            else "-"
+        )
         rows.append(
             "<tr>"
             f"<td><code>{escape(candidate['profile'])}</code></td>"
             f"<td>{escape(candidate['status'])}</td>"
-            f"<td>{ndcg}</td><td>{latency}</td><td>{escape(rss)}</td>"
+            f"<td>{scope}</td>"
+            f"<td>{ndcg}</td><td>{latency}</td><td>{build}</td><td>{escape(rss)}</td>"
             f"<td>{escape(candidate['reason'])}</td>"
             "</tr>"
         )
@@ -303,13 +340,13 @@ def html(report: dict) -> str:
     <section class="report-card">
       <h2>Candidate results</h2>
       <div class="report-table-wrap"><table class="report-table">
-        <thead><tr><th>Profile</th><th>Status</th><th>nDCG@10</th><th>Warm p95</th><th>Peak RSS</th><th>Decision</th></tr></thead>
+        <thead><tr><th>Profile</th><th>Status</th><th>Queries</th><th>nDCG@10</th><th>Warm p95</th><th>Neural build</th><th>Peak RSS</th><th>Decision</th></tr></thead>
         <tbody>{"".join(rows)}</tbody>
       </table></div>
     </section>
     <section class="report-card">
       <h2>Scope</h2>
-      <p>The static profile is the only candidate that completed the screening matrix within the declared laptop budget. Resource-stopped rows are single-task observations.</p>
+      <p>{escape(scope_note(report))}</p>
     </section>
   </main>
 </body>

@@ -7,6 +7,7 @@ import argparse
 from html import escape
 import json
 from pathlib import Path
+import re
 
 from public_retrieval_contracts import executed_fit_model_verified, verified_fit_disjoint
 
@@ -96,7 +97,14 @@ def measured_release_note(matrix: dict) -> str:
         return ""
     generated = str(matrix.get("generated_at", ""))[:10]
     suffix = f" ({generated})" if generated else ""
-    return f"Measured with {', '.join(f'v{version}' for version in versions)}{suffix}."
+    # The package version alone cannot tell a tagged release from a later
+    # build of main that still reports it, so name the measured commit too.
+    commit = str(matrix.get("ivygrep_commit", ""))
+    source = f" at commit {commit[:12]}" if re.fullmatch(r"[0-9a-f]{40}", commit) else ""
+    return (
+        f"Measured with {', '.join(f'v{version}' for version in versions)}"
+        f"{source}{suffix}."
+    )
 
 
 def query_evidence_label(matrix: dict) -> str:
