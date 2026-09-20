@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-20T00:32:13.130034+00:00",
+  "mode": "long",
+  "platform": "Linux-6.8.0-1061-aws-x86_64-with-glibc2.35",
+  "machine": "x86_64",
+  "cpu_affinity": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+  "binary_sha256": "14c7b6d7ad716dbcde77835674be9ecc20e6daf5628159e078eafde1a9d4fe45",
+  "binary_version": "ivygrep 1.2.16",
+  "source_commit": "b3184f670524e7f5ddb72009f7b49ca7e0cd8c4a",
+  "source_dirty": true,
+  "harness_sha256": "a5882ba8a0af59d3c26bede68020dd09e275bf46dd3f8101f26d951712a4b6a5",
+  "phases": ["churn"],
+  "background_enhancement": false,
+  "extra_environment": [],
+  "malloc_arenas": "2",
+  "settings": {
+    "clients": 64,
+    "workspaces": 1,
+    "duration": 7200.0,
+    "churn": 500,
+    "stampede": 32,
+    "lifecycle_cycles": 1000,
+    "corpus": "full",
+    "think_time": 0.02,
+    "seed": 20260919,
+    "load_warmup": 600.0
+  },
+  "passed": true,
+  "churn": {
+    "worktrees": 500,
+    "warmup_worktrees": 250,
+    "seconds": 1448.6578721138649,
+    "checkpoints": [
+      {"worktrees": 0, "rss_bytes": 54620160, "pss_bytes": 45947904, "rss_anon_bytes": 23601152, "threads": 44, "fds": 21, "inotify_instances": 1, "inotify_watches": 300, "index_dirs": 1, "orphan_index_dirs": 0, "index_bytes": 13549568},
+      {"worktrees": 100, "elapsed_seconds": 218.17481777025387, "rss_bytes": 127631360, "pss_bytes": 117177344, "rss_anon_bytes": 94523392, "threads": 52, "fds": 29, "inotify_instances": 2, "inotify_watches": 301, "index_dirs": 12, "orphan_index_dirs": 11, "index_bytes": 15892480},
+      {"worktrees": 250, "elapsed_seconds": 551.1554674189538, "rss_bytes": 133435392, "pss_bytes": 122970112, "rss_anon_bytes": 100315136, "threads": 52, "fds": 29, "inotify_instances": 2, "inotify_watches": 301, "index_dirs": 12, "orphan_index_dirs": 11, "index_bytes": 15892480},
+      {"worktrees": 500, "elapsed_seconds": 1348.5782183599658, "rss_bytes": 138932224, "pss_bytes": 128461824, "rss_anon_bytes": 105811968, "threads": 51, "fds": 29, "inotify_instances": 2, "inotify_watches": 301, "index_dirs": 9, "orphan_index_dirs": 8, "index_bytes": 15249408}
+    ],
+    "settled": {
+      "rss_bytes": 68440064,
+      "pss_bytes": 64583680,
+      "rss_anon_bytes": 37421056,
+      "threads": 44,
+      "fds": 21,
+      "inotify_instances": 1,
+      "inotify_watches": 300,
+      "index_dirs": 1,
+      "orphan_index_dirs": 0,
+      "index_bytes": 13549568
+    },
+    "stale_edits": [],
+    "base_results_from_nested_worktrees": [],
+    "gate": {
+      "passed": true,
+      "metrics": {
+        "rss_anon_bytes": {
+          "baseline": 23601152,
+          "settled": 37421056,
+          "growth": 13819904,
+          "budget": 33554432,
+          "passed": true
+        },
+        "fds": {
+          "baseline": 21,
+          "settled": 21,
+          "growth": 0,
+          "budget": 8,
+          "passed": true
+        },
+        "threads": {
+          "baseline": 44,
+          "settled": 44,
+          "growth": 0,
+          "budget": 4,
+          "passed": true
+        },
+        "inotify_watches": {
+          "baseline": 300,
+          "settled": 300,
+          "growth": 0,
+          "budget": 16,
+          "passed": true
+        },
+        "inotify_instances": {
+          "baseline": 1,
+          "settled": 1,
+          "growth": 0,
+          "budget": 0,
+          "passed": true
+        },
+        "index_dirs": {
+          "baseline": 1,
+          "settled": 1,
+          "growth": 0,
+          "budget": 1,
+          "passed": true
+        },
+        "orphan_index_dirs": {
+          "baseline": 0,
+          "settled": 0,
+          "growth": 0,
+          "budget": 1,
+          "passed": true
+        }
+      }
+    },
+    "passed": true
+  },
+  "daemon_log_bytes": 739363,
+  "duration_seconds": 2182.4127173000015
+}

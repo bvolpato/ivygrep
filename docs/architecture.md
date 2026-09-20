@@ -827,6 +827,99 @@ advanced skips the redundant rescan.
 indexes. Status distinguishes lexical readiness, hash coverage, neural coverage,
 active jobs, stalled work, watcher health, and compaction recommendations.
 
+## Running ivygrep in many agent sessions
+
+Every Claude Code or Codex session that configures `ig --mcp` starts its own
+MCP process. All of them share one daemon per `IVYGREP_HOME`, which the first
+call auto-spawns. Thirty-two sessions started at once with no daemon spawn
+several daemon processes, and the single-instance lock leaves exactly one
+within two seconds.
+
+**Shared, in the daemon:** indexes, watchers (one per indexed workspace), the
+query model, search contexts (32), query results (128), the preview cache
+(64 MiB), CPU permits (one per core) for searches, context packs, and index
+runs, and background enhancement workers, which are separate processes: at most
+two hash and two neural workers at once, however many workspaces were edited.
+
+**Per session:** one MCP process that frames JSON-RPC and forwards hybrid,
+literal, and regex searches and context packs to the daemon. Symbol, reference,
+and caller lookups and `ig_status` run in the MCP process and open stores only
+for the call. A session holds no connection between calls: each call connects,
+asks, and disconnects.
+
+Measured on Linux x86_64 with a 33 MB corpus and the `static-retrieval-v1`
+neural profile, the default at the time
+([report](benchmarks/daemon-soak.md#many-mcp-sessions)):
+
+| State of one `ig --mcp` process | Anonymous RSS | PSS | Threads | Descriptors |
+| --- | --- | --- | --- | --- |
+| after `initialize` | 1.4 MiB | 2.4 MiB | 3 | 9 |
+| after 10,000 hybrid searches | 1.9 MiB | 3.5 MiB | 3 | 9 |
+| after 501 context packs | 2.3 MiB | 4.1 MiB | 3 | 9 |
+| after one search with no daemon (local fallback) | 46 MiB | 50 MiB | 28 | 9 |
+| after local literal, regex, and context packs | 88 MiB | 92 MiB | 28 | 9 |
+
+Busy sessions hold a little more than idle ones: 50 sessions requesting context
+packs held 92 MiB of anonymous memory and 196 threads together, and 64 sessions
+issuing mixed calls for two hours held 179 MiB and 880 descriptors, 2.8 MiB
+each, without growth. The daemon is the large process: 290 MiB of anonymous
+memory with one session and eight workspaces, about 800 MiB while 64 sessions
+keep it busy, and about 230 MiB once it has been idle for 60 to 90 seconds on
+Linux with glibc. The local fallback is the expensive session state, and a
+process that entered it keeps the memory until the session ends. A session
+falls back when no daemon answers: `IVYGREP_NO_AUTOSPAWN` is set, the daemon is
+restarting, its 512 connection slots are taken, or a connection attempt times
+out after two seconds.
+
+Which Linux build runs the daemon decides both its memory and its latency, more
+than any knob below
+([measured](benchmarks/daemon-soak.md#allocators-the-shipped-musl-build-glibc-and-one-arena-per-core)).
+The release archives are static musl builds. musl's allocator keeps the daemon
+small, 174 to 185 MiB idle and about 200 MiB under 64 busy sessions, but every
+thread allocates through one lock: with 8 busy sessions a musl daemon served a
+third of the calls of a glibc daemon at two to four times the latency, and with
+64 sessions hybrid searches took 2.2 s at the median against 0.2 s. A glibc
+build (from source, or the CUDA archive) is fast and keeps memory: about 600 to
+800 MiB under the same load, about 230 MiB after the idle trim, and an idle
+footprint that grows with sustained load, about 150 bytes per call over two
+hours of saturating load, because freed memory fragments across about a hundred
+arenas. Memory in use does not grow: malloc's own count stayed flat over
+hundreds of thousands of calls of every kind. The macOS allocator was not
+measured.
+
+The daemon inherits the environment of the session that spawns it. Set the
+variables below the same way in every session, or the daemon runs with
+whatever the first caller had.
+
+| Knob | Why it matters with many sessions |
+| --- | --- |
+| `IVYGREP_HOME` | Sessions share a daemon, indexes, and caches only when they share this. |
+| `IVYGREP_INDEX_GC_GRACE_SECS` | How long the index of a deleted directory stays. Default seven days; overlays of worktrees removed with `git worktree remove` go after ten minutes. |
+| `IVYGREP_ENHANCE_MAX_WORKERS` | Enhancement workers that run at once per lane (hash, neural), for all workspaces together. Default `2`. Twenty edited worktrees queue in the daemon, and the one searched or edited last goes first. Raise it on a large host if vectors lag behind edits. |
+| `IVYGREP_ENHANCE_MAX_LOAD_RATIO` | Background hash and neural enhancement pause above this load average per core. Default `2.0`. A worker that has not started yet waits without a model or stores in memory. |
+| `IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT` | Turns enhancement off entirely; searches stay lexical plus whatever vectors exist. |
+| `IVYGREP_MCP_INDEX_WAIT_SECS` | How long a call waits for a first index before it answers `status: indexing`. |
+| `IVYGREP_SEARCH_DEADLINE_SECS` | Bounds a daemon search so one slow query cannot hold a CPU permit for minutes. Context packs have no deadline. |
+| `MALLOC_ARENA_MAX` (glibc builds only) | Not an ivygrep variable. Freed memory stays in the malloc arenas of the daemon's threads until the daemon goes idle and trims them, and what the trim cannot return grows with sustained load. One arena per core (`16` on the measured host) cost about 10% of the calls at unchanged median latency, lowered memory under load by a fifth, and halved the growth of the idle daemon. `4` cost 16% of the calls and doubled the median latency, `2` two thirds of the calls. Worth setting to the core count for a glibc daemon that stays busy for days. musl ignores it. |
+| inotify limits (Linux) | Each watched workspace uses one inotify instance and one watch per directory. `fs.inotify.max_user_instances` defaults to 128 on many distributions. |
+
+**Cleanup.** A session exits when its client closes stdin or stdout or is
+killed; it has no state of its own to clean. The daemon never exits when idle.
+It releases the watcher, thread, and descriptors of a workspace whose
+directory is gone, stops retrying it, and removes its index after the grace
+period; see [Daemon, watchers, and background work](#daemon-watchers-and-background-work).
+Agent worktrees under `<repo>/.claude/worktrees/` are workspaces of their own:
+they reuse the base index through an overlay and never enter the base index.
+`daemon.log` rotates at 10 MiB while the daemon runs. `ig --gc` removes the
+indexes of deleted directories by hand, and `ig --rm PATH` removes one index.
+
+**Upgrades.** A session started before an upgrade keeps its old binary until
+the client restarts it. The first call from a new session replaces an older
+daemon (that one call runs in-process), and the new daemon keeps serving the
+old sessions as long as it supports their protocol version, which
+`MIN_DAEMON_PROTOCOL_VERSION` states. Old sessions keep their old behavior,
+including in-process context packs, until they restart.
+
 ## Protocols and compatibility
 
 ### Daemon IPC

@@ -55,6 +55,8 @@ jobs:
               scripts/bench_million_chunks.py \
               scripts/soak_daemon.py \
               tests/test_soak_daemon.py \
+              scripts/soak_mcp_sessions.py \
+              tests/test_soak_mcp_sessions.py \
               scripts/check_public_benchmark_privacy.py \
               scripts/compare_million_benchmarks.py \
               src/ \
@@ -257,6 +259,23 @@ jobs:
             --duration "$duration" \
             --restarts 2 \
             --output benchmark-results/daemon-soak.json
+
+      - name: Run MCP session soak
+        if: steps.parameters.outputs.required == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # The work directory stays under /tmp so evidence carries no home path.
+          scale=(--mode short)
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            scale=(--mode short --stampede 32 --lifecycle-cycles 200 --clients 32 --duration 1800 --churn 100 --churn-checkpoints "10,50,100")
+          fi
+          uv run scripts/soak_mcp_sessions.py \
+            --binary "$RUNNER_TEMP/head-target/release/ig" \
+            --repo . \
+            "${scale[@]}" \
+            --work-dir "$(mktemp -d /tmp/ivygrep-mcp-soak.XXXXXX)" \
+            --output benchmark-results/mcp-session-soak.json
 
       - name: Validate soak evidence privacy
         if: always() && steps.parameters.outputs.required == 'true'
