@@ -268,7 +268,7 @@ jobs:
           # The work directory stays under /tmp so evidence carries no home path.
           scale=(--mode short)
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            scale=(--mode short --stampede 32 --lifecycle-cycles 200 --clients 32 --duration 1800 --churn 100 --churn-checkpoints 10,50,100)
+            scale=(--mode short --stampede 32 --lifecycle-cycles 200 --clients 32 --duration 1800 --churn 100 --churn-checkpoints "10,50,100")
           fi
           uv run scripts/soak_mcp_sessions.py \
             --binary "$RUNNER_TEMP/head-target/release/ig" \
