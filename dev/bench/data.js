@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789919002910,
+  "lastUpdate": 1789922625178,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -68006,6 +68006,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2169.67,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7d44c1f04faf5d6b90af8f270fe17a44da426b02",
+          "message": "[deps] Update the npm, GitHub Actions, and Cargo dependency groups (#411)\n\n* chore(deps): bump the npm group in /web with 3 updates\n\nBumps the npm group in /web with 3 updates: [markdown-it](https://github.com/markdown-it/markdown-it), [vite](https://github.com/vitejs/vite/tree/HEAD/packages/vite) and [vitest](https://github.com/vitest-dev/vitest/tree/HEAD/packages/vitest).\n\n\nUpdates `markdown-it` from 15.0.1 to 15.0.2\n- [Changelog](https://github.com/markdown-it/markdown-it/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/markdown-it/markdown-it/compare/15.0.1...15.0.2)\n\nUpdates `vite` from 8.2.2 to 8.3.0\n- [Release notes](https://github.com/vitejs/vite/releases)\n- [Changelog](https://github.com/vitejs/vite/blob/main/packages/vite/CHANGELOG.md)\n- [Commits](https://github.com/vitejs/vite/commits/create-vite@8.3.0/packages/vite)\n\nUpdates `vitest` from 5.0.0 to 5.0.1\n- [Release notes](https://github.com/vitest-dev/vitest/releases)\n- [Changelog](https://github.com/vitest-dev/vitest/blob/main/docs/releases.md)\n- [Commits](https://github.com/vitest-dev/vitest/commits/v5.0.1/packages/vitest)\n\n---\nupdated-dependencies:\n- dependency-name: markdown-it\n  dependency-version: 15.0.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: npm\n- dependency-name: vite\n  dependency-version: 8.3.0\n  dependency-type: direct:development\n  update-type: version-update:semver-minor\n  dependency-group: npm\n- dependency-name: vitest\n  dependency-version: 5.0.1\n  dependency-type: direct:development\n  update-type: version-update:semver-patch\n  dependency-group: npm\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* chore(deps): bump the github-actions group with 2 updates\n\nBumps the github-actions group with 2 updates: [benchmark-action/github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark) and [docker/setup-qemu-action](https://github.com/docker/setup-qemu-action).\n\n\nUpdates `benchmark-action/github-action-benchmark` from 1.22.1 to 1.22.2\n- [Release notes](https://github.com/benchmark-action/github-action-benchmark/releases)\n- [Changelog](https://github.com/benchmark-action/github-action-benchmark/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/benchmark-action/github-action-benchmark/compare/52576c92bccf6ac60c8223ec7eb2565637cae9ba...4322e5726e6334590d251fc4f92bec0efafc45dc)\n\nUpdates `docker/setup-qemu-action` from 4.3.0 to 4.4.0\n- [Release notes](https://github.com/docker/setup-qemu-action/releases)\n- [Commits](https://github.com/docker/setup-qemu-action/compare/1f40c72289eff860ee54a304f1438e3cff362e0a...99012661954931238ded8c8b007157a8430204e1)\n\n---\nupdated-dependencies:\n- dependency-name: benchmark-action/github-action-benchmark\n  dependency-version: 1.22.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: github-actions\n- dependency-name: docker/setup-qemu-action\n  dependency-version: 4.4.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: github-actions\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* chore(deps): bump the cargo group across 1 directory with 4 updates\n\nBumps the cargo group with 4 updates in the / directory: [unicode-ident](https://github.com/dtolnay/unicode-ident), [smallvec](https://github.com/servo/rust-smallvec), [toml_edit](https://github.com/toml-rs/toml) and [tree-sitter-ocaml](https://github.com/tree-sitter/tree-sitter-ocaml).\n\n\nUpdates `unicode-ident` from 1.0.24 to 1.0.26\n- [Release notes](https://github.com/dtolnay/unicode-ident/releases)\n- [Commits](https://github.com/dtolnay/unicode-ident/compare/1.0.24...1.0.26)\n\nUpdates `smallvec` from 1.16.0 to 1.16.1\n- [Release notes](https://github.com/servo/rust-smallvec/releases)\n- [Commits](https://github.com/servo/rust-smallvec/compare/v1.16.0...v1.16.1)\n\nUpdates `toml_edit` from 0.25.13+spec-1.1.0 to 0.25.15+spec-1.1.0\n- [Commits](https://github.com/toml-rs/toml/compare/v0.25.13...v0.25.15)\n\nUpdates `tree-sitter-ocaml` from 0.25.0 to 0.26.0\n- [Release notes](https://github.com/tree-sitter/tree-sitter-ocaml/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-ocaml/compare/v0.25.0...v0.26.0)\n\n---\nupdated-dependencies:\n- dependency-name: smallvec\n  dependency-version: 1.16.1\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: toml_edit\n  dependency-version: 0.25.15+spec-1.1.0\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tree-sitter-ocaml\n  dependency-version: 0.26.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: unicode-ident\n  dependency-version: 1.0.26\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* [docs] Regenerate the evidence dashboard for the updated release workflow\n\nThe dashboard records a hash of .github/workflows/release.yml, which the docker/setup-qemu-action update changes.\n\n* [web] Rebuild the checked-in Web UI bundle for the updated npm dependencies\n\nCI rebuilds web/dist from the frozen lockfile and fails on a diff. markdown-it 15.0.2 is bundled, so the bundle changes with it. Built with pnpm 10.33.0, the pinned package manager.\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-20T11:53:51-04:00",
+          "tree_id": "02359fe45046fb12c65967a1a473e014fe55273b",
+          "url": "https://github.com/bvolpato/ivygrep/commit/7d44c1f04faf5d6b90af8f270fe17a44da426b02"
+        },
+        "date": 1789922624735,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 44508.57,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3482.89,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 55343.08,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 205074.55,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 12.43,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1925.98,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1559.4,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 3235.92,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 2220.51,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.88,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 137.68,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 5367.91,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1786.14,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1847.29,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3320.18,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3949.52,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 4457.99,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 517.65,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1855.01,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 472775.92,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 121.04,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 499830.16,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 17401.45,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 92253.44,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 198.95,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2174.7,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 323.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 743.24,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 5149.2,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 103.57,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 590.48,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2631.44,
             "unit": "µs"
           }
         ]
