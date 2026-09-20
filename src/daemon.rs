@@ -315,6 +315,9 @@ struct WatchEventFilter {
     skip_gitignore: bool,
     git_exclude_path: Option<PathBuf>,
     root_gitignore: Option<ignore::gitignore::Gitignore>,
+    /// Same rule as the file walker, so events below a nested worktree or
+    /// clone never reach the enclosing workspace's index.
+    nested_checkouts: crate::workspace::NestedCheckouts,
 }
 
 #[derive(Debug, Default)]
@@ -852,12 +855,14 @@ impl WatchEventFilter {
             skip_gitignore: false,
             git_exclude_path: None,
             root_gitignore: None,
+            nested_checkouts: crate::workspace::NestedCheckouts::default(),
         };
         filter.refresh();
         filter
     }
 
     fn refresh(&mut self) {
+        self.nested_checkouts = crate::workspace::NestedCheckouts::new(&self.workspace.root);
         self.skip_gitignore = self
             .workspace
             .read_metadata()
@@ -880,6 +885,11 @@ impl WatchEventFilter {
                 .normalize_watch_path(path)
                 .is_some_and(|(normalized, _)| {
                     crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized)
+                        // A nested checkout's ignore files configure that
+                        // checkout, not this workspace.
+                        || self
+                            .nested_checkouts
+                            .contains(&self.workspace.root, &normalized)
                 })
                 && self.is_ignore_configuration_path(path)
         }) {
@@ -914,6 +924,9 @@ impl WatchEventFilter {
         if rel.as_os_str().is_empty()
             || is_always_ignored_watch_path(&rel)
             || crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized_path)
+            || self
+                .nested_checkouts
+                .contains(&self.workspace.root, &normalized_path)
         {
             return false;
         }
@@ -962,6 +975,8 @@ impl WatchEventFilter {
         self.normalize_watch_path(path).is_some_and(|(_, rel)| {
             rel.file_name()
                 .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+                // The root `.gitmodules` decides which nested checkouts stay.
+                || rel == Path::new(".gitmodules")
         })
     }
 }
@@ -12069,6 +12084,107 @@ mod tests {
             "a stopped retry recreated the index"
         );
         assert!(!control.indexing.load(Ordering::Relaxed));
+    }
+
+    /// Files with a literal hit. This reads the index without the daemon's
+    /// leases, and a context cannot load while the watcher publishes an
+    /// update, so a failed read is tried again.
+    async fn literal_hit_paths(workspace: &Workspace, needle: &str) -> Vec<PathBuf> {
+        let options = SearchOptions {
+            limit: Some(50),
+            ..Default::default()
+        };
+        let mut last_error = None;
+        for _ in 0..600 {
+            match SearchContext::load(workspace, None, false).and_then(|context| {
+                literal_search_with_context(&context, workspace, needle, &options)
+            }) {
+                Ok(hits) => {
+                    let mut paths = hits
+                        .into_iter()
+                        .map(|hit| hit.file_path)
+                        .collect::<Vec<_>>();
+                    paths.sort();
+                    return paths;
+                }
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("the index never became readable: {last_error:?}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn agent_worktrees_nested_in_the_base_stay_out_of_its_index_and_watch_updates() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn nested_checkout_marker() {}\n").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-m", "initial"]);
+        let before = main.join(".claude/worktrees/before");
+        git(
+            &main,
+            &["worktree", "add", "-b", "before", before.to_str().unwrap()],
+        );
+
+        // A worktree that exists when the base is indexed.
+        let workspace = Workspace::resolve(&main).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        assert_eq!(
+            literal_hit_paths(&workspace, "nested_checkout_marker").await,
+            [PathBuf::from("lib.rs")],
+            "the base must not return a worktree's copy of each file"
+        );
+
+        // A worktree created, and edited, while the base is watched.
+        let state = test_state();
+        let _watcher_cleanup = WatcherCleanup(&state);
+        register_watcher(&state, &main).unwrap();
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        let after = main.join(".claude/worktrees/after");
+        git(
+            &main,
+            &["worktree", "add", "-b", "after", after.to_str().unwrap()],
+        );
+        std::fs::write(after.join("agent.rs"), "pub fn nested_agent_edit() {}\n").unwrap();
+        std::fs::write(main.join("base.rs"), "pub fn base_edit_marker() {}\n").unwrap();
+        // The base edit is the signal that the watcher processed this burst.
+        // A loaded Windows runner has needed far more than the helper's 6 s.
+        let mut base_edit_visible = false;
+        for _ in 0..5 {
+            base_edit_visible =
+                wait_for_literal_visibility(&workspace, "base_edit_marker", true).await;
+            if base_edit_visible {
+                break;
+            }
+        }
+        assert!(base_edit_visible, "watcher never indexed the base edit");
+        assert_eq!(
+            literal_hit_paths(&workspace, "nested_checkout_marker").await,
+            [PathBuf::from("lib.rs")]
+        );
+        assert!(
+            literal_hit_paths(&workspace, "nested_agent_edit")
+                .await
+                .is_empty()
+        );
+        let filter = state.watchers.lock()[&workspace.id].event_filter.clone();
+        assert!(!filter.lock().path_should_reindex(&after.join("agent.rs")));
+        assert!(filter.lock().path_should_reindex(&main.join("base.rs")));
+
+        // The worktree is its own workspace and still sees its files.
+        let linked = Workspace::resolve(&after).unwrap();
+        assert!(linked.is_worktree());
+        index_workspace(&linked, create_hash_model().as_ref()).unwrap();
+        assert_eq!(
+            literal_hit_paths(&linked, "nested_agent_edit").await,
+            [PathBuf::from("agent.rs")]
+        );
     }
 
     #[tokio::test]

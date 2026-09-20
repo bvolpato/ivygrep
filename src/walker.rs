@@ -8,6 +8,7 @@ use ignore::WalkBuilder;
 ///
 /// Configuration:
 /// - Shows hidden files (but skips `.git` repository/worktree metadata)
+/// - Skips linked worktrees and clones nested in a Git workspace; submodules stay
 /// - Respects `.gitignore`, `.git/info/exclude`, global gitignore, and `.ignore` (unless skip_gitignore is true)
 /// - Does not require a git repository
 /// - Does not follow symlinks
@@ -22,9 +23,14 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     walker.ignore(!skip_gitignore);
     walker.require_git(false);
     walker.follow_links(false);
+    let nested_checkouts = crate::workspace::NestedCheckouts::new(root);
     walker.filter_entry(move |entry| {
         entry.file_name() != ".git"
             && !is_owned_storage_path(&workspace_root, entry.path(), owned_root.as_deref())
+            // A nested worktree or clone is a workspace of its own.
+            && !(entry.depth() > 0
+                && entry.file_type().is_some_and(|kind| kind.is_dir())
+                && nested_checkouts.is_separate_checkout(&workspace_root, entry.path()))
     });
     let git_entry = root.join(".git");
     let may_have_external_common_dir = git_entry.is_file() || git_entry.join("commondir").is_file();
@@ -46,6 +52,7 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
 pub(crate) struct SourcePathMatcher {
     root: PathBuf,
     owned_root: Option<PathBuf>,
+    nested_checkouts: crate::workspace::NestedCheckouts,
     ignore: ignore::IncrementalIgnore,
     error: Option<ignore::Error>,
 }
@@ -55,6 +62,7 @@ impl SourcePathMatcher {
         Self {
             root: root.to_path_buf(),
             owned_root: owned_storage_root(root),
+            nested_checkouts: crate::workspace::NestedCheckouts::new(root),
             ignore: source_walker(root, skip_gitignore)
                 .build_matchers()
                 .pop()
@@ -75,6 +83,9 @@ impl SourcePathMatcher {
                 &self.root.join(path),
                 self.owned_root.as_deref(),
             )
+            || self
+                .nested_checkouts
+                .contains(&self.root, &self.root.join(path))
         {
             return Ok(false);
         }
@@ -224,6 +235,97 @@ mod tests {
         let files = collect_files(tmp.path(), true);
         assert!(files.contains("main.rs"));
         assert!(!files.contains(".git"));
+    }
+
+    fn write_git_dir(path: &Path, linked_worktree: bool) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        if linked_worktree {
+            std::fs::write(path.join("commondir"), "../..\n").unwrap();
+        } else {
+            std::fs::create_dir_all(path.join("objects")).unwrap();
+            std::fs::create_dir_all(path.join("refs")).unwrap();
+        }
+    }
+
+    /// A workspace holding a linked worktree, a nested clone, an absorbed
+    /// submodule, and a submodule with an embedded `.git` directory.
+    fn write_nested_checkouts(root: &Path) {
+        let file = |path: &str, contents: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        file("main.rs", "fn main() {}\n");
+        file(".claude/notes.md", "kept\n");
+        file(".claude/worktrees/agent/main.rs", "fn main() {}\n");
+        file(".claude/worktrees/agent/.gitignore", "target/\n");
+        write_git_dir(&root.join(".git/worktrees/agent"), true);
+        file(
+            ".claude/worktrees/agent/.git",
+            &format!("gitdir: {}\n", root.join(".git/worktrees/agent").display()),
+        );
+        file("clone/lib.rs", "fn clone() {}\n");
+        write_git_dir(&root.join("clone/.git"), false);
+        file("vendor/absorbed/lib.rs", "fn absorbed() {}\n");
+        write_git_dir(&root.join(".git/modules/absorbed"), false);
+        file(
+            "vendor/absorbed/.git",
+            "gitdir: ../../.git/modules/absorbed\n",
+        );
+        file("vendor/embedded/lib.rs", "fn embedded() {}\n");
+        write_git_dir(&root.join("vendor/embedded/.git"), false);
+        file(
+            ".gitmodules",
+            "[submodule \"embedded\"]\n\tpath = vendor/embedded\n\turl = https://example.invalid/e.git\n",
+        );
+    }
+
+    #[test]
+    fn nested_worktrees_and_clones_are_separate_workspaces_but_submodules_stay() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_git_dir(&tmp.path().join(".git"), false);
+        write_nested_checkouts(tmp.path());
+
+        for skip_gitignore in [false, true] {
+            let mut files = collect_files(tmp.path(), skip_gitignore)
+                .into_iter()
+                .collect::<Vec<_>>();
+            files.sort();
+            assert_eq!(
+                files,
+                [
+                    ".claude/notes.md",
+                    ".gitmodules",
+                    "main.rs",
+                    "vendor/absorbed/lib.rs",
+                    "vendor/embedded/lib.rs"
+                ]
+            );
+            let mut matcher = SourcePathMatcher::new(tmp.path(), skip_gitignore);
+            for (path, allowed) in [
+                ("main.rs", true),
+                ("vendor/absorbed/lib.rs", true),
+                ("vendor/embedded/lib.rs", true),
+                (".claude/worktrees/agent/main.rs", false),
+                (".claude/worktrees/agent/deleted.rs", false),
+                ("clone/lib.rs", false),
+                // A deleted worktree's paths must still reach the index as deletions.
+                (".claude/worktrees/removed/main.rs", true),
+            ] {
+                assert_eq!(matcher.allows(Path::new(path)).unwrap(), allowed, "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_directory_of_clones_keeps_indexing_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_nested_checkouts(tmp.path());
+
+        let files = collect_files(tmp.path(), false);
+        assert!(files.contains("clone/lib.rs"));
+        assert!(files.contains(".claude/worktrees/agent/main.rs"));
     }
 
     #[test]
