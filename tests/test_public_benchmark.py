@@ -1357,6 +1357,62 @@ class PublicBenchmarkTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "provenance"):
                 reranker_trainer.load_examples([(dataset, result_path)])
 
+    def test_training_fits_path_features_only_on_corpora_with_real_paths(self):
+        names = list(contracts.RERANK_FEATURE_SCHEMA)
+        primary = names.index("primary_source")
+
+        def example(synthetic_paths):
+            # The path feature alone separates the relevant file.
+            relevant = [0.0] * len(names)
+            relevant[primary] = 1.0
+            return {
+                "dataset": "fixture",
+                "query_id": "q1",
+                "synthetic_paths": synthetic_paths,
+                "judgments": {"d2": 1},
+                "candidates": [
+                    {"document_id": "d1", "features": [0.0] * len(names), "grade": 0, "rank": 0},
+                    {"document_id": "d2", "features": relevant, "grade": 1, "rank": 1},
+                ],
+            }
+
+        fit_on_real_paths = reranker_trainer.train_weights([example(False)], 0.05, 0.0001, 5)
+        fit_on_exported_paths = reranker_trainer.train_weights([example(True)], 0.05, 0.0001, 5)
+        self.assertGreater(fit_on_real_paths[primary], 0.0)
+        self.assertEqual(fit_on_exported_paths[primary], 0.0)
+        self.assertEqual(
+            reranker_trainer.fixed_zero_features([example(True)])["features"],
+            sorted(reranker_trainer.PATH_FEATURES),
+        )
+        self.assertIsNone(
+            reranker_trainer.fixed_zero_features([example(True), example(False)])
+        )
+
+        self.assertTrue(
+            reranker_trainer.synthetic_corpus_paths(
+                ["documents/000000001.py", "documents/000002-d7.txt"]
+            )
+        )
+        self.assertFalse(
+            reranker_trainer.synthetic_corpus_paths(["documents/000000001.py", "src/lib.rs"])
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset, result_path, _, _ = native_training_fixture(Path(temporary))
+            examples, sources = reranker_trainer.load_examples([(dataset, result_path)])
+            self.assertTrue(examples[0]["synthetic_paths"])
+            self.assertTrue(sources[0]["synthetic_corpus_paths"])
+
+    def test_embedded_model_gives_no_weight_to_path_features_fit_on_exported_paths(self):
+        model = json.loads((ROOT / "benchmarks/public/reranker_model.json").read_text())
+        fixed = model["fixed_zero_features"]
+        self.assertEqual(fixed["rule"], "synthetic-corpus-paths")
+        self.assertEqual(fixed["features"], sorted(reranker_trainer.PATH_FEATURES))
+        weights = dict(zip(model["feature_schema"], model["weights"], strict=True))
+        self.assertEqual(
+            {name: weights[name] for name in fixed["features"]},
+            dict.fromkeys(fixed["features"], 0.0),
+        )
+
     def test_local_capture_missing_record_preserves_raw_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

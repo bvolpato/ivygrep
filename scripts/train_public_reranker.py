@@ -8,7 +8,7 @@ from collections import Counter
 import hashlib
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import random
 import subprocess
 
@@ -17,6 +17,24 @@ import public_retrieval_contracts as contracts
 
 
 FEATURE_NAMES = contracts.RERANK_FEATURE_SCHEMA
+# Features computed from the candidate's file path, or set by the path search
+# pass. The public exporter writes every document to
+# `documents/<position>.<extension>`, so on those corpora they describe the
+# export, not the document: `primary_source` is the dataset's language tag, and
+# path coverage is a number in the query that happens to occur in a position.
+# In a repository the same features separate code from docs and templates, so a
+# weight fit on exported paths ranks real files by noise.
+PATH_FEATURES = (
+    "source_path",
+    "query_path_coverage",
+    "exact_query_path",
+    "support_path",
+    "primary_source",
+    "shallow_path",
+    "path_term_f1",
+)
+PATH_FEATURE_INDEXES = tuple(FEATURE_NAMES.index(name) for name in PATH_FEATURES)
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -34,6 +52,31 @@ def git_revision(root: Path) -> str:
         text=True,
         stdout=subprocess.PIPE,
     ).stdout.strip()
+
+
+def synthetic_corpus_paths(paths) -> bool:
+    """Whether every document sits in the flat `documents/` directory that the
+    public exporter and the evaluator's fallback write, not in a repository
+    layout."""
+    paths = list(paths)
+    return bool(paths) and all(
+        PurePosixPath(path).parent.as_posix() == "documents" for path in paths
+    )
+
+
+def fixed_zero_features(examples: list[dict]) -> dict | None:
+    """Name the path features when no fit example was allowed to move them."""
+    if not all(example.get("synthetic_paths") for example in examples):
+        return None
+    return {
+        "rule": "synthetic-corpus-paths",
+        "features": sorted(PATH_FEATURES),
+        "reason": (
+            "Every fit corpus stores its documents at synthetic paths, so features "
+            "computed from the file path carry no relevance information there. "
+            "Their pair differences are left out of the fit and their weights stay zero."
+        ),
+    }
 
 
 def parse_pair(value: str) -> tuple[Path, Path]:
@@ -110,6 +153,7 @@ def load_examples(pairs: list[tuple[Path, Path]]) -> tuple[list[dict], list[dict
             )
         receipts = result_path.parent / receipt_name
         path_to_id = eval_code_retrieval.corpus_path_map(dataset)
+        synthetic_paths = synthetic_corpus_paths(path_to_id)
         source_provenance = json.loads(
             (dataset / "provenance.json").read_text(encoding="utf-8")
         )
@@ -192,6 +236,7 @@ def load_examples(pairs: list[tuple[Path, Path]]) -> tuple[list[dict], list[dict
                         "query": text,
                         "candidates": candidates,
                         "judgments": qrels.get(query_id, {}),
+                        "synthetic_paths": synthetic_paths,
                     }
                 )
                 fit_ids.append(query_id)
@@ -219,6 +264,7 @@ def load_examples(pairs: list[tuple[Path, Path]]) -> tuple[list[dict], list[dict
                 "fit_query_ids": sorted(fit_ids),
                 "skipped_queries": skipped,
                 "native_capture_schema_version": 1,
+                "synthetic_corpus_paths": synthetic_paths,
             }
         )
     return examples, provenance
@@ -314,17 +360,17 @@ def training_pairs(examples: list[dict]) -> list[tuple[list[float], float]]:
                 grade_delta = preferred["grade"] - other["grade"]
                 if grade_delta <= 0:
                     continue
-                pairs.append(
-                    (
-                        [
-                            left - right
-                            for left, right in zip(
-                                preferred["features"], other["features"], strict=True
-                            )
-                        ],
-                        float(grade_delta),
+                difference = [
+                    left - right
+                    for left, right in zip(
+                        preferred["features"], other["features"], strict=True
                     )
-                )
+                ]
+                if example.get("synthetic_paths"):
+                    # Only corpora with real paths fit PATH_FEATURES.
+                    for index in PATH_FEATURE_INDEXES:
+                        difference[index] = 0.0
+                pairs.append((difference, float(grade_delta)))
     return pairs
 
 
@@ -515,6 +561,9 @@ def main() -> int:
             "learned_all": evaluate(examples, weights),
         },
     }
+    fixed = fixed_zero_features(examples)
+    if fixed is not None:
+        report["fixed_zero_features"] = fixed
     if evaluation_examples is not None:
         report["evaluation"] = evaluation_report(
             evaluation_examples,

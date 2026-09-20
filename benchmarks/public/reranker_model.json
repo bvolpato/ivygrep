@@ -286,6 +286,26 @@
     "natural_language_preview_f1",
     "code_query_line_coverage"
   ],
+  "fixed_zero_features": {
+    "applied": "after-fit",
+    "features": [
+      "exact_query_path",
+      "path_term_f1",
+      "primary_source",
+      "query_path_coverage",
+      "shallow_path",
+      "source_path",
+      "support_path"
+    ],
+    "note": "The training and evaluation records in this file describe the fit before these weights were set to zero. The fit corpora are public exporter output, whose documents all sit at documents/<position>.<extension>.",
+    "reason": "Every fit corpus stores its documents at synthetic paths, so features computed from the file path carry no relevance information there. Their pair differences are left out of the fit and their weights stay zero.",
+    "replaced_fitted_weights": {
+      "path_term_f1": 0.14369399842625388,
+      "primary_source": -1.9662510370680273,
+      "query_path_coverage": -0.5702602174663177
+    },
+    "rule": "synthetic-corpus-paths"
+  },
   "model_id": "public-linear-reranker-v2",
   "schema_version": 2,
   "training": {
@@ -376,11 +396,11 @@
     0.0,
     -0.43822018840934857,
     2.38091446207854,
-    -0.5702602174663177,
     0.0,
     0.0,
     0.0,
-    -1.9662510370680273,
+    0.0,
+    0.0,
     0.0,
     0.0,
     -0.4196155195420839,
@@ -404,7 +424,7 @@
     0.8046216068246524,
     5.4436381729057635,
     -1.3154373294909543,
-    0.14369399842625388,
+    0.0,
     2.8784291818506316,
     -1.308989233283413
   ]

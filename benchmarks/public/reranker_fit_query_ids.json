@@ -1,6 +1,6 @@
 {
   "model_id": "public-linear-reranker-v2",
-  "model_sha256": "dedb2afa59d127be049f0ba1b1beb4e0cb8e2fabbbe13ad3e39bd58b9250bb1f",
+  "model_sha256": "5712e2a7ba3ac4675dc626887faa279bb928442c9df0ed67e000619d270c2cb0",
   "model_training_commit": "2af0e029e289c947ac7201f784ce4bf382aecdd5",
   "queries": 481,
   "schema_version": 1,

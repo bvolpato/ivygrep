@@ -152,6 +152,18 @@ they contribute no model-fit example and are not retrieval-quality failures.
 Legacy traces without native provenance fail clearly instead of being upgraded.
 Training/evaluation pairs must have disjoint actual repository-qualified IDs.
 
+The trainer fits features that come from the file path (`PATH_FEATURES` in
+`train_public_reranker.py`) only on corpora with real paths. The public exporter
+stores every document at `documents/<position>.<extension>`, so there these
+features describe the export: `primary_source` is the dataset's language tag.
+For a corpus whose documents all sit in a flat `documents/` directory, the
+trainer leaves the path features' pair differences out of the fit, their weights
+stay zero, and the model file names them under `fixed_zero_features`. The
+embedded model was fit before this rule existed. Its three non-zero path weights
+were set to zero afterwards; `fixed_zero_features.replaced_fitted_weights` keeps
+the fitted values, and the fit ledger is bound to the new model bytes. Its
+`training` and `evaluation` records describe the fit before that edit.
+
 `train_public_reranker.py --fit-ledger-output PATH` writes the exact used-ID
 ledger bound to a newly generated model. Skipped IDs are excluded from fit
 counts but remain in source provenance. Updating the embedded model and its

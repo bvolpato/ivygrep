@@ -537,6 +537,19 @@ context requests retain a second snippet until rendering; both snippets come
 from the same file read, with no additional file I/O. Model weights, routing,
 candidate budgets, and rerank gates are unchanged.
 
+The model gives no weight to the seven features that come from the file path
+(`primary_source`, `query_path_coverage`, `path_term_f1`, `support_path`,
+`shallow_path`, `exact_query_path`, and the `source_path` flag). It was fit on
+public benchmark exports, which store every document at
+`documents/<position>.<extension>`: there `primary_source` is the dataset's
+language tag, and path coverage is a number in the query that happens to occur
+in a position. The fit had still produced weights, -1.97 for `primary_source`,
+and in a repository that weight penalized every code file against docs,
+templates, and scripts. `scripts/train_public_reranker.py` leaves path features
+out of the fit for corpora with such paths and records that in the model file
+as `fixed_zero_features`. Path roles stay the job of the deterministic ranker,
+whose order the learned stage starts from.
+
 Setting `IVYGREP_RERANKER_CAPTURE=1` enables an opt-in diagnostic record at the
 hybrid search rerank decision point. A single JSON line prefixed with
 `IVYGREP_RERANKER_CAPTURE` and a tab is written to stderr, separate from normal

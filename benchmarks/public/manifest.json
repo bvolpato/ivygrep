@@ -14,7 +14,7 @@
   "reranker_fit_ledger": {
     "model": "reranker_model.json",
     "path": "reranker_fit_query_ids.json",
-    "sha256": "9922bf01e102a8a0b3d680c555d2ce3452f02657e2228a22e1ea1e91d7d105d3"
+    "sha256": "6150e68660fceaa0f68f02d8d4f20a0ce1f1062bbee0168c5432670266d2eb63"
   },
   "profiles": {
     "model-bakeoff": {
