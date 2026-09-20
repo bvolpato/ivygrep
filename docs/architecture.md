@@ -604,8 +604,14 @@ is released. The watch worker releases it when an update fails because the root
 is gone, and the supervisor pass covers roots that vanished without an event
 reaching the worker. Release stops the watch backend with its thread and
 descriptors, the heartbeat, and the retry loop, and drops the workspace's cached
-contexts, resolution entries, and retry backoff. Nothing retries a missing root
-and it gets no backoff entry. The job ledger records once, as a failed watcher
+contexts and its full-index bookkeeping. The same path can be checked out again
+while that runs, so release never takes state away from a returning root: the
+replacement marker and the resolution entry stay, because they are how a
+different checkout at the same path is recognized (the resolution cache is an
+LRU), a registration failure found after the release belongs to the returning
+root, and if the root is already back only the stale watcher goes. Nothing
+retries a missing root and it gets no backoff entry. The job ledger records
+once, as a failed watcher
 whose error says that the workspace directory no longer exists, so `ig --status`
 keeps showing why the workspace is not watched; later passes leave the record
 alone. The index and `watch_enabled` stay, so the same path checked out again is
