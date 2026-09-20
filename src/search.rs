@@ -50,7 +50,8 @@ use file_cache::{CachedFileContent, FileContentCache};
 use semantic_visibility::{refill_semantic_matches, score_constrained_semantic_keys};
 
 use crate::search_routing::{
-    QueryIntent, QueryRouting, corpus_candidate_multiplier, neural_fallback_needed, raw_query_terms,
+    QueryIntent, QueryRouting, corpus_candidate_multiplier, is_long_query, neural_fallback_needed,
+    raw_query_terms,
 };
 use crate::text::{build_code_analyzer, singularize_token, split_identifier_segments};
 use crate::vector_store::{
@@ -2206,13 +2207,19 @@ fn natural_language_symbol_queries(query_text: &str) -> Vec<String> {
                 .then_some((raw, lower))
         })
         .collect::<Vec<_>>();
+    // A long prompt opens with a sentence, so a word whose only capital is its
+    // first letter ("Create", "Given") is prose there, not a type name.
+    let sentence_case_is_prose = is_long_query(query_text);
     let mut explicit = meaningful
         .iter()
         .take(2)
         .filter_map(|(raw, lower)| {
+            let sentence_case = raw.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+                && raw.chars().skip(1).all(|ch| ch.is_ascii_lowercase());
             let source_shaped = raw.contains(['_', '$'])
                 || raw.chars().any(|ch| ch.is_ascii_uppercase())
-                    && raw.chars().any(|ch| ch.is_ascii_lowercase());
+                    && raw.chars().any(|ch| ch.is_ascii_lowercase())
+                    && !(sentence_case && sentence_case_is_prose);
             source_shaped.then_some(((*raw).to_string(), lower.clone()))
         })
         .collect::<Vec<_>>();
@@ -2485,9 +2492,10 @@ enum SignatureScoring {
     /// One-line queries: signature matches score 5x, so a short request reaches
     /// the definition it names.
     Boosted,
-    /// Multi-line prose: signature matches score like body matches. A 5x bonus
-    /// for every term of a long prompt would lift short definitions that share a
-    /// word above documents that explain the task.
+    /// Multi-line prose and one-line prompts of `LONG_QUERY_MIN_TERMS` terms or
+    /// more: signature matches score like body matches. A 5x bonus for every
+    /// term of a long prompt would lift short definitions that share a word
+    /// above documents that explain the task.
     Plain,
     /// Pasted source and multi-line error output leave the field out.
     Omitted,
@@ -2499,7 +2507,7 @@ impl SignatureScoring {
     fn for_query(query_text: &str, pasted_source: bool) -> Self {
         if pasted_source {
             Self::Omitted
-        } else if query_text.trim().contains('\n') {
+        } else if query_text.trim().contains('\n') || is_long_query(query_text) {
             Self::Plain
         } else {
             Self::Boosted
@@ -8695,6 +8703,57 @@ function sendfile(res, path, options, callback) {
     }
 
     #[test]
+    fn long_prompts_do_not_infer_symbols_from_sentence_case_words() {
+        // A short request keeps its capitalized subject as a type name.
+        assert_eq!(
+            natural_language_symbol_queries("Create session tokens for login")
+                .first()
+                .map(String::as_str),
+            Some("Create")
+        );
+        // The same opening word in a long prompt is the start of a sentence.
+        let prompt = "Create a software sequence which accepts a character set and an array \
+                      of character strings, then returns every string that contains the set";
+        assert!(is_long_query(prompt));
+        assert!(
+            natural_language_symbol_queries(prompt)
+                .iter()
+                .all(|query| query != "Create"),
+            "a sentence-case word in a long prompt is prose, got: {:?}",
+            natural_language_symbol_queries(prompt)
+        );
+        // Identifiers with an inner capital or an underscore stay lookups.
+        let named = "Explain how parseConfig decides which file wins when several configuration \
+                     files define the same key more than once in a project";
+        assert!(is_long_query(named));
+        assert!(natural_language_symbol_queries(named).contains(&"parseConfig".to_string()));
+    }
+
+    #[test]
+    fn signature_scoring_treats_long_one_line_prompts_as_prose() {
+        assert_eq!(
+            SignatureScoring::for_query("handle error", false),
+            SignatureScoring::Boosted
+        );
+        assert_eq!(
+            SignatureScoring::for_query("where do we\nreconcile a worktree overlay", false),
+            SignatureScoring::Plain
+        );
+        let prompt = "Given a string of text, count the vowels and consonants in each word and \
+                      report the frequency of every unique word";
+        assert!(is_long_query(prompt) && !prompt.contains('\n'));
+        assert_eq!(
+            SignatureScoring::for_query(prompt, false),
+            SignatureScoring::Plain,
+            "a long one-line prompt scores signatures like multi-line prose does"
+        );
+        assert_eq!(
+            SignatureScoring::for_query(prompt, true),
+            SignatureScoring::Omitted
+        );
+    }
+
+    #[test]
     fn exact_symbol_queries_include_qualified_leaf_names() {
         assert_eq!(
             exact_symbol_query_names("Rack::Response", false),
@@ -9337,6 +9396,79 @@ export function registerCommands(p: Plugin) {
 
     #[test]
     #[serial]
+    fn long_one_line_prompt_ranks_the_explaining_body_above_signature_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("answer.py"),
+            "def solve(data):\n    # count vowels and consonants in each word of the text string\n    # report frequency of every unique word in the text\n    return tally(data)\n",
+        )
+        .unwrap();
+        // More one-line definitions than the natural-language rerank window,
+        // each naming three of the prompt's words in its signature and none in
+        // its body.
+        let words = [
+            "given",
+            "string",
+            "text",
+            "count",
+            "vowels",
+            "consonants",
+            "each",
+            "word",
+            "report",
+            "frequency",
+            "every",
+            "unique",
+        ];
+        for index in 0..120 {
+            let (first, second, third) = (
+                words[index % words.len()],
+                words[(index + 4) % words.len()],
+                words[(index + 8) % words.len()],
+            );
+            std::fs::write(
+                tmp.path().join(format!("decoy_{index:03}.py")),
+                format!("def {first}_{second}_{third}(arg):\n    return None\n"),
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let prompt = "Given a string of text, count the vowels and consonants in each word and \
+                      report the frequency of every unique word";
+        // The same wording on two lines already scores signatures like body text.
+        for query in [prompt.to_string(), prompt.replacen(", ", ",\n", 1)] {
+            let hits = hybrid_search(
+                &workspace,
+                &query,
+                None,
+                &SearchOptions {
+                    limit: Some(20),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                hits.first().map(|hit| hit.file_path.clone()),
+                Some(PathBuf::from("answer.py")),
+                "prompt {query:?} should rank the body that explains the task first, got: {:?}",
+                hits.iter()
+                    .take(5)
+                    .map(|hit| hit.file_path.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn pasted_error_output_ranks_the_raising_code_above_environment_path_matches() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -9476,6 +9608,229 @@ export function registerCommands(p: Plugin) {
             is_ignored: false,
             definitions: None,
         }
+    }
+
+    #[test]
+    #[serial]
+    fn long_query_keeps_a_clear_bm25_leader_above_structural_boosts() {
+        // Both chunks contain every query word, so coverage boosts tie. The
+        // module-level explanation leads BM25 by a wide margin; the function
+        // carries the definition-kind boost.
+        let body = "count the vowels and consonants of each word in the text string and \
+                    report the frequency of every unique word";
+        let mut explanation = make_chunk_with_path("explanation", "notes/answer.py", body);
+        explanation.kind = "Module".to_string();
+        let helper = make_chunk_with_path("helper", "notes/helper.py", body);
+        let candidates = |explanation: &IndexedChunk, helper: &IndexedChunk| FusionCandidates {
+            lexical: vec![(explanation.clone(), 116.0), (helper.clone(), 40.0)],
+            semantic: vec![],
+            literal: vec![],
+            path: vec![],
+            path_weight: 1.5,
+            symbols: vec![],
+        };
+
+        let prompt = "Given a string of text, count the vowels and consonants in each word and \
+                      report the frequency of every unique word";
+        assert!(is_long_query(prompt));
+        let ranked = fuse_rrf(candidates(&explanation, &helper), 1.0, prompt, Some(10));
+        assert_eq!(
+            ranked[0].0.chunk_id, "explanation",
+            "a long prompt keeps its clear BM25 leader first: {ranked:#?}"
+        );
+
+        // A lookup keeps the existing behavior: near-flat rank votes let the
+        // definition-kind boost choose between the two matches.
+        let ranked = fuse_rrf(
+            candidates(&explanation, &helper),
+            1.0,
+            "count unique word",
+            Some(10),
+        );
+        assert_eq!(
+            ranked[0].0.chunk_id, "helper",
+            "a short lookup is still ordered by structural boosts: {ranked:#?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn long_query_vote_adds_files_after_the_results_the_score_filter_kept() {
+        // `leader` dominates BM25. The score filter keeps `named`, a strong
+        // path match, under its score cut. A third candidate fails the cut
+        // the vote stretched, clears the unvoted one, and outscores `named`.
+        let explained = "count the vowels and consonants of each word in the text string and \
+                         report the frequency of every unique word";
+        let partial = "count the vowels and consonants of each word in the text string and report";
+        let module = |id: &str, path: &str, body: &str| {
+            let mut chunk = make_chunk_with_path(id, path, body);
+            chunk.kind = "Module".to_string();
+            chunk
+        };
+        let fused = |third: IndexedChunk| {
+            let prompt = "Given a string of text, count the vowels and consonants in each word \
+                          and report the frequency of every unique word";
+            assert!(is_long_query(prompt));
+            fuse_rrf(
+                FusionCandidates {
+                    lexical: vec![
+                        (module("leader", "notes/leader.py", explained), 100.0),
+                        (third, 5.0),
+                    ],
+                    semantic: vec![],
+                    literal: vec![],
+                    path: vec![(
+                        module("named", "notes/consonants.py", "unrelated session notes"),
+                        1.0,
+                    )],
+                    path_weight: 1.5,
+                    symbols: vec![],
+                },
+                1.0,
+                prompt,
+                Some(20),
+            )
+        };
+        let ids = |ranked: &[(IndexedChunk, f32, Vec<String>)]| {
+            ranked
+                .iter()
+                .map(|(chunk, _, _)| chunk.chunk_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // Another file is returned, after the results the filter kept: placing
+        // it by score would move it above `named`.
+        let ranked = fused(module("middle", "notes/middle.py", partial));
+        assert_eq!(ids(&ranked), ["leader", "named", "middle"], "{ranked:#?}");
+        assert!(
+            ranked.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+            "returned scores stay sorted: {ranked:#?}"
+        );
+
+        // Another chunk of the leader's file adds no file and stays out, so
+        // the file's returned hits are what they were without the vote's help.
+        let ranked = fused(module("leader-tail", "notes/leader.py", partial));
+        assert_eq!(ids(&ranked), ["leader", "named"], "{ranked:#?}");
+    }
+
+    #[test]
+    #[serial]
+    fn long_query_vote_keeps_the_unvoted_score_with_the_position_a_span_takes() {
+        // The leader file's best-scored chunk carries the vote, so most of its
+        // score is voted. Span promotion shows another chunk of that file in
+        // its position and leaves the score there. That chunk's own score is
+        // mostly unvoted. Judged with its ratio, the position's unvoted score
+        // doubles, the unvoted score cut rises with it, and the tail files
+        // the cut exists to keep are dropped.
+        let prompt = "Given a string of text, count the vowels and consonants in each word and \
+                      report the frequency of every unique word";
+        assert!(is_long_query(prompt));
+        let module = |id: &str, path: &str, body: &str| {
+            let mut chunk = make_chunk_with_path(id, path, body);
+            chunk.kind = "Module".to_string();
+            chunk
+        };
+        let mut lexical = vec![
+            (
+                module(
+                    "leader-summary",
+                    "notes/leader.py",
+                    "count the vowels and consonants of each word",
+                ),
+                100.0,
+            ),
+            (
+                module(
+                    "leader-detail",
+                    "notes/leader.py",
+                    "count the vowels and consonants of each word in the text string and \
+                     report the frequency of every unique word given",
+                ),
+                3.0,
+            ),
+        ];
+        for index in 0..3 {
+            lexical.push((
+                module(
+                    &format!("tail-{index}"),
+                    &format!("notes/tail_{index}.py"),
+                    "count the vowels and consonants of each word in the text string and report",
+                ),
+                5.0,
+            ));
+        }
+        let ranked = fuse_rrf(
+            FusionCandidates {
+                lexical,
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![],
+            },
+            1.0,
+            prompt,
+            Some(20),
+        );
+        let ids = ranked
+            .iter()
+            .map(|(chunk, _, _)| chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids.first(),
+            Some(&"leader-detail"),
+            "the representative span takes the leader's position: {ranked:#?}"
+        );
+        assert_eq!(
+            ids,
+            ["leader-detail", "tail-0", "tail-1", "tail-2"],
+            "the tail clears the unvoted score cut of the position's own score: {ranked:#?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn long_query_vote_orders_results_without_truncating_the_tail() {
+        // One clear BM25 leader and fifteen sessions with a fifth of its score.
+        // Their text shares no word with the prompt, so no boost narrows the
+        // gap the vote opens. Without the vote every session clears the score
+        // filter. The vote must not change that: a question that needs several
+        // sessions still gets its low-share ones.
+        let body = "unrelated session notes";
+        let lexical = (0..16)
+            .map(|index| {
+                let mut chunk = make_chunk_with_path(
+                    &format!("session-{index:02}"),
+                    &format!("notes/session_{index:02}.py"),
+                    body,
+                );
+                chunk.kind = "Module".to_string();
+                (chunk, if index == 0 { 100.0 } else { 20.0 })
+            })
+            .collect::<Vec<_>>();
+        let candidates = || FusionCandidates {
+            lexical: lexical.clone(),
+            semantic: vec![],
+            literal: vec![],
+            path: vec![],
+            path_weight: 1.5,
+            symbols: vec![],
+        };
+
+        let prompt = "Given a string of text, count the vowels and consonants in each word and \
+                      report the frequency of every unique word";
+        assert!(is_long_query(prompt));
+        let ranked = fuse_rrf(candidates(), 1.0, prompt, Some(20));
+        assert_eq!(ranked[0].0.chunk_id, "session-00", "{ranked:#?}");
+        assert_eq!(
+            ranked.len(),
+            16,
+            "the vote orders candidates but does not shorten the list the score filter returns"
+        );
+        assert!(
+            ranked.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+            "returned scores stay sorted: {ranked:#?}"
+        );
     }
 
     #[test]

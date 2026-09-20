@@ -33,6 +33,16 @@ pub(crate) struct QueryRouting {
     pub(crate) symbol_limit: usize,
 }
 
+/// Raw terms from which a query reads as a natural-language prompt, not a
+/// lookup. Routing, signature scoring, symbol inference, and the long-query
+/// lexical vote in fusion share this cut.
+pub(crate) const LONG_QUERY_MIN_TERMS: usize = 13;
+
+/// Whether `query` has at least [`LONG_QUERY_MIN_TERMS`] raw terms.
+pub(crate) fn is_long_query(query: &str) -> bool {
+    raw_query_terms(query).len() >= LONG_QUERY_MIN_TERMS
+}
+
 impl QueryRouting {
     pub(crate) fn classify(query: &str) -> Self {
         let trimmed = query.trim();
@@ -89,7 +99,7 @@ impl QueryRouting {
             QueryIntent::ExactIdentifier
         } else if targets_support {
             QueryIntent::DocsTestsExamples
-        } else if terms.len() >= 13 {
+        } else if terms.len() >= LONG_QUERY_MIN_TERMS {
             QueryIntent::NaturalLanguage
         } else {
             QueryIntent::Mixed
@@ -115,7 +125,7 @@ impl QueryRouting {
                 intent,
                 // Large literals are often pasted code or detailed prompts.
                 // Keep exact retrieval dominant while retaining semantic recall.
-                use_neural: terms.len() >= 13,
+                use_neural: terms.len() >= LONG_QUERY_MIN_TERMS,
                 lexical_multiplier: 10,
                 literal_multiplier: 8,
                 semantic_multiplier: 1,
