@@ -234,3 +234,16 @@ fn capture_reports_actual_canonical_prelearned_features_and_skipped_gates() {
         assert!(record["candidates"].as_array().unwrap().is_empty());
     }
 }
+
+#[test]
+fn capture_names_the_requested_query_for_pasted_error_output() {
+    let (_temp, root, home) = stage_fixture();
+    // Ranking signals drop the runtime value `42` from pasted error output. The
+    // record must still name the query the collector sent, or the collector
+    // cannot match the record to its request. `captured_query` asserts that.
+    let text = "ValueError: alpha beta gamma rejected 42 items";
+    let (_, applied) = captured_query(&root, &home, "learned", text, 2, 10);
+    assert_eq!(applied["status"], "applied");
+    let (_, skipped) = captured_query(&root, &home, "learned", text, 2, 4);
+    assert_eq!(skipped["reason"], "fewer-than-five-files");
+}

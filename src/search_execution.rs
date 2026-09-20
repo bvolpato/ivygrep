@@ -896,7 +896,7 @@ fn search_hits(
             .iter()
             .position(|hit| hit.hit.sources.iter().any(|source| source == "backfill"))
             .unwrap_or(hits.len());
-        crate::reranker::rerank_hits(trimmed, &mut hits[..accepted_len]);
+        crate::reranker::rerank_hits(query_text, trimmed, &mut hits[..accepted_len]);
     } else {
         crate::reranker::capture_skipped(query_text, "route-not-learned");
     }
