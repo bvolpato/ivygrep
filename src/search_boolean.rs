@@ -169,12 +169,54 @@ pub(super) fn parse_lexical_query(
     signature_scoring: SignatureScoring,
 ) -> std::result::Result<Box<dyn Query>, tantivy::query::QueryParserError> {
     if signature_scoring != SignatureScoring::Plain {
-        return parser.parse_query(text);
+        return guard_query_grammar(text, || parser.parse_query(text));
     }
-    let mut ast = tantivy::query_grammar::parse_query(text)
-        .map_err(|_| tantivy::query::QueryParserError::SyntaxError(text.to_string()))?;
+    let mut ast = parse_user_input(text)?;
     boost_explicit_signature_clauses(&mut ast);
     parser.build_query_from_user_input_ast(ast)
+}
+
+/// Whether Tantivy's grammar would panic on `text` instead of rejecting it. A
+/// standalone `-` or `+` followed by a standalone `*` makes it build an exists
+/// clause without a field ("Exist query without a field isn't allowed"). A
+/// Markdown list in a pasted question (`-` on one line, `* item` on the next)
+/// is enough.
+fn has_sign_before_bare_star(text: &str) -> bool {
+    let mut tokens = text
+        .split(|character: char| character.is_whitespace() || matches!(character, '(' | ')'))
+        .filter(|token| !token.is_empty())
+        .peekable();
+    while let Some(token) = tokens.next() {
+        if matches!(token, "-" | "+") && tokens.peek() == Some(&"*") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Runs a call into Tantivy's query grammar and reports a panic inside it as a
+/// syntax error, which callers already handle like any other text the grammar
+/// rejects. The known trigger is answered without calling the grammar, so it
+/// prints no panic message; the unwind guard covers inputs not found yet.
+fn guard_query_grammar<T>(
+    text: &str,
+    parse: impl FnOnce() -> std::result::Result<T, tantivy::query::QueryParserError>,
+) -> std::result::Result<T, tantivy::query::QueryParserError> {
+    let syntax_error = || tantivy::query::QueryParserError::SyntaxError(text.to_string());
+    if has_sign_before_bare_star(text) {
+        return Err(syntax_error());
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(parse))
+        .unwrap_or_else(|_| Err(syntax_error()))
+}
+
+fn parse_user_input(
+    text: &str,
+) -> std::result::Result<UserInputAst, tantivy::query::QueryParserError> {
+    guard_query_grammar(text, || {
+        tantivy::query_grammar::parse_query(text)
+            .map_err(|_| tantivy::query::QueryParserError::SyntaxError(text.to_string()))
+    })
 }
 
 /// Wraps explicit `signature:` term clauses in a boost that restores 5x when the
@@ -249,8 +291,7 @@ fn strict_boolean_query(
         signature_scoring,
         should_use_conjunctive_numeric_query(text),
     );
-    let mut ast = tantivy::query_grammar::parse_query(text)
-        .map_err(|_| anyhow::anyhow!(boolean_query_error(text)))?;
+    let mut ast = parse_user_input(text).map_err(|_| anyhow::anyhow!(boolean_query_error(text)))?;
     anchor_negative_clauses(&mut ast);
     if signature_scoring == SignatureScoring::Plain {
         boost_explicit_signature_clauses(&mut ast);
