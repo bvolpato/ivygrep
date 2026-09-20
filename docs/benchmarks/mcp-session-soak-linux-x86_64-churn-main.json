@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-19T19:34:24.452811+00:00",
+  "mode": "long",
+  "platform": "Linux-6.8.0-1061-aws-x86_64-with-glibc2.35",
+  "machine": "x86_64",
+  "cpu_affinity": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+  "binary_sha256": "b8f04885e7fed5cfcb32901a7522e2a7428e1809d5ee846933be962b1718410a",
+  "binary_version": "ivygrep 1.2.16",
+  "source_commit": "b3184f670524e7f5ddb72009f7b49ca7e0cd8c4a",
+  "source_dirty": true,
+  "harness_sha256": "28f0f51694b0f4c87216c12096411bb1ed21c4e947968e96751070c5f341c421",
+  "phases": ["churn"],
+  "background_enhancement": false,
+  "settings": {
+    "clients": 64,
+    "workspaces": 1,
+    "duration": 7200.0,
+    "churn": 500,
+    "stampede": 32,
+    "lifecycle_cycles": 1000,
+    "corpus": "full",
+    "think_time": 0.02,
+    "seed": 20260919
+  },
+  "passed": false,
+  "churn": {
+    "worktrees": 500,
+    "seconds": 1846.1092649088241,
+    "checkpoints": [
+      {"worktrees": 0, "rss_bytes": 141033472, "pss_bytes": 128756736, "rss_anon_bytes": 109395968, "threads": 44, "fds": 18, "inotify_instances": 1, "inotify_watches": 299, "index_dirs": 1, "orphan_index_dirs": 0, "index_bytes": 13434880},
+      {"worktrees": 10, "elapsed_seconds": 67.52658911468461, "rss_bytes": 337907712, "pss_bytes": 325630976, "rss_anon_bytes": 308187136, "threads": 61, "fds": 44, "inotify_instances": 11, "inotify_watches": 311, "index_dirs": 11, "orphan_index_dirs": 10, "index_bytes": 33300480},
+      {"worktrees": 100, "elapsed_seconds": 383.2780949790031, "rss_bytes": 604618752, "pss_bytes": 592353280, "rss_anon_bytes": 573165568, "threads": 151, "fds": 322, "inotify_instances": 101, "inotify_watches": 401, "index_dirs": 101, "orphan_index_dirs": 100, "index_bytes": 96043008},
+      {"worktrees": 250, "elapsed_seconds": 879.3235770720057, "rss_bytes": 787992576, "pss_bytes": 775735296, "rss_anon_bytes": 756592640, "threads": 305, "fds": 772, "inotify_instances": 251, "inotify_watches": 551, "index_dirs": 251, "orphan_index_dirs": 250, "index_bytes": 200224768},
+      {"worktrees": 500, "elapsed_seconds": 1770.554030929692, "rss_bytes": 859951104, "pss_bytes": 847504384, "rss_anon_bytes": 828538880, "threads": 555, "fds": 1522, "inotify_instances": 501, "inotify_watches": 801, "index_dirs": 501, "orphan_index_dirs": 500, "index_bytes": 179503104}
+    ],
+    "settled": {
+      "rss_bytes": 858210304,
+      "pss_bytes": 847386624,
+      "rss_anon_bytes": 828489728,
+      "threads": 551,
+      "fds": 1514,
+      "inotify_instances": 501,
+      "inotify_watches": 801,
+      "index_dirs": 501,
+      "orphan_index_dirs": 500,
+      "index_bytes": 179515392
+    },
+    "stale_edits": [],
+    "gate": {
+      "passed": false,
+      "metrics": {
+        "rss_anon_bytes": {
+          "baseline": 109395968,
+          "settled": 828489728,
+          "growth": 719093760,
+          "budget": 33554432,
+          "passed": false
+        },
+        "fds": {
+          "baseline": 18,
+          "settled": 1514,
+          "growth": 1496,
+          "budget": 8,
+          "passed": false
+        },
+        "threads": {
+          "baseline": 44,
+          "settled": 551,
+          "growth": 507,
+          "budget": 4,
+          "passed": false
+        },
+        "inotify_watches": {
+          "baseline": 299,
+          "settled": 801,
+          "growth": 502,
+          "budget": 16,
+          "passed": false
+        },
+        "inotify_instances": {
+          "baseline": 1,
+          "settled": 501,
+          "growth": 500,
+          "budget": 1,
+          "passed": false
+        },
+        "index_dirs": {
+          "baseline": 1,
+          "settled": 501,
+          "growth": 500,
+          "budget": 1,
+          "passed": false
+        },
+        "orphan_index_dirs": {
+          "baseline": 0,
+          "settled": 500,
+          "growth": 500,
+          "budget": 1,
+          "passed": false
+        }
+      }
+    },
+    "passed": false
+  },
+  "failure": "AssertionError: phase churn failed its gates",
+  "daemon_log_bytes": 4992253,
+  "duration_seconds": 1879.012644471135
+}
