@@ -7,7 +7,12 @@
 //!   recorded in the index directory so it survives daemon restarts;
 //! - no live worktree overlay still reads it as its base;
 //! - nobody holds its index or enhancement lock and no index or enhancement
-//!   job is active.
+//!   job is active;
+//! - its root is still missing once those locks are held.
+//!
+//! A daemon takes part through `IndexHolder`: it serializes the removal with
+//! its own requests and lets go of its watcher and open stores first. `ig --gc`
+//! therefore asks a running daemon to make the pass.
 //!
 //! The default grace period is long because a missing root can be a detached
 //! disk or a network mount. A linked worktree that its repository no longer
@@ -20,7 +25,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::jobs::{self, JobKind};
 use crate::workspace::{Workspace, WorkspaceMetadata, root_is_gone};
@@ -33,7 +38,7 @@ const DELETED_WORKTREE_GRACE: Duration = Duration::from_secs(10 * 60);
 const MIN_PASS_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_PASS_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GcReport {
     /// Indexes removed by this pass.
     pub collected: Vec<CollectedIndex>,
@@ -43,13 +48,13 @@ pub struct GcReport {
     pub in_use: Vec<PathBuf>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectedIndex {
     pub root: PathBuf,
     pub index_dir: PathBuf,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingIndex {
     pub root: PathBuf,
     pub collect_after_unix: u64,
@@ -62,21 +67,47 @@ pub(crate) fn pass_interval() -> Option<Duration> {
         .map(|grace| (grace / 4).clamp(MIN_PASS_INTERVAL, MAX_PASS_INTERVAL))
 }
 
-/// Run one pass with the configured grace period. `release` runs for each
-/// index right before it is removed, so a daemon can drop its watcher and
-/// open stores first.
-pub fn collect_orphaned_indexes(release: &mut dyn FnMut(&Workspace)) -> Result<GcReport> {
+/// What the process that runs a pass holds of an index. A daemon holds cached
+/// readers, a watcher, and requests in flight; a CLI holds nothing.
+pub trait IndexHolder {
+    /// Keep every other user of the workspace in this process out until the
+    /// returned guard drops. The daemon takes the exclusive mutation lease
+    /// that `Remove` takes, so a search that is still reading the stores
+    /// finishes first and none starts during the removal.
+    fn reserve(&mut self, workspace: &Workspace) -> Box<dyn std::any::Any>;
+    /// Let go of everything that keeps the stores open. Called once the index
+    /// is certain to be removed.
+    fn release(&mut self, workspace: &Workspace);
+}
+
+/// A process that keeps nothing open between calls.
+pub struct NoIndexHolder;
+
+impl IndexHolder for NoIndexHolder {
+    fn reserve(&mut self, _workspace: &Workspace) -> Box<dyn std::any::Any> {
+        Box::new(())
+    }
+
+    fn release(&mut self, _workspace: &Workspace) {}
+}
+
+/// Run one pass with the configured grace period.
+pub fn collect_orphaned_indexes(holder: &mut dyn IndexHolder) -> Result<GcReport> {
     let Some(grace) = crate::config::index_gc_grace() else {
         return Ok(GcReport::default());
     };
-    collect_orphaned_indexes_at(jobs::now_unix(), grace, release)
+    collect_orphaned_indexes_at(jobs::now_unix(), grace, holder)
 }
 
 fn collect_orphaned_indexes_at(
     now_unix: u64,
     grace: Duration,
-    release: &mut dyn FnMut(&Workspace),
+    holder: &mut dyn IndexHolder,
 ) -> Result<GcReport> {
+    // The daemon's periodic pass and one that `ig --gc` asked for must not
+    // remove the same directory at once.
+    static PASS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _pass = PASS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let entries = crate::workspace::list_workspace_metadata()?;
     // Base indexes that an overlay with a live root still reads.
     let live_bases = entries
@@ -101,12 +132,14 @@ fn collect_orphaned_indexes_at(
                 now_unix
             }
         };
-        let grace = if worktree_is_unregistered(&index_dir, &metadata, &mut registered_worktrees) {
+        let unregistered =
+            worktree_is_unregistered(&index_dir, &metadata, &mut registered_worktrees);
+        let effective_grace = if unregistered {
             grace.min(DELETED_WORKTREE_GRACE)
         } else {
             grace
         };
-        let collect_after_unix = missing_since.saturating_add(grace.as_secs());
+        let collect_after_unix = missing_since.saturating_add(effective_grace.as_secs());
         if now_unix < collect_after_unix {
             report.waiting.push(WaitingIndex {
                 root: metadata.root,
@@ -114,16 +147,29 @@ fn collect_orphaned_indexes_at(
             });
             continue;
         }
-
-        let workspace = Workspace::ledger_only(index_dir.clone(), &metadata);
-        if live_bases.contains(&index_dir) || !remove_unused_index(&workspace, release)? {
+        if live_bases.contains(&index_dir) {
             report.in_use.push(index_dir);
             continue;
         }
-        report.collected.push(CollectedIndex {
-            root: metadata.root,
-            index_dir,
-        });
+
+        let workspace = Workspace::ledger_only(index_dir.clone(), &metadata);
+        // Only the shorter grace made this index due: it rests on what Git
+        // said a while ago, so Git is asked again under the locks.
+        let due_as_unregistered = now_unix < missing_since.saturating_add(grace.as_secs());
+        let still_gone = || {
+            root_is_gone(&metadata.root)
+                && !(due_as_unregistered
+                    && !worktree_is_unregistered(&index_dir, &metadata, &mut HashMap::new()))
+        };
+        match remove_unused_index(&workspace, holder, still_gone)? {
+            Removal::Removed => report.collected.push(CollectedIndex {
+                root: metadata.root,
+                index_dir,
+            }),
+            Removal::InUse => report.in_use.push(index_dir),
+            // The next pass finds the root and clears the marker.
+            Removal::RootReturned => {}
+        }
     }
     Ok(report)
 }
@@ -221,13 +267,28 @@ fn registered_worktrees(base_root: &Path) -> Option<HashSet<String>> {
     )
 }
 
-/// Remove the index unless a job is using it. `false` means it was kept.
-fn remove_unused_index(workspace: &Workspace, release: &mut dyn FnMut(&Workspace)) -> Result<bool> {
+enum Removal {
+    Removed,
+    /// A job, or a lock holder in another process, still uses the index.
+    InUse,
+    /// A checkout came back at the root while the pass was getting here.
+    RootReturned,
+}
+
+/// Remove the index unless something uses it or its root is back.
+fn remove_unused_index(
+    workspace: &Workspace,
+    holder: &mut dyn IndexHolder,
+    still_gone: impl FnOnce() -> bool,
+) -> Result<Removal> {
+    // First in line: taking the daemon's lease can wait for a long search,
+    // and nothing else should be held meanwhile.
+    let _reservation = holder.reserve(workspace);
     let job_is_active = |kind, ttl| jobs::job_status(workspace, kind, ttl).active();
     if job_is_active(JobKind::Indexing, jobs::INDEXING_HEARTBEAT_TTL_SECS)
         || job_is_active(JobKind::Enhancement, jobs::ENHANCEMENT_HEARTBEAT_TTL_SECS)
     {
-        return Ok(false);
+        return Ok(Removal::InUse);
     }
     // Index runs hold `index.lock`; vector writers hold `enhancement.lock`.
     let mut locks = Vec::new();
@@ -238,11 +299,18 @@ fn remove_unused_index(workspace: &Workspace, release: &mut dyn FnMut(&Workspace
         }
         let lock = fs::OpenOptions::new().write(true).open(&path)?;
         if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
-            return Ok(false);
+            return Ok(Removal::InUse);
         }
         locks.push(lock);
     }
-    release(workspace);
+    // Listing the indexes, asking Git, and waiting for the lease and the
+    // locks all took time. A checkout that returned meanwhile keeps its
+    // index: with the locks held, nothing can start an index run on it
+    // between this check and the removal.
+    if !still_gone() {
+        return Ok(Removal::RootReturned);
+    }
+    holder.release(workspace);
     // Stores go while the locks are held. The lock files go last, after their
     // handles close: Windows cannot remove a directory that holds open files.
     // A root that is gone cannot start a job in between.
@@ -259,8 +327,8 @@ fn remove_unused_index(workspace: &Workspace, release: &mut dyn FnMut(&Workspace
     }
     drop(locks);
     match fs::remove_dir_all(&workspace.index_dir) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(()) => Ok(Removal::Removed),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Removal::Removed),
         Err(error) => Err(error.into()),
     }
 }
@@ -285,7 +353,29 @@ mod tests {
     }
 
     fn pass(now_unix: u64) -> GcReport {
-        collect_orphaned_indexes_at(now_unix, GRACE, &mut |_| {}).unwrap()
+        collect_orphaned_indexes_at(now_unix, GRACE, &mut NoIndexHolder).unwrap()
+    }
+
+    /// Records the order of the holder calls, and can bring a root back while
+    /// the pass waits for its reservation, as a checkout that returns does.
+    #[derive(Default)]
+    struct RecordingHolder {
+        calls: Vec<String>,
+        recreate_on_reserve: Option<PathBuf>,
+    }
+
+    impl IndexHolder for RecordingHolder {
+        fn reserve(&mut self, workspace: &Workspace) -> Box<dyn std::any::Any> {
+            self.calls.push(format!("reserve {}", workspace.id));
+            if let Some(root) = self.recreate_on_reserve.take() {
+                fs::create_dir_all(root).unwrap();
+            }
+            Box::new(())
+        }
+
+        fn release(&mut self, workspace: &Workspace) {
+            self.calls.push(format!("release {}", workspace.id));
+        }
     }
 
     #[test]
@@ -315,20 +405,58 @@ mod tests {
         assert!(pass(now + 6 * DAY).collected.is_empty());
         assert!(pass(now + 8 * DAY).collected.is_empty());
 
-        let mut released = Vec::new();
-        let report = collect_orphaned_indexes_at(now + 13 * DAY, GRACE, &mut |workspace| {
-            released.push(workspace.id.clone());
-        })
-        .unwrap();
+        let mut holder = RecordingHolder::default();
+        let report = collect_orphaned_indexes_at(now + 13 * DAY, GRACE, &mut holder).unwrap();
         assert_eq!(report.collected.len(), 1);
         assert_eq!(report.collected[0].root, orphan.root);
-        assert_eq!(released, std::slice::from_ref(&orphan.id));
+        assert_eq!(
+            holder.calls,
+            [
+                format!("reserve {}", orphan.id),
+                format!("release {}", orphan.id)
+            ],
+            "the holder is reserved before its stores are released, and only for the orphan"
+        );
         assert!(!orphan.index_dir.exists());
         assert!(live.metadata_path().exists(), "a live index must be kept");
         assert_eq!(
             crate::workspace::list_workspace_roots().unwrap(),
             std::slice::from_ref(&live.root),
             "status must stop listing the collected workspace"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_root_that_returns_while_the_pass_waits_keeps_its_index() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let (root, workspace) = indexed_root(parent.path(), "returning");
+        fs::remove_dir_all(&root).unwrap();
+        let now = jobs::now_unix();
+        assert!(pass(now).collected.is_empty());
+
+        // The pass found the root missing and past its grace period. While it
+        // waits for the holder (the daemon's lease), the checkout comes back.
+        let mut holder = RecordingHolder {
+            recreate_on_reserve: Some(root.clone()),
+            ..Default::default()
+        };
+        let report = collect_orphaned_indexes_at(now + 8 * DAY, GRACE, &mut holder).unwrap();
+        assert!(report.collected.is_empty() && report.in_use.is_empty());
+        assert_eq!(holder.calls, [format!("reserve {}", workspace.id)]);
+        assert!(
+            workspace.sqlite_path().exists(),
+            "a returning checkout must keep its index"
+        );
+
+        // The next pass sees a live root and forgets that it was ever missing.
+        assert!(pass(now + 8 * DAY).waiting.is_empty());
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            pass(now + 8 * DAY).waiting[0].collect_after_unix,
+            now + 15 * DAY
         );
     }
 

@@ -3280,25 +3280,40 @@ fn forget_collected_workspace(state: &DaemonState, workspace: &Workspace) {
     }
 }
 
-fn collect_orphaned_indexes(state: &DaemonState) {
-    // As for `Remove`: nothing of the daemon's may keep using the stores.
-    let mut release = |workspace: &Workspace| {
-        if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
+/// The daemon's side of a garbage-collection pass, as for `Remove`: the
+/// exclusive mutation lease first, so that a search which still reads the
+/// stores finishes and no request starts on them, then the watcher and the
+/// cached readers go, and only then are the stores unlinked.
+struct DaemonIndexHolder<'a>(&'a DaemonState);
+
+impl crate::index_gc::IndexHolder for DaemonIndexHolder<'_> {
+    fn reserve(&mut self, workspace: &Workspace) -> Box<dyn std::any::Any> {
+        Box::new(
+            self.0
+                .acquire_workspace_mutations(std::slice::from_ref(workspace)),
+        )
+    }
+
+    fn release(&mut self, workspace: &Workspace) {
+        if let Some(registration) = self.0.watchers.lock().remove(&workspace.id) {
             stop_watcher(workspace, registration);
         }
-        forget_collected_workspace(state, workspace);
-    };
-    match crate::index_gc::collect_orphaned_indexes(&mut release) {
-        Ok(report) => {
-            for collected in report.collected {
-                daemon_log(&format!(
-                    "removed the index of {}: the workspace root no longer exists",
-                    collected.root.display()
-                ));
-            }
-        }
-        Err(err) => warn!("index garbage collection failed: {err:#}"),
+        forget_collected_workspace(self.0, workspace);
     }
+}
+
+/// One pass, for the periodic task and for `ig --gc`. Blocks on leases and
+/// file system work: call it off the runtime.
+fn collect_orphaned_indexes(state: &DaemonState) -> Result<crate::index_gc::GcReport> {
+    let report = crate::index_gc::collect_orphaned_indexes(&mut DaemonIndexHolder(state))
+        .inspect_err(|err| warn!("index garbage collection failed: {err:#}"))?;
+    for collected in &report.collected {
+        daemon_log(&format!(
+            "removed the index of {}: the workspace root no longer exists",
+            collected.root.display()
+        ));
+    }
+    Ok(report)
 }
 
 /// Registers (or refreshes) the watcher for `workspace`, recording a failure
@@ -4899,6 +4914,18 @@ async fn handle_request_with_cancellation(
                 message: err.to_string(),
             },
         },
+        DaemonRequest::CollectOrphanedIndexes => {
+            let gc_state = state.clone();
+            match tokio::task::spawn_blocking(move || collect_orphaned_indexes(&gc_state)).await {
+                Ok(Ok(report)) => DaemonResponse::OrphanedIndexes { report },
+                Ok(Err(err)) => DaemonResponse::Error {
+                    message: format!("{err:#}"),
+                },
+                Err(join_err) => DaemonResponse::Error {
+                    message: join_err.to_string(),
+                },
+            }
+        }
         DaemonRequest::EnsureWatcher { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
                 if state.watcher_registered(&workspace.id) && workspace.is_watcher_alive() {
@@ -6524,6 +6551,8 @@ where
         | DaemonRequest::CancelSearch { .. } => 120, // wait for active search shutdown
         DaemonRequest::ContextPack { .. } => 600, // several searches plus graph expansion
         DaemonRequest::Remove { .. } => 30,     // cleanup
+        // Each removal first waits for the searches that still read the index.
+        DaemonRequest::CollectOrphanedIndexes => 300,
     };
 
     loop {
@@ -12928,6 +12957,52 @@ mod tests {
             );
         }
         stop_all_watchers(&state);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn collection_request_waits_for_a_search_that_still_reads_the_index() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        unsafe { std::env::remove_var("IVYGREP_INDEX_GC_GRACE_SECS") };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn collected_later() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+
+        // The root has been gone for longer than the grace period.
+        drop(repo);
+        let eight_days_ago = crate::jobs::now_unix() - 8 * 24 * 60 * 60;
+        std::fs::write(
+            workspace.index_dir.join(".root_missing_since"),
+            eight_days_ago.to_string(),
+        )
+        .unwrap();
+
+        // A search that started before the pass still reads the stores.
+        let search = state.acquire_workspace_modes(std::slice::from_ref(&workspace), false);
+        let pass = tokio::spawn(handle_request(
+            state.clone(),
+            DaemonRequest::CollectOrphanedIndexes,
+        ));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !pass.is_finished() && workspace.sqlite_path().exists(),
+            "the pass must wait for the mutation lease, as `Remove` does"
+        );
+
+        drop(search);
+        let response = tokio::time::timeout(Duration::from_secs(120), pass)
+            .await
+            .expect("the pass must finish once the search is done")
+            .unwrap();
+        let DaemonResponse::OrphanedIndexes { report } = response else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert_eq!(report.collected.len(), 1, "{report:?}");
+        assert_eq!(report.collected[0].root, workspace.root);
+        assert!(!workspace.index_dir.exists());
     }
 
     #[test]

@@ -542,7 +542,7 @@ pub async fn run() -> Result<()> {
     }
 
     if cli.gc {
-        return run_gc(cli.json);
+        return run_gc(cli.json).await;
     }
 
     if cli.doctor {
@@ -1298,9 +1298,27 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
 }
 
 /// One garbage-collection pass with the same rules as the daemon's periodic
-/// one: only roots missing past the grace period, never an index in use.
-fn run_gc(json: bool) -> Result<()> {
-    let report = crate::index_gc::collect_orphaned_indexes(&mut |_| {})?;
+/// one: only roots missing past the grace period, never an index in use. A
+/// running daemon makes the pass, because it holds cached readers and watchers
+/// of the very indexes that go. A pass in this process beside it would unlink
+/// stores under the daemon, or fail halfway through on Windows.
+async fn run_gc(json: bool) -> Result<()> {
+    let request = DaemonRequest::CollectOrphanedIndexes;
+    let report = match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
+        Some(DaemonResponse::OrphanedIndexes { report }) => report,
+        // A daemon from before this request cannot make the pass. Stop it, as
+        // a protocol change would have; after that nothing holds the stores.
+        Some(DaemonResponse::Error { message })
+            if message.starts_with("invalid daemon request") =>
+        {
+            daemon::restart_daemon_process().await;
+            crate::index_gc::collect_orphaned_indexes(&mut crate::index_gc::NoIndexHolder)?
+        }
+        Some(DaemonResponse::Error { message }) => bail!(message),
+        Some(other) => bail!("unexpected daemon response to the collection request: {other:?}"),
+        // No daemon: this process is the only one that could hold anything.
+        None => crate::index_gc::collect_orphaned_indexes(&mut crate::index_gc::NoIndexHolder)?,
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -2164,6 +2182,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             Ok(())
         }
         DaemonResponse::Version { .. }
+        | DaemonResponse::OrphanedIndexes { .. }
         | DaemonResponse::RuntimeStatus { .. }
         | DaemonResponse::WebStarted { .. } => Ok(()),
         DaemonResponse::SearchProgress { .. }

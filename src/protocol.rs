@@ -150,6 +150,11 @@ pub enum DaemonRequest {
     Remove {
         path: PathBuf,
     },
+    /// One garbage-collection pass over the indexes of workspaces that no
+    /// longer exist (`ig --gc`). The daemon makes it, because it holds cached
+    /// readers and watchers of the indexes that the pass removes. A daemon
+    /// that predates this request answers `invalid daemon request`.
+    CollectOrphanedIndexes,
     /// Bring back the filesystem watcher of a workspace whose metadata enables
     /// watching but whose watcher is not alive. The daemon answers at once and
     /// registers in the background; failures land in the workspace job ledger
@@ -234,6 +239,10 @@ pub enum DaemonResponse {
         already_running: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         generation: Option<u64>,
+    },
+    /// Reply to `CollectOrphanedIndexes`.
+    OrphanedIndexes {
+        report: crate::index_gc::GcReport,
     },
     Error {
         message: String,
