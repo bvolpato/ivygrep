@@ -107,6 +107,32 @@ Git worktrees share a repository identifier. A secondary worktree records the
 main worktree's index directory as its base and stores only divergent state in
 its own index directory.
 
+A checkout nested inside a Git workspace is a workspace of its own, as it is
+for Git and for `Workspace::resolve`. The file walker, the request-local path
+matcher, and the watcher event filter share one rule (`NestedCheckouts` in
+`src/workspace.rs`): below a Git workspace root they skip a directory whose
+`.git` entry marks a linked worktree (a `.git` file whose Git directory has a
+`commondir`), a nested clone (a `.git` directory), or a clone made with `git
+clone --separate-git-dir` (a `.git` file pointing at a full Git directory
+elsewhere). Agent worktrees under `<repo>/.claude/worktrees/` therefore stay
+out of the base index, base search results, and base watcher updates, including
+worktrees created after the base was indexed; without the rule each live
+worktree added a full copy of the repository to the base. Submodules stay in
+the parent, which tracks them and has always indexed their sources: a path
+listed in the root `.gitmodules`, or a `.git` file pointing into the `modules`
+directory of the workspace's own Git directory, where Git keeps absorbed
+submodules. A workspace root that is not a Git checkout keeps everything below
+it, so a plain directory of clones still indexes as one workspace. The
+recursive watch still covers nested checkouts; their events are dropped by the
+filter, except for the `.git` entry itself. When a directory whose files are in
+the index gets a `.git` entry (`git init`, or a clone into it), the watcher
+reconciles the whole workspace and the files leave the index. When an entry
+goes away, the directory is handed to the index update as a changed path: a
+deleted worktree costs nothing, and a directory that is still there is scanned
+and its files return. A checkout that arrives together with its directory, as
+an agent worktree does, has no files in the index and costs one SQLite lookup,
+not a scan.
+
 Because index IDs follow canonical paths, replacing a directory can change its
 checkout role while retaining its saved index. Health checks reject a saved
 main/overlay layout that disagrees with the resolved role. Indexing clears that

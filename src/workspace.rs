@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1391,6 +1391,135 @@ fn is_git_dir(path: &Path) -> bool {
     path.join("HEAD").is_file()
         && (path.join("commondir").is_file()
             || (path.join("objects").is_dir() && path.join("refs").is_dir()))
+}
+
+/// Checkouts nested inside a Git workspace that are workspaces of their own.
+///
+/// Git does not descend into a nested repository, and `Workspace::resolve`
+/// gives a path inside one its own workspace. A linked worktree (`.git` file
+/// whose Git directory has a `commondir`) or a nested clone (`.git`
+/// directory) therefore stays out of the enclosing workspace. Agent worktrees
+/// under `<repo>/.claude/worktrees/` would otherwise put a full copy of the
+/// repository into the base index each. Submodules stay: the parent tracks
+/// them, and their sources have always been indexed with it. A submodule is a
+/// path listed in the workspace's `.gitmodules`, or a `.git` file pointing
+/// into the `modules` directory of the workspace's own Git directory. Any
+/// other `.git` file that points at a full Git directory is a clone made with
+/// `git clone --separate-git-dir`, a checkout of its own. A workspace root
+/// that is not a Git checkout keeps everything below it, so a plain directory
+/// of clones still indexes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NestedCheckouts {
+    /// `None` when the workspace root is not a Git checkout.
+    submodule_paths: Option<HashSet<PathBuf>>,
+    /// Where this workspace's Git directories keep absorbed submodules.
+    module_dirs: Vec<PathBuf>,
+}
+
+impl NestedCheckouts {
+    pub(crate) fn new(root: &Path) -> Self {
+        if !is_git_workspace_root(root) {
+            return Self::default();
+        }
+        // A linked worktree keeps its submodules below its own Git directory,
+        // a main checkout below the common one.
+        let marker = root.join(".git");
+        let own_git_dir = if marker.is_dir() {
+            Some(marker)
+        } else {
+            git_dir_from_marker(root, &marker)
+        };
+        let mut module_dirs = own_git_dir
+            .into_iter()
+            .chain(git_common_dir(root))
+            .map(|git_dir| comparable_git_path(&git_dir.join("modules")))
+            .collect::<Vec<_>>();
+        module_dirs.dedup();
+        Self {
+            submodule_paths: Some(gitmodules_paths(root)),
+            module_dirs,
+        }
+    }
+
+    /// Whether `dir`, a directory below `root`, is the root of a separate
+    /// checkout.
+    pub(crate) fn is_separate_checkout(&self, root: &Path, dir: &Path) -> bool {
+        let Some(submodule_paths) = &self.submodule_paths else {
+            return false;
+        };
+        let marker = dir.join(".git");
+        let Ok(metadata) = fs::symlink_metadata(&marker) else {
+            return false;
+        };
+        let listed_submodule = || {
+            dir.strip_prefix(root)
+                .is_ok_and(|rel| submodule_paths.contains(rel))
+        };
+        if metadata.is_dir() {
+            return is_git_dir(&marker) && !listed_submodule();
+        }
+        if !metadata.is_file() {
+            return false;
+        }
+        let Some(git_dir) = git_dir_from_marker(dir, &marker).filter(|git_dir| is_git_dir(git_dir))
+        else {
+            return false;
+        };
+        // A linked worktree shares its repository through `commondir`.
+        if git_dir.join("commondir").is_file() {
+            return true;
+        }
+        // A full Git directory elsewhere: an absorbed submodule lives below
+        // this workspace's `modules`, a `--separate-git-dir` clone does not.
+        let git_dir = comparable_git_path(&git_dir);
+        !listed_submodule()
+            && !self
+                .module_dirs
+                .iter()
+                .any(|modules| git_dir.starts_with(modules))
+    }
+
+    /// Whether `path` below `root` lies inside a separate nested checkout.
+    pub(crate) fn contains(&self, root: &Path, path: &Path) -> bool {
+        if self.submodule_paths.is_none() {
+            return false;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            return false;
+        };
+        let mut dir = root.to_path_buf();
+        rel.components().any(|component| {
+            dir.push(component);
+            self.is_separate_checkout(root, &dir)
+        })
+    }
+}
+
+/// A Git path in the form that `starts_with` can compare: symlinks and `..`
+/// resolved where the path exists.
+fn comparable_git_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn git_dir_from_marker(dir: &Path, marker: &Path) -> Option<PathBuf> {
+    let contents = fs::read_to_string(marker).ok()?;
+    let raw_git_dir = PathBuf::from(contents.trim().strip_prefix("gitdir:")?.trim());
+    Some(if raw_git_dir.is_absolute() {
+        raw_git_dir
+    } else {
+        dir.join(raw_git_dir)
+    })
+}
+
+/// `path = ...` entries of the root `.gitmodules`.
+fn gitmodules_paths(root: &Path) -> HashSet<PathBuf> {
+    fs::read_to_string(root.join(".gitmodules"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("path"))
+        .filter_map(|rest| rest.trim_start().strip_prefix('='))
+        .map(|path| PathBuf::from(path.trim()))
+        .collect()
 }
 
 pub fn resolve_workspace_and_scope(path: &Path) -> Result<(Workspace, Option<WorkspaceScope>)> {
