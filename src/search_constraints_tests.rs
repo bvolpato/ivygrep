@@ -613,6 +613,70 @@ fn public_boolean_constraints_keep_the_syntax_error_for_one_line_lookups() {
 }
 
 #[test]
+fn sign_before_bare_star_check_matches_what_panics_the_query_grammar() {
+    // The check answers for the grammar without calling it, so it must agree
+    // with the grammar: true exactly where the grammar panics, and false for
+    // everything it parses or rejects, such as the valid clause `+(*)`.
+    for query in [
+        "-\n\n* tailwindcss",
+        "+ * x",
+        "foo - * bar",
+        "foo (- * bar)",
+        "a -  *  b",
+        "foo AND - * bar",
+        "* tailwindcss",
+        "-* tailwindcss",
+        "- *foo bar",
+        "- *",
+        "foo - *",
+        "+(*)",
+        "foo AND +(*)",
+        "foo AND -(*)",
+        "- (*) x",
+        "select * from t",
+        "a-b * c",
+    ] {
+        let panics =
+            std::panic::catch_unwind(|| tantivy::query_grammar::parse_query(query).is_ok())
+                .is_err();
+        assert_eq!(
+            boolean::has_sign_before_bare_star(query),
+            panics,
+            "{query:?}: the grammar {}",
+            if panics { "panics" } else { "does not panic" }
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn markdown_list_markers_do_not_panic_the_query_grammar() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let workspace = gallery_workspace(root.path());
+    let options = SearchOptions::default();
+    // A standalone `-` or `+` followed by a standalone `*` made Tantivy's
+    // grammar panic ("Exist query without a field isn't allowed"): a Markdown
+    // list in a pasted question, prose or a one-line lookup, with or without a
+    // Boolean operator around it.
+    for query in [
+        "-\n\n* gallery images",
+        "gallery + * images",
+        "gallery (- * images)",
+        "gallery AND - * images\nthe page prints every post title again",
+    ] {
+        let outcome = hybrid_search_outcome(&workspace, query, None, &options)
+            .unwrap_or_else(|error| panic!("{query:?} failed: {error:#}"));
+        assert!(
+            paths(&outcome.hits).contains(Path::new("gallery.php")),
+            "{query:?} lost its results: {:?}",
+            outcome.hits
+        );
+    }
+}
+
+#[test]
 #[serial]
 fn public_boolean_constraints_ignore_operators_in_closed_backtick_code() {
     let home = tempdir().unwrap();
