@@ -8,6 +8,7 @@ pub mod context_input;
 pub mod daemon;
 pub mod doctor;
 pub mod embedding;
+pub(crate) mod enhancement_queue;
 pub mod hardware;
 pub mod index_gc;
 pub mod indexer;

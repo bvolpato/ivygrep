@@ -574,6 +574,16 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_hash_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
+        // Wait for a place among the running workers before touching stores.
+        let Some(_worker_slot) = crate::indexer::admit_worker(
+            &workspace,
+            crate::indexer::WorkerLane::Hash,
+            crate::indexer::WorkerStage::HashPass,
+        )?
+        else {
+            release_abandoned_enhancement(&workspace);
+            return Ok(());
+        };
         let (completion_snapshot, setup_lock) =
             crate::indexer::EnhancementSnapshot::begin(&workspace)?;
         drop(setup_lock);
@@ -624,6 +634,18 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
+        // Wait for a place among the running workers before opening stores.
+        // The run starts with the hash pass, so only the guards of that pass
+        // count here: hash vectors are built on battery too.
+        let Some(worker_slot) = crate::indexer::admit_worker(
+            &workspace,
+            crate::indexer::WorkerLane::Neural,
+            crate::indexer::WorkerStage::HashPass,
+        )?
+        else {
+            release_abandoned_enhancement(&workspace);
+            return Ok(());
+        };
 
         let (completion_snapshot, setup_lock) =
             crate::indexer::EnhancementSnapshot::begin(&workspace)?;
@@ -697,6 +719,14 @@ pub async fn run() -> Result<()> {
                 &completion_snapshot,
             )?;
 
+            // The guards of the neural pass apply before the model loads. A
+            // worker that they hold back gives up its place meanwhile.
+            let Some(_worker_slot) =
+                crate::indexer::readmit_for_neural_pass(&workspace, worker_slot)?
+            else {
+                // The workspace root vanished while the worker was held back.
+                return Ok(0);
+            };
             let model = crate::embedding::create_neural_model_background()?;
             ensure_compatible_worktree_base_model(&workspace, model.as_ref())?;
             crate::indexer::enhance_workspace_neural_for_job(
@@ -776,6 +806,17 @@ pub async fn run() -> Result<()> {
     }
 
     run_query(cli, context_args).await
+}
+
+/// A worker whose workspace root vanished while it was queued leaves no claim
+/// on the workspace behind.
+fn release_abandoned_enhancement(workspace: &Workspace) {
+    if std::fs::read_to_string(workspace.enhancing_pid_path())
+        .ok()
+        .is_some_and(|owner| owner.trim() == std::process::id().to_string())
+    {
+        let _ = std::fs::remove_file(workspace.enhancing_pid_path());
+    }
 }
 
 async fn run_status(json: bool) -> Result<()> {
@@ -1222,6 +1263,7 @@ async fn trigger_workspace_enhancement(
 
 async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) -> Result<()> {
     let terminal_error;
+    let mut reported_queue = false;
     loop {
         let workspaces = crate::workspace::list_workspaces()?;
         let status = workspaces
@@ -1254,7 +1296,22 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
             break;
         }
 
-        if std::io::stderr().is_terminal() {
+        // A worker that waits for one of the `IVYGREP_ENHANCE_MAX_WORKERS`
+        // places says so in its phase file. A terminal shows that in the
+        // progress line; any other output gets it once, so that a long wait
+        // does not look like a hang.
+        let queued = std::fs::read_to_string(workspace.enhancing_phase_path())
+            .is_ok_and(|phase| phase.trim() == crate::indexer::QUEUED_PHASE);
+        let queued_notice = format!(
+            "background enhancement is queued behind other workspaces (IVYGREP_ENHANCE_MAX_WORKERS={})",
+            config::enhance_max_workers()
+        );
+        if queued && std::io::stderr().is_terminal() {
+            eprint!("\r\x1b[K  {queued_notice}...");
+        } else if queued && !reported_queue {
+            reported_queue = true;
+            eprintln!("{queued_notice}");
+        } else if std::io::stderr().is_terminal() {
             let phase = status.enhancing_phase.as_deref().unwrap_or("background");
             let progress = if let Some(count) = status.enhancing_progress_count {
                 let percent = if status.chunk_count > 0 {

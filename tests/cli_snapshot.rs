@@ -2535,6 +2535,80 @@ fn cli_add_waits_for_hash_enhancement() {
 
 #[test]
 #[serial]
+fn cli_wait_for_enhancement_reports_a_queued_worker_and_finishes_once_a_place_frees() {
+    use std::io::BufRead;
+
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+    // Another workspace's worker holds the only hash place.
+    let places = home.join("enhancement-slots");
+    std::fs::create_dir_all(&places).unwrap();
+    let running_worker = std::fs::File::create(places.join("hash-0.lock")).unwrap();
+    fs2::FileExt::try_lock_exclusive(&running_worker).unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_ENHANCE_MAX_WORKERS", "1")
+        .env_remove("IVYGREP_NO_AUTOSPAWN")
+        .env_remove("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT")
+        .args([
+            "--add",
+            "--hash",
+            "--no-watch",
+            "--wait-for-enhancement",
+            ".",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+    let (lines, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            let _ = lines.send(line);
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut reported = false;
+    while !reported && std::time::Instant::now() < deadline {
+        match received.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(line) => {
+                reported = line.contains("queued") && line.contains("IVYGREP_ENHANCE_MAX_WORKERS");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            // The command ended without a word about the queue.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(reported, "a queued wait must say that it is queued");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the wait must last while the worker is queued"
+    );
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&target_root).unwrap();
+    assert!(workspace.needs_hash_enhancement());
+
+    drop(running_worker);
+    let mut exit = None;
+    while exit.is_none() && std::time::Instant::now() < deadline {
+        exit = child.try_wait().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if exit.is_none() {
+        let _ = child.kill();
+    }
+    assert!(
+        exit.is_some_and(|exit| exit.success()),
+        "the wait must finish once a place frees: {exit:?}"
+    );
+    assert!(!workspace.needs_hash_enhancement());
+}
+
+#[test]
+#[serial]
 fn cli_verbose_json_includes_reason() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 

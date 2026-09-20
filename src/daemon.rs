@@ -1516,6 +1516,8 @@ pub(crate) struct DaemonState {
     neural_statuses: Arc<Mutex<LruCache<String, CachedNeuralStatus>>>,
     /// Last background enhancement trigger attempt per (workspace, mode).
     enhancement_triggers: Arc<Mutex<LruCache<EnhancementTriggerKey, std::time::Instant>>>,
+    /// Background enhancement requests that wait for a free worker place.
+    enhancement_queue: Arc<crate::enhancement_queue::EnhancementQueue>,
     ready_workspaces: Arc<Mutex<LruCache<WorkspaceReadinessCacheKey, WorkspaceReadinessSignature>>>,
     search_contexts: Arc<Mutex<LruCache<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
@@ -2341,32 +2343,29 @@ impl DaemonState {
         Ok(workspace)
     }
 
-    /// Kick background hash/neural enhancement for `workspaces` without
+    /// Queue background hash/neural enhancement for `workspaces` without
     /// holding up the search response. The check of whether enhancement is
     /// needed (SQLite counts, vector store sizes, job ledger, worker probe)
-    /// and the trigger itself run on a blocking task after the hits are
-    /// returned, and each workspace/mode is re-checked at most once per
-    /// `ENHANCEMENT_TRIGGER_INTERVAL`.
+    /// and the start of a worker, when a worker place is free, run on a
+    /// blocking task after the hits are returned, and each workspace/mode is
+    /// re-checked at most once per `ENHANCEMENT_TRIGGER_INTERVAL`.
     fn schedule_search_enhancement(&self, workspaces: Vec<Workspace>, query_uses_neural: bool) {
         if workspaces.is_empty() || !crate::config::background_enhancement_enabled() {
             return;
         }
+        // The workspace that is searched now goes ahead of the ones that wait.
+        self.enhancement_queue
+            .touch(workspaces.iter().map(|workspace| workspace.id.as_str()));
         let due = self.due_enhancement_workspaces(workspaces, query_uses_neural);
         if due.is_empty() {
             return;
         }
+        let queue = self.enhancement_queue.clone();
         let trigger = move || {
             for workspace in due {
-                if workspace.needs_search_enhancement(query_uses_neural)
-                    && let Err(err) =
-                        workspace.trigger_background_search_enhancement(query_uses_neural)
-                {
-                    warn!(
-                        "failed to trigger background enhancement for {}: {err:#}",
-                        workspace.root.display()
-                    );
-                }
+                queue.request(workspace, query_uses_neural);
             }
+            queue.dispatch();
         };
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
@@ -2833,6 +2832,9 @@ fn create_daemon_state() -> DaemonState {
         replaced_workspaces: Arc::new(Mutex::new(HashMap::new())),
         neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
         enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
+        enhancement_queue: Arc::new(crate::enhancement_queue::EnhancementQueue::new(Box::new(
+            crate::enhancement_queue::WorkerProcesses,
+        ))),
         ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
         search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
@@ -2892,6 +2894,7 @@ async fn run_daemon_inner() -> Result<()> {
         spawn_watcher_supervisor(state.clone());
     }
     spawn_index_gc(state.clone());
+    spawn_enhancement_dispatcher(state.clone());
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     spawn_idle_memory_trim(state.clone());
     #[cfg(unix)]
@@ -5479,6 +5482,22 @@ fn update_watcher_job(control: &WatchControl, mut update: JobUpdate) {
     }
 }
 
+/// How often the daemon looks for a free worker place while requests wait.
+const ENHANCEMENT_DISPATCH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Start queued background enhancement as worker places free up. The task
+/// sleeps without a timer while nothing waits.
+fn spawn_enhancement_dispatcher(state: DaemonState) {
+    tokio::spawn(async move {
+        loop {
+            state.enhancement_queue.wait_for_requests().await;
+            tokio::time::sleep(ENHANCEMENT_DISPATCH_INTERVAL).await;
+            let queue = state.enhancement_queue.clone();
+            let _ = tokio::task::spawn_blocking(move || queue.dispatch()).await;
+        }
+    });
+}
+
 fn spawn_watch_heartbeat(control: Arc<WatchControl>) {
     tokio::spawn(async move {
         loop {
@@ -5671,12 +5690,13 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             state.clear_workspace_contexts(&control.workspace);
                         }
                         complete_initial_watch_reconciliation(&control);
-                        if crate::config::background_enhancement_enabled()
-                            && control.workspace.needs_search_enhancement(false)
-                        {
-                            let _ = control
-                                .workspace
-                                .trigger_background_search_enhancement(false);
+                        if crate::config::background_enhancement_enabled() {
+                            let queue = state.enhancement_queue.clone();
+                            let edited = control.workspace.clone();
+                            tokio::task::spawn_blocking(move || {
+                                queue.request(edited, false);
+                                queue.dispatch();
+                            });
                         }
                         daemon_log(&format!(
                             "watch update indexed {}",
@@ -6815,6 +6835,9 @@ mod tests {
             replaced_workspaces: Arc::new(Mutex::new(HashMap::new())),
             neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
             enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
+            enhancement_queue: Arc::new(crate::enhancement_queue::EnhancementQueue::new(Box::new(
+                crate::enhancement_queue::WorkerProcesses,
+            ))),
             ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
             search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),

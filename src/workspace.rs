@@ -697,6 +697,16 @@ impl Workspace {
         status.active() || is_active_pid_alive(&self.enhancing_pid_path())
     }
 
+    /// Pid of the live background worker of this workspace, whether it runs
+    /// or still waits for a place among the running workers.
+    pub(crate) fn enhancement_worker_pid(&self) -> Option<u32> {
+        let pid_path = self.enhancing_pid_path();
+        if !is_active_pid_alive(&pid_path) {
+            return None;
+        }
+        fs::read_to_string(pid_path).ok()?.trim().parse().ok()
+    }
+
     /// Checks whether hash vectors or their deletion journals lag the lexical index.
     pub fn needs_hash_enhancement(&self) -> bool {
         let use_overlay = self.has_overlay() || self.base_ref_path().exists();
