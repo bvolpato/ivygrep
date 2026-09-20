@@ -254,6 +254,11 @@ jobs:
             python:3.13-alpine sh -c '
               set -eu
               apk add --no-cache git
+              # QEMU runs with 4 KiB pages, so a jemalloc built for them would
+              # pass every run here and abort on a 16 or 64 KiB aarch64
+              # kernel. The binary reports what it was built for.
+              python3 scripts/check_allocator.py \
+                --binary "$IG" --name jemalloc --page-size 65536
               python3 scripts/check_daemon_equivalence.py \
                 --skip-build \
                 --binary "$IG" \

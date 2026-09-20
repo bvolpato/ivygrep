@@ -437,6 +437,7 @@ pub async fn run() -> Result<()> {
                 println!("NVIDIA GPU: {gpu}{capability}");
             }
             println!("Installed build: {}", report.installed_build);
+            println!("Allocator: {}", report.allocator.label());
             println!("Recommended build: {}", report.recommended_build);
             println!("Model profile: {}", report.model_profile);
             println!(

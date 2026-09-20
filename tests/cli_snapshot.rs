@@ -213,6 +213,18 @@ fn cli_hardware_json_is_machine_readable() {
         report["recommended_build"].as_str().unwrap(),
         "portable" | "cuda" | "metal"
     ));
+    // The installed binary says which allocator it really runs on. The 64-bit
+    // musl builds use jemalloc, whose page size is fixed at build time.
+    let jemalloc = cfg!(all(target_env = "musl", target_pointer_width = "64"));
+    assert_eq!(
+        report["allocator"]["name"],
+        if jemalloc { "jemalloc" } else { "system" }
+    );
+    let page_size = report["allocator"]["page_size"].as_u64();
+    assert_eq!(page_size.is_some(), jemalloc, "{page_size:?}");
+    if cfg!(all(target_env = "musl", target_arch = "aarch64")) {
+        assert_eq!(page_size, Some(65_536), "see `.cargo/config.toml`");
+    }
 }
 
 #[test]

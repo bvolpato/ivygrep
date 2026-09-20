@@ -90,6 +90,12 @@ class E2EWorkflowTest(unittest.TestCase):
             arm.index("python:3.13-alpine"),
             arm.index("python3 scripts/check_daemon_equivalence.py"),
         )
+        # Emulation has 4 KiB pages; only the binary's own report can show
+        # that its jemalloc also starts on 16 and 64 KiB aarch64 kernels.
+        self.assertRegex(
+            python_container,
+            r'check_allocator\.py \\\s+--binary "\$IG" --name jemalloc --page-size 65536',
+        )
 
     def test_windows_runs_neural_and_unicode_path_acceptance(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")

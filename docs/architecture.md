@@ -874,17 +874,26 @@ out after two seconds.
 Which Linux build runs the daemon decides both its memory and its latency, more
 than any knob below
 ([measured](benchmarks/daemon-soak.md#allocators-the-shipped-musl-build-glibc-and-one-arena-per-core)).
-The release archives are static musl builds. musl's allocator keeps the daemon
-small, 174 to 185 MiB idle and about 200 MiB under 64 busy sessions, but every
-thread allocates through one lock: with 8 busy sessions a musl daemon served a
-third of the calls of a glibc daemon at two to four times the latency, and with
-64 sessions hybrid searches took 2.2 s at the median against 0.2 s. A glibc
-build (from source, or the CUDA archive) is fast and keeps memory: about 600 to
-800 MiB under the same load, about 230 MiB after the idle trim, and an idle
-footprint that grows with sustained load, about 150 bytes per call over two
-hours of saturating load, because freed memory fragments across about a hundred
-arenas. Memory in use does not grow: malloc's own count stayed flat over
-hundreds of thousands of calls of every kind. The macOS allocator was not
+The release archives are static musl builds. musl's own allocator takes one
+lock for every thread, which made those builds two to five times slower than a
+glibc build as soon as several threads allocate: a full index of this
+repository took 30 s against 5 s, and a daemon under 64 busy sessions served 34
+calls per second against 159. The 64-bit musl builds therefore use jemalloc
+(`src/main.rs`): the same index takes 6 s, the daemon serves 65 calls per
+second, it holds about 200 MiB when idle and 425 MiB under that load, and an
+idle `ig --mcp` session costs 1.8 MiB instead of 1.2. C and C++ dependencies
+(SQLite, the vector index) still allocate through musl, which is why a glibc
+build remains faster. jemalloc fixes its page size when it is built and aborts
+at startup on a kernel with larger pages, so the aarch64 musl build is made for
+64 KiB pages (`.cargo/config.toml`), which also runs on 4 and 16 KiB kernels.
+`ig hardware` reports the allocator and that page size, and the release and E2E
+workflows assert them, because QEMU runs with 4 KiB pages and would accept any
+build. A glibc build (from source, or the CUDA archive) keeps more memory:
+about 600 to 800 MiB under the same load, about 230 MiB after the idle trim,
+and an idle footprint that grows with sustained load, about 150 bytes per call
+over two hours of saturating load, because freed memory fragments across about
+a hundred arenas. Memory in use does not grow: malloc's own count stayed flat
+over hundreds of thousands of calls of every kind. The macOS allocator was not
 measured.
 
 The daemon inherits the environment of the session that spawns it. Set the
@@ -1158,7 +1167,7 @@ additionally reads `IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
 | Context packs | `context_input.rs`, `context_graph.rs`, `context.rs` |
 | Runtime surfaces | `cli.rs`, `daemon.rs`, `mcp.rs`, `tui.rs`, `web.rs`, `protocol.rs`, `ipc.rs` |
 | Agent setup | `agent.rs`: `ig agent install` and `ig agent doctor` client configuration |
-| Health and hardware | `doctor.rs`: `ig --doctor` inspection and `--fix` repair; `hardware.rs`: `ig hardware` report; `system_resources.rs`: available-memory probes |
+| Health and hardware | `doctor.rs`: `ig --doctor` inspection and `--fix` repair; `hardware.rs`: `ig hardware` report; `allocator.rs`: the allocator that report names, and jemalloc's page size; `system_resources.rs`: available-memory probes |
 | Editor and browser launch | `launcher.rs`: TUI and Web editor commands and browser opening |
 | Frontend | `web/src/main.ts` plus focused API, type, rendering, viewer, icon, clipboard, and UI modules |
 

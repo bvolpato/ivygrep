@@ -14,3 +14,15 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# jemalloc, the allocator of the 64-bit musl builds, fixes its page size when
+# it is built, and a cross build cannot ask the target. aarch64 kernels run
+# with 4, 16, or 64 KiB pages, and a jemalloc built for smaller pages than the
+# kernel uses aborts at startup ("Unsupported system page size"), so aarch64
+# musl is built for 64 KiB. `tikv-jemalloc-sys` reads the variable with the
+# target as prefix, so no other target is affected, and because Cargo sets it
+# for the build script the value does not depend on how `cross` forwards the
+# caller's environment. `ig hardware` reports the page size, and the release
+# and E2E workflows assert it.
+[env]
+AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_LG_PAGE = "16"
