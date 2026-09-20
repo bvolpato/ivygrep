@@ -2861,6 +2861,9 @@ async fn run_daemon_inner() -> Result<()> {
         tokio::task::spawn_blocking(move || restore_configured_watchers(&restore_state));
         spawn_watcher_supervisor(state.clone());
     }
+    spawn_index_gc(state.clone());
+    #[cfg(unix)]
+    spawn_daemon_log_rotation();
 
     // Graceful shutdown on SIGTERM/SIGINT (e.g. service stop): stop watchers
     // and remove the socket before exiting, instead of leaving them dangling.
@@ -3238,6 +3241,64 @@ fn spawn_watcher_supervisor(state: DaemonState) {
             let _ = tokio::task::spawn_blocking(move || supervise_watchers(&state)).await;
         }
     });
+}
+
+/// Removes indexes whose workspace root stayed missing past the grace period
+/// (`IVYGREP_INDEX_GC_GRACE_SECS`), so deleted worktrees do not pile up on disk
+/// and in status output for the daemon's lifetime.
+fn spawn_index_gc(state: DaemonState) {
+    let Some(interval) = crate::index_gc::pass_interval() else {
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let state = state.clone();
+            let _ = tokio::task::spawn_blocking(move || collect_orphaned_indexes(&state)).await;
+        }
+    });
+}
+
+/// Drop everything the daemon keeps per workspace ID once its index has been
+/// collected. Unlike a watcher release this clears the replacement marker and
+/// the resolution entries too: whatever returns at that path starts from an
+/// empty index, so nothing is left to reconcile, and this is what bounds the
+/// replacement markers of roots that never return.
+fn forget_collected_workspace(state: &DaemonState, workspace: &Workspace) {
+    state.clear_workspace_contexts(workspace);
+    state.clear_watcher_failure(&workspace.id);
+    state.full_index_run_starts.lock().remove(&workspace.id);
+    state.replaced_workspaces.lock().remove(&workspace.id);
+    let mut resolved = state.resolved_workspaces.lock();
+    let paths = resolved
+        .iter()
+        .filter(|(_, cached)| cached.workspace.id == workspace.id)
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    for path in paths {
+        resolved.pop(&path);
+    }
+}
+
+fn collect_orphaned_indexes(state: &DaemonState) {
+    // As for `Remove`: nothing of the daemon's may keep using the stores.
+    let mut release = |workspace: &Workspace| {
+        if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
+            stop_watcher(workspace, registration);
+        }
+        forget_collected_workspace(state, workspace);
+    };
+    match crate::index_gc::collect_orphaned_indexes(&mut release) {
+        Ok(report) => {
+            for collected in report.collected {
+                daemon_log(&format!(
+                    "removed the index of {}: the workspace root no longer exists",
+                    collected.root.display()
+                ));
+            }
+        }
+        Err(err) => warn!("index garbage collection failed: {err:#}"),
+    }
 }
 
 /// Registers (or refreshes) the watcher for `workspace`, recording a failure
@@ -6010,6 +6071,66 @@ fn open_daemon_log_file() -> Result<File> {
         .create(true)
         .append(true)
         .open(log_path)?)
+}
+
+/// How often a running daemon checks its log size.
+#[cfg(unix)]
+const DAEMON_LOG_ROTATION_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Rotate `daemon.log` under a running daemon. `open_daemon_log_file` rotates
+/// only when a client spawns a daemon, so a daemon that stays up for days
+/// would otherwise grow its log without bound. Only descriptors that write to
+/// that file are redirected: output owned by a terminal or a service manager
+/// is left alone. Returns whether the log was rotated.
+#[cfg(unix)]
+fn rotate_running_daemon_log(descriptors: &[std::os::fd::RawFd]) -> Result<bool> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+
+    let log_path = config::app_home()?.join("daemon.log");
+    let Ok(log) = log_path.metadata() else {
+        return Ok(false);
+    };
+    if log.len() <= MAX_DAEMON_LOG_BYTES {
+        return Ok(false);
+    }
+    let writes_to_log = |descriptor: &std::os::fd::RawFd| {
+        // SAFETY: the descriptor is open, and `ManuallyDrop` keeps this `File`
+        // from closing a descriptor it does not own.
+        let file = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(*descriptor) });
+        file.metadata()
+            .is_ok_and(|output| output.dev() == log.dev() && output.ino() == log.ino())
+    };
+    let descriptors = descriptors
+        .iter()
+        .copied()
+        .filter(writes_to_log)
+        .collect::<Vec<_>>();
+    if descriptors.is_empty() {
+        return Ok(false);
+    }
+    let fresh = open_daemon_log_file()?;
+    for descriptor in descriptors {
+        // SAFETY: both descriptors are open; `dup2` atomically repoints the
+        // daemon's output at the fresh file.
+        if unsafe { libc::dup2(fresh.as_raw_fd(), descriptor) } < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn spawn_daemon_log_rotation() {
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(DAEMON_LOG_ROTATION_INTERVAL).await;
+            if let Err(err) = rotate_running_daemon_log(&[libc::STDOUT_FILENO, libc::STDERR_FILENO])
+            {
+                warn!("failed to rotate the daemon log: {err:#}");
+            }
+        }
+    });
 }
 
 fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Option<WorkspaceScope> {
@@ -12889,5 +13010,44 @@ mod tests {
             current.starts_with('[') && current.contains("] test line"),
             "daemon log should use a timestamp prefix, got {current:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn running_daemon_rotates_its_log_and_keeps_writing_to_the_fresh_file() {
+        use std::os::fd::AsRawFd;
+
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let log_path = home.path().join("daemon.log");
+        // Stand-ins for the daemon's stdout/stderr: one appends to the log as
+        // an auto-spawned daemon does, the other belongs to a terminal.
+        let mut output = open_daemon_log_file().unwrap();
+        let mut terminal = File::create(home.path().join("terminal")).unwrap();
+        let descriptors = [output.as_raw_fd(), terminal.as_raw_fd()];
+
+        writeln!(output, "small").unwrap();
+        assert!(!rotate_running_daemon_log(&descriptors).unwrap());
+        output
+            .write_all(&vec![b'x'; MAX_DAEMON_LOG_BYTES as usize])
+            .unwrap();
+        assert!(rotate_running_daemon_log(&descriptors).unwrap());
+        writeln!(output, "after rotation").unwrap();
+        writeln!(terminal, "terminal output").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&log_path).unwrap(),
+            "after rotation\n"
+        );
+        let rotated = std::fs::metadata(home.path().join("daemon.log.1")).unwrap();
+        assert!(rotated.len() > MAX_DAEMON_LOG_BYTES);
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("terminal")).unwrap(),
+            "terminal output\n"
+        );
+        // Output that does not go to the log is never redirected.
+        std::fs::write(&log_path, vec![b'x'; MAX_DAEMON_LOG_BYTES as usize + 1]).unwrap();
+        assert!(!rotate_running_daemon_log(&[terminal.as_raw_fd()]).unwrap());
     }
 }

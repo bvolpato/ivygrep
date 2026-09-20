@@ -19,6 +19,7 @@ Arguments:
 Options:
       --add [<PATH>]          Index PATH and register it for incremental updates. Defaults to current directory
       --rm [<PATH>]           Remove PATH's saved index. Defaults to current directory
+      --gc                    Remove saved indexes whose workspace directory no longer exists
       --status                Show tracked workspaces, index health, vector coverage, and disk usage
       --doctor                Diagnose index, daemon, watcher, and model health for PATH
       --fix                   Repair a broken or stale index (used with --doctor)
