@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789874498018,
+  "lastUpdate": 1789883654918,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -66534,6 +66534,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2724.19,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b811aa8f2161ae318f7b46d6f59a41b845fc57b1",
+          "message": "[search] Add late dense fusion and make potion-code-16m-v2 the default model (#400)\n\n* [search] Add late dense fusion and make potion-code-16m-v2 the default model\n\nA better embedding model barely changed fused results: the neural tier was one\nreciprocal-rank vote of weight 1.0 among lexical votes worth many times more,\nfiles found only by the dense tier never entered the boost pool, and default\nmode rarely consulted the tier. Even a perfect dense ranking moved the public\nbenchmark by about .02 nDCG@10.\n\nLate dense fusion runs after the heuristic scoring. It scores every candidate\ndirect search found against the neural query vector, then reorders eligible\nfiles among the positions they already hold: a decisive dense leader moves\nfirst, and a profile with a measured calibration adds a standing vote. Files\ntake part only if direct search found them, they pass the filter's authority\ntest, and they have the top path role, so cosine alone never promotes a file\nand documentation never moves relative to the implementation. Scores are\nreassigned by position. Short natural-language queries skip the stage.\n\npotion-code-16m-v2 becomes the default neural profile. It was the best static\nmodel in an offline screen of 40 candidates, is calibrated at 0.25 for pasted\nsource and long prose, and is consulted for every neural route. The index\nformat is unchanged: vectors from the old model are ignored and re-embedded by\nthe next enhancement run, and static-retrieval-v1 stays selectable.\n\nOn 923 held-out queries the step is +.011 nDCG@10 in default mode; file\nlocalization goes from Acc@5 .767 to .800, MemoryQuest recall@20 from .7525 to\n.7639, and the self-repository gate is identical.\n\n* [docs] Regenerate the evidence dashboard for the release workflow change\n\nThe dashboard records the sha256 of .github/workflows/release.yml, which now caches and validates the potion-code-v2 profile.\n\n* [fix] Protect the pinned exact-symbol file in late dense fusion\n\nLate dense fusion held the first file when an exact-symbol definition was\npinned. The file-coherence boost runs after the pin and can put a multi-chunk\nfile above the pinned one, so the stage protected that file and could vote the\nnamed definition down, in one case under the score cut.\n\nFusion now passes the path key of the file that holds the pinned definition.\nThat file never moves down; dense evidence can still move it up, and no other\nfile is protected.\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-20T01:20:23-04:00",
+          "tree_id": "7c80b309402163f4758564b87a5bea0caa902bd0",
+          "url": "https://github.com/bvolpato/ivygrep/commit/b811aa8f2161ae318f7b46d6f59a41b845fc57b1"
+        },
+        "date": 1789883654185,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 199916.74,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 6780.24,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 140567.9,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 240986.27,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 8.72,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1321.77,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1065.45,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 1498.42,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 1933.68,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.17,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 103.42,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 3810.79,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1438.32,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1453.97,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 2535.23,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 2860.39,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3386.31,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 421.29,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1401.77,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 283405.99,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 83.38,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 383468.77,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 232241.46,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 326754.45,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 113.94,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 1695.16,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 265.23,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 615.06,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 4591.98,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 77.89,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 505.91,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2339.19,
             "unit": "µs"
           }
         ]
