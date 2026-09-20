@@ -6,7 +6,7 @@
       "kind": "quality",
       "label": "Historical self-repository retrieval snapshot",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": "fbbbf0257acf96fca2fec8b4906f9b84563fc7d2"
+      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6"
     },
     {
       "id": "public-retrieval-baseline",
@@ -20,7 +20,7 @@
       "kind": "quality",
       "label": "Public retrieval matrix (v1.2.16) at main 2f4208d",
       "path": "docs/benchmarks/public-code-retrieval-results.json",
-      "publication_commit": "733c9b25cd8bb978d5deed03f559a8a111f2e0c6"
+      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6"
     },
     {
       "id": "public-retrieval-challenge-current",
@@ -41,7 +41,7 @@
       "kind": "model",
       "label": "Portable embedding model selection",
       "path": "docs/benchmarks/embedding-model-bakeoff.json",
-      "publication_commit": "e80163aa82d2ccc296f071ad01d322462f026790"
+      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6"
     },
     {
       "id": "learned-reranker",

@@ -2,12 +2,12 @@
   "evidence": [
     {
       "id": "current-head-relevance",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/35a5f3e8663363a6affcd22670b803dee444c2a6/docs/benchmarks/current-head-relevance.json",
       "kind": "quality",
       "label": "Historical self-repository retrieval snapshot",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
+      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6",
+      "publication_status": "pinned",
       "sha256": "790096a7f010185c62df8b9b78005d76ff292360a0b81f694381d25c1f62f38c",
       "source_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
       "summary": {
@@ -312,12 +312,12 @@
     },
     {
       "id": "public-retrieval-current",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/35a5f3e8663363a6affcd22670b803dee444c2a6/docs/benchmarks/public-code-retrieval-results.json",
       "kind": "quality",
       "label": "Public retrieval matrix (v1.2.16) at main 2f4208d",
       "path": "docs/benchmarks/public-code-retrieval-results.json",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
+      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6",
+      "publication_status": "pinned",
       "sha256": "088f048ea4349d0c36208c590415ab5b73a3f3ba6c5b02f8f26003a1d27cc47d",
       "source_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
       "summary": {
@@ -1081,12 +1081,12 @@
     },
     {
       "id": "embedding-selection",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/35a5f3e8663363a6affcd22670b803dee444c2a6/docs/benchmarks/embedding-model-bakeoff.json",
       "kind": "model",
       "label": "Portable embedding model selection",
       "path": "docs/benchmarks/embedding-model-bakeoff.json",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
+      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6",
+      "publication_status": "pinned",
       "sha256": "2683c6de8fc9f01dc24bb6d16bc6a058c328e439db29700623cce9ba27df1e75",
       "source_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
       "summary": {
