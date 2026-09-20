@@ -21,6 +21,10 @@ use crate::workspace::{Workspace, list_workspace_metadata};
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_CONCURRENT_HTTP_CONNECTIONS: usize = 128;
 const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest wait for the client to close after a response.
+const HTTP_CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Most unread input discarded while waiting for the client to close.
+const MAX_HTTP_CLOSE_DRAIN_BYTES: usize = 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_SEARCH_LIMIT: usize = 50;
 const SECURITY_HEADERS: &str = concat!(
@@ -101,6 +105,18 @@ pub(crate) fn bind_addr(host: &str, port: u16) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow!("--host value {host:?} did not resolve to an address"))
 }
 
+/// Bind the listener through `std`, not `tokio::net::TcpListener::bind`. On
+/// Windows `std` creates the socket non-inheritable, and accepted connections
+/// take that from their listener. A socket Tokio creates there is inheritable
+/// before mio 1.2.1: every child process started while a connection is open
+/// gets a handle to it, and the connection stays open after the server closes
+/// it, until the last such process exits. Call this inside the Tokio runtime.
+pub(crate) fn bind_listener(addr: SocketAddr) -> Result<TcpListener> {
+    let listener = std::net::TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    Ok(TcpListener::from_std(listener)?)
+}
+
 pub(crate) fn initial_url(config: &WebConfig, local_addr: SocketAddr) -> String {
     let host = match local_addr.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
@@ -161,23 +177,39 @@ async fn handle_connection(
     config: WebConfig,
     auth: WebAuth,
 ) -> Result<()> {
-    let request =
-        match read_http_request_with_timeout(&mut stream, HTTP_HEADER_READ_TIMEOUT).await? {
-            TimedHttpRequest::Received(Some(request)) => request,
-            TimedHttpRequest::Received(None) => return Ok(()),
-            TimedHttpRequest::TimedOut => {
-                return write_json(
-                    &mut stream,
-                    "408 Request Timeout",
-                    &json!({"error": "HTTP request headers timed out"}),
-                )
-                .await;
-            }
-        };
+    let result = respond(&mut stream, state, config, auth).await;
+    // An error means no complete response was written, so there is nothing a
+    // reset could take from the client.
+    if result.is_ok() {
+        close_gracefully(&mut stream, HTTP_CLOSE_DRAIN_TIMEOUT).await;
+    }
+    result
+}
+
+/// Answer the one request a connection carries. Every response says
+/// `Connection: close`, and [`handle_connection`] closes afterwards.
+async fn respond(
+    stream: &mut TcpStream,
+    state: DaemonState,
+    config: WebConfig,
+    auth: WebAuth,
+) -> Result<()> {
+    let request = match read_http_request_with_timeout(stream, HTTP_HEADER_READ_TIMEOUT).await? {
+        TimedHttpRequest::Received(Some(request)) => request,
+        TimedHttpRequest::Received(None) => return Ok(()),
+        TimedHttpRequest::TimedOut => {
+            return write_json(
+                stream,
+                "408 Request Timeout",
+                &json!({"error": "HTTP request headers timed out"}),
+            )
+            .await;
+        }
+    };
     let (path, params) = parse_target(&request.target)?;
     if !valid_host(&request, auth.exposed) {
         return write_json(
-            &mut stream,
+            stream,
             "403 Forbidden",
             &json!({"error": "invalid Host header"}),
         )
@@ -186,70 +218,70 @@ async fn handle_connection(
 
     if path == "/" || path == "/index.html" {
         if request.method != "GET" {
-            return method_not_allowed(&mut stream, "GET").await;
+            return method_not_allowed(stream, "GET").await;
         }
         if let Some(presented) = param(&params, "token") {
             if !tokens_match(presented, auth.token) {
-                return unauthorized(&mut stream).await;
+                return unauthorized(stream).await;
             }
-            return establish_web_session(&mut stream, &path, &params, &auth).await;
+            return establish_web_session(stream, &path, &params, &auth).await;
         }
         if !request_has_auth(&request, &auth) {
-            return unauthorized(&mut stream).await;
+            return unauthorized(stream).await;
         }
-        return write_html(&mut stream, &render_app_html(&config)).await;
+        return write_html(stream, &render_app_html(&config)).await;
     }
     if let Some(asset) = embedded_asset(&path) {
         if request.method != "GET" {
-            return method_not_allowed(&mut stream, "GET").await;
+            return method_not_allowed(stream, "GET").await;
         }
-        return write_response(&mut stream, "200 OK", asset.content_type, asset.bytes).await;
+        return write_response(stream, "200 OK", asset.content_type, asset.bytes).await;
     }
 
     if path.starts_with("/api/") {
         if !valid_api_origin(&request) {
             return write_json(
-                &mut stream,
+                stream,
                 "403 Forbidden",
                 &json!({"error": "cross-origin API request denied"}),
             )
             .await;
         }
         if !request_has_auth(&request, &auth) {
-            return unauthorized(&mut stream).await;
+            return unauthorized(stream).await;
         }
     }
 
     match path.as_str() {
         "/api/status" => {
             if request.method != "GET" {
-                return method_not_allowed(&mut stream, "GET").await;
+                return method_not_allowed(stream, "GET").await;
             }
             let response = crate::daemon::handle_web_request(state, DaemonRequest::Status).await;
-            write_json(&mut stream, "200 OK", &serde_json::to_value(response)?).await
+            write_json(stream, "200 OK", &serde_json::to_value(response)?).await
         }
         "/api/search" => {
             if request.method != "GET" {
-                return method_not_allowed(&mut stream, "GET").await;
+                return method_not_allowed(stream, "GET").await;
             }
             let value = run_search(state, &params).await;
-            write_json(&mut stream, "200 OK", &value).await
+            write_json(stream, "200 OK", &value).await
         }
         "/api/search/stream" => {
             if request.method != "GET" {
-                return method_not_allowed(&mut stream, "GET").await;
+                return method_not_allowed(stream, "GET").await;
             }
-            write_search_stream(&mut stream, state, &params).await
+            write_search_stream(stream, state, &params).await
         }
         "/api/file" => {
             if request.method != "GET" {
-                return method_not_allowed(&mut stream, "GET").await;
+                return method_not_allowed(stream, "GET").await;
             }
             match read_tracked_file(&params) {
-                Ok(value) => write_json(&mut stream, "200 OK", &value).await,
+                Ok(value) => write_json(stream, "200 OK", &value).await,
                 Err(err) => {
                     write_json(
-                        &mut stream,
+                        stream,
                         "400 Bad Request",
                         &json!({"error": err.to_string()}),
                     )
@@ -259,13 +291,13 @@ async fn handle_connection(
         }
         "/api/open" => {
             if request.method != "POST" {
-                return method_not_allowed(&mut stream, "POST").await;
+                return method_not_allowed(stream, "POST").await;
             }
             match open_tracked_file(&params) {
-                Ok(value) => write_json(&mut stream, "200 OK", &value).await,
+                Ok(value) => write_json(stream, "200 OK", &value).await,
                 Err(err) => {
                     write_json(
-                        &mut stream,
+                        stream,
                         "400 Bad Request",
                         &json!({"error": err.to_string()}),
                     )
@@ -275,13 +307,13 @@ async fn handle_connection(
         }
         "/api/tree" => {
             if request.method != "GET" {
-                return method_not_allowed(&mut stream, "GET").await;
+                return method_not_allowed(stream, "GET").await;
             }
             match read_tracked_tree(&params) {
-                Ok(value) => write_json(&mut stream, "200 OK", &value).await,
+                Ok(value) => write_json(stream, "200 OK", &value).await,
                 Err(err) => {
                     write_json(
-                        &mut stream,
+                        stream,
                         "400 Bad Request",
                         &json!({"error": err.to_string()}),
                     )
@@ -289,8 +321,38 @@ async fn handle_connection(
                 }
             }
         }
-        _ => write_json(&mut stream, "404 Not Found", &json!({"error": "not found"})).await,
+        _ => write_json(stream, "404 Not Found", &json!({"error": "not found"})).await,
     }
+}
+
+/// End a connection without resetting it: send FIN, then discard input until
+/// the client closes too, and only then drop the socket.
+///
+/// Dropping a socket that still holds unread input (a request body, bytes sent
+/// after the headers) makes the kernel send RST instead of FIN. The client then
+/// reads a reset error where the response should end, and on Windows it also
+/// loses the response bytes it has not read yet. The FIN also ends the response
+/// while another handle to the socket is still open, where dropping this one
+/// would send nothing.
+///
+/// `timeout` and [`MAX_HTTP_CLOSE_DRAIN_BYTES`] bound the wait, so a client that
+/// never closes, or never stops sending, cannot hold the connection task.
+async fn close_gracefully(stream: &mut TcpStream, timeout: Duration) {
+    // The client is already gone when this fails.
+    if stream.shutdown().await.is_err() {
+        return;
+    }
+    let drain = async {
+        let mut chunk = [0u8; 4096];
+        let mut discarded = 0usize;
+        while discarded < MAX_HTTP_CLOSE_DRAIN_BYTES {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => discarded += n,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(timeout, drain).await;
 }
 
 async fn read_http_request_with_timeout(
@@ -1287,13 +1349,60 @@ mod tests {
         assert_eq!(value["warnings"], json!(["search failed for /tmp/stale"]));
     }
 
+    /// A connected loopback pair. `std` creates both sockets, as the daemon
+    /// does for its listener: on Windows a socket Tokio creates is inherited by
+    /// the child processes other tests start meanwhile, and a connection one of
+    /// them holds stays open after its owner here closes it.
+    async fn connected_pair() -> (TcpStream, TcpStream, SocketAddr) {
+        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        client.set_nonblocking(true).unwrap();
+        let client = TcpStream::from_std(client).unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server, addr)
+    }
+
+    fn test_config(addr: SocketAddr) -> WebConfig {
+        WebConfig {
+            host: "127.0.0.1".to_string(),
+            port: addr.port(),
+            initial_query: None,
+            initial_path: None,
+        }
+    }
+
+    /// Read until the server closes the connection. A read error reports what
+    /// had arrived, which tells a reset after the response from one in its place.
+    async fn read_until_eof(client: &mut TcpStream) -> String {
+        let mut response = Vec::new();
+        let read =
+            tokio::time::timeout(Duration::from_secs(10), client.read_to_end(&mut response)).await;
+        let response = String::from_utf8_lossy(&response).into_owned();
+        match read {
+            Ok(Ok(_)) => response,
+            Ok(Err(err)) => panic!(
+                "connection ended with {err:?} after {} response bytes: {response}",
+                response.len()
+            ),
+            Err(_) => panic!(
+                "server did not end the response; {} bytes arrived: {response}",
+                response.len()
+            ),
+        }
+    }
+
+    async fn finish(handler: tokio::task::JoinHandle<Result<()>>) {
+        tokio::time::timeout(Duration::from_secs(10), handler)
+            .await
+            .expect("connection handler did not finish")
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn incomplete_http_headers_hit_read_deadline() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (mut server, _) = listener.accept().await.unwrap();
+        let (mut client, mut server, _) = connected_pair().await;
         client
             .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n")
             .await
@@ -1314,19 +1423,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("source.rs"), "fn needle() {}\n").unwrap();
         let state = crate::daemon::test_state_with_cpu_permits(1);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        let (server, _) = listener.accept().await.unwrap();
-        let config = WebConfig {
-            host: "127.0.0.1".to_string(),
-            port: addr.port(),
-            initial_query: None,
-            initial_path: None,
-        };
+        let (mut client, server, addr) = connected_pair().await;
         let auth = WebAuth::for_listener(addr);
         let cookie = format!("{}={}", auth.cookie_name, auth.token);
-        let handler = tokio::spawn(handle_connection(server, state, config, auth));
+        let handler = tokio::spawn(handle_connection(server, state, test_config(addr), auth));
         let workspace = percent_encode(&root.path().display().to_string());
         client
             .write_all(
@@ -1339,20 +1439,103 @@ mod tests {
             .unwrap();
         client.shutdown().await.unwrap();
 
-        let mut response = String::new();
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            client.read_to_string(&mut response),
-        )
-        .await
-        .expect("half-closed client did not receive a response")
-        .unwrap();
+        let response = read_until_eof(&mut client).await;
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         assert!(response.contains("needle"), "{response}");
-        tokio::time::timeout(Duration::from_secs(10), handler)
+        finish(handler).await;
+    }
+
+    #[tokio::test]
+    async fn unread_request_bytes_do_not_reset_the_response() {
+        for half_close in [false, true] {
+            let (mut client, server, addr) = connected_pair().await;
+            let auth = WebAuth::for_listener(addr);
+            let cookie = format!("{}={}", auth.cookie_name, auth.token);
+            let state = crate::daemon::test_state_with_cpu_permits(1);
+            let handler = tokio::spawn(handle_connection(server, state, test_config(addr), auth));
+            // The server stops reading at the end of the headers, so most of
+            // this body is still unread when it answers.
+            let body = vec![b'x'; 8 * 1024];
+            let mut request = format!(
+                "POST /api/search?q=needle HTTP/1.1\r\nHost: {addr}\r\nCookie: {cookie}\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            request.extend_from_slice(&body);
+            client.write_all(&request).await.unwrap();
+            if half_close {
+                client.shutdown().await.unwrap();
+            }
+
+            let response = read_until_eof(&mut client).await;
+            assert!(
+                response.starts_with("HTTP/1.1 405 Method Not Allowed"),
+                "{response}"
+            );
+            assert!(
+                response.ends_with(r#"{"error":"method not allowed"}"#),
+                "{response}"
+            );
+            drop(client);
+            finish(handler).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn response_ends_while_another_handle_holds_the_connection_open() {
+        let (mut client, server, addr) = connected_pair().await;
+        // A second handle to the accepted socket, like the one a child process
+        // inherits on Windows. Dropping the server's handle closes nothing
+        // while this one is open.
+        let server = server.into_std().unwrap();
+        let other_handle = server.try_clone().unwrap();
+        let server = TcpStream::from_std(server).unwrap();
+        let state = crate::daemon::test_state_with_cpu_permits(1);
+        let auth = WebAuth::for_listener(addr);
+        let handler = tokio::spawn(handle_connection(server, state, test_config(addr), auth));
+        client
+            .write_all(format!("GET /api/status HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
             .await
-            .expect("search handler did not finish")
-            .unwrap()
+            .unwrap();
+
+        let response = read_until_eof(&mut client).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401 Unauthorized"),
+            "{response}"
+        );
+        drop(client);
+        finish(handler).await;
+        drop(other_handle);
+    }
+
+    #[tokio::test]
+    async fn graceful_close_does_not_wait_on_a_client_that_never_closes() {
+        let (mut idle_client, mut server, _) = connected_pair().await;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            close_gracefully(&mut server, Duration::from_millis(50)),
+        )
+        .await
+        .expect("an idle client held the connection task");
+        // The response ended for the client before the wait, not after it.
+        assert_eq!(idle_client.read(&mut [0u8; 1]).await.unwrap(), 0);
+
+        // Only the byte bound can end this close before the outer timeout.
+        let (mut flooding_client, mut server, _) = connected_pair().await;
+        let flood = tokio::spawn(async move {
+            let chunk = [0u8; 64 * 1024];
+            while flooding_client.write_all(&chunk).await.is_ok() {}
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            close_gracefully(&mut server, Duration::from_secs(3600)),
+        )
+        .await
+        .expect("a client that never stops sending held the connection task");
+        drop(server);
+        tokio::time::timeout(Duration::from_secs(10), flood)
+            .await
+            .expect("writes to a closed connection kept succeeding")
             .unwrap();
     }
 
@@ -1364,19 +1547,10 @@ mod tests {
         crate::config::ensure_app_dirs().unwrap();
         let root = tempfile::tempdir().unwrap();
         let state = crate::daemon::test_state_with_cpu_permits(0);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        let (server, _) = listener.accept().await.unwrap();
-        let config = WebConfig {
-            host: "127.0.0.1".to_string(),
-            port: addr.port(),
-            initial_query: None,
-            initial_path: None,
-        };
+        let (mut client, server, addr) = connected_pair().await;
         let auth = WebAuth::for_listener(addr);
         let cookie = format!("{}={}", auth.cookie_name, auth.token);
-        let handler = tokio::spawn(handle_connection(server, state, config, auth));
+        let handler = tokio::spawn(handle_connection(server, state, test_config(addr), auth));
         let workspace = percent_encode(&root.path().display().to_string());
         client
             .write_all(
