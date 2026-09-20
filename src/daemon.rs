@@ -4414,14 +4414,24 @@ async fn handle_request_with_cancellation(
                         &options,
                         neural_query_vector_job.take(),
                     ) {
-                        Ok(mut hits) => {
+                        Ok(outcome) => {
                             successful_workspaces += 1;
+                            let mut hits = outcome.hits;
                             if all_indices {
                                 for hit in &mut hits {
                                     hit.file_path = workspace.root.join(&hit.file_path);
                                 }
                             }
                             all_hits.append(&mut hits);
+                            // A warning about how the query was read is the
+                            // same for every workspace. Like every entry here it
+                            // keeps the results out of the query cache, which
+                            // stores hits only.
+                            for warning in outcome.warnings {
+                                if !all_errors.contains(&warning) {
+                                    all_errors.push(warning);
+                                }
+                            }
                         }
                         Err(err) => {
                             warn!(
@@ -10471,6 +10481,59 @@ mod tests {
 
         state.clear_workspace_contexts(&workspace);
         assert!(state.query_results.lock().results.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_search_warns_when_a_prompt_is_not_a_boolean_expression() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("query.sql"),
+            "SELECT * FROM records WHERE ready = 1 AND active = 1;\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+
+        let state = test_state();
+        let request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "Why does this query return records that are NOT active?\n\nSELECT * FROM records WHERE ready = 1 AND".to_string(),
+            limit: Some(5),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+        // The query cache stores hits only, so the repeat has to warn again.
+        for attempt in ["first", "repeated"] {
+            match handle_request(state.clone(), request.clone()).await {
+                DaemonResponse::SearchResults { hits, warnings } => {
+                    assert!(
+                        hits.iter()
+                            .any(|hit| hit.file_path == Path::new("query.sql")),
+                        "{attempt} search: {hits:?}"
+                    );
+                    assert_eq!(
+                        warnings,
+                        [crate::search::BOOLEAN_NOT_APPLIED_WARNING],
+                        "{attempt} search"
+                    );
+                }
+                other => panic!("{attempt} search: expected SearchResults, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

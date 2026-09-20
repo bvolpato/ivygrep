@@ -43,6 +43,14 @@ pub(crate) fn is_long_query(query: &str) -> bool {
     raw_query_terms(query).len() >= LONG_QUERY_MIN_TERMS
 }
 
+/// Whether `query` reads as a prompt or a paste, not a one-line lookup: it
+/// spans several lines or is a long query. Signature scoring shares this cut
+/// with Boolean parsing, which reads operator words as text in a prompt or
+/// paste that is not a Boolean expression.
+pub(crate) fn is_prompt_shaped(query: &str) -> bool {
+    query.trim().contains('\n') || is_long_query(query)
+}
+
 impl QueryRouting {
     pub(crate) fn classify(query: &str) -> Self {
         let trimmed = query.trim();

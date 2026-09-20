@@ -402,6 +402,44 @@ fn e2e_mcp_full_session() {
         "MCP search should reconcile edits made during the session: {refreshed_payload}"
     );
 
+    // 7. A pasted prompt with operator words that is not a Boolean expression
+    // returns results and a warning, not a tool error.
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "ig_search",
+                "arguments": {
+                    "query": "The helper does NOT return the value I expect (see below.\n\nWHERE value = 42 AND",
+                    "path": repo.to_string_lossy().to_string()
+                }
+            }
+        }),
+    );
+    let prompt_res = read_response(&mut reader);
+    assert_eq!(prompt_res["id"], 7);
+    assert_ne!(prompt_res["result"]["isError"], true, "{prompt_res:#}");
+    let prompt_payload = search_payload(&prompt_res);
+    assert!(
+        prompt_payload["result_count"].as_u64().unwrap() > 0,
+        "{prompt_payload:#}"
+    );
+    let prompt_warnings = prompt_payload["warnings"].as_array().unwrap();
+    assert_eq!(prompt_warnings.len(), 1, "{prompt_payload:#}");
+    let prompt_warning = prompt_warnings[0].as_str().unwrap();
+    assert!(
+        prompt_warning.starts_with("Boolean operators not applied"),
+        "{prompt_warning}"
+    );
+    let prompt_text = prompt_res["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        prompt_text.contains(&format!("warning: {prompt_warning}")),
+        "{prompt_text}"
+    );
+
     // Close stdin and wait for exit.
     drop(stdin);
     let status = child.wait().expect("Failed to wait on child");
