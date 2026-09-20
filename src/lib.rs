@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod allocator;
 pub mod chunking;
 pub mod cli;
 pub mod config;

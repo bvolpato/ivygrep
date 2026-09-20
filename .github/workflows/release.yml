@@ -409,6 +409,13 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             PYTHON=python
           fi
+          # The 64-bit musl archives run on jemalloc; every other archive keeps
+          # its system allocator.
+          ALLOCATOR=(--name system)
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+            ALLOCATOR=(--name jemalloc --page-size 4096)
+          fi
+          "$PYTHON" scripts/check_allocator.py --binary "$BINARY" "${ALLOCATOR[@]}"
           "$PYTHON" scripts/check_daemon_equivalence.py \
             --skip-build \
             --binary "$BINARY"
@@ -525,6 +532,11 @@ jobs:
             -e IVYGREP_NO_AUTOSPAWN=1 \
             "$ARM_ACCEPTANCE_IMAGE" -c '
               set -eu
+              # QEMU runs with 4 KiB pages. A jemalloc built for them would
+              # pass here and abort on a 16 or 64 KiB aarch64 kernel, so the
+              # archive must say that it was built for 64 KiB.
+              python3 scripts/check_allocator.py \
+                --binary "$BINARY" --name jemalloc --page-size 65536
               sh scripts/e2e_procedures.sh --binary "$BINARY"
             '
           docker run --rm \

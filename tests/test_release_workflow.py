@@ -94,6 +94,27 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertEqual(arm_acceptance.count('"$ARM_ACCEPTANCE_IMAGE" -c'), 2)
         self.assertNotIn("python:3.13-alpine", arm_acceptance)
 
+    def test_musl_archives_must_report_jemalloc_and_the_aarch64_page_size(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        arm_acceptance = workflow.split(
+            "- name: Run exact Linux aarch64 archive under QEMU", maxsplit=1
+        )[1].split("- name: Reject elevated x86 ISA requirements", maxsplit=1)[0]
+        native_acceptance = workflow.split(
+            "- name: Run exact archive procedures", maxsplit=1
+        )[1].split("- name: Validate exact Unix installer artifact", maxsplit=1)[0]
+
+        # QEMU has 4 KiB pages, so only the report can show the 64 KiB build.
+        self.assertRegex(
+            arm_acceptance,
+            r'check_allocator\.py \\\s+--binary "\$BINARY" --name jemalloc --page-size 65536',
+        )
+        self.assertIn("ALLOCATOR=(--name jemalloc --page-size 4096)", native_acceptance)
+        self.assertIn("ALLOCATOR=(--name system)", native_acceptance)
+        self.assertIn(
+            'scripts/check_allocator.py --binary "$BINARY" "${ALLOCATOR[@]}"',
+            native_acceptance,
+        )
+
     def test_release_publishes_sbom_and_provenance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("anchore/sbom-action@", workflow)

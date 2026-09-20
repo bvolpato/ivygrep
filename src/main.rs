@@ -1,5 +1,17 @@
 use anyhow::Result;
 
+/// musl's allocator serializes every thread on one lock. Indexing, searches,
+/// and enhancement all allocate from many threads at once, so the static musl
+/// builds, which are the Linux archives that the installer and Homebrew ship,
+/// indexed this repository in 30 s where a glibc build took 5 s, and a daemon
+/// under 64 sessions served a fifth of the calls. jemalloc brings the index to
+/// 6 s and doubles the daemon's throughput. An idle `ig --mcp` session grows
+/// from 1.2 to 1.8 MiB. Every other target keeps its system allocator.
+/// `ig hardware` reports the allocator (`src/allocator.rs`).
+#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[cfg(unix)]
 fn reset_sigpipe() {
     unsafe {

@@ -308,6 +308,75 @@ larger, does little for glibc, and keeps more memory when idle than either
 system allocator; the idle trim does not reach it. An allocator switch is a
 trade to tune and measure on its own, not a free fix.
 
+#### The musl builds with jemalloc
+
+The 64-bit musl builds now use jemalloc (`src/main.rs`), because of the numbers
+above and of these, measured on the same host while it was quiet (load average
+5 to 11 during a run). All four builds come from one tree, the musl ones
+through the release workflow's cross revision. Each build alone, 64 sessions
+with mixed calls for eight minutes after a two-minute warmup, the idle daemon
+sampled 100 seconds before and after:
+
+| 64 sessions, alone on the host | musl | musl + jemalloc | musl + mimalloc | glibc |
+| --- | --- | --- | --- | --- |
+| calls served, none failed | 16,489 (34/s) | 31,216 (65/s) | 32,047 (67/s) | 76,082 (159/s) |
+| hybrid short, p50 / p95 | 1.57 / 2.73 s | 0.76 / 1.67 s | 0.74 / 1.71 s | 0.33 / 0.51 s |
+| literal, p50 / p95 | 1.81 / 3.01 s | 0.77 / 1.65 s | 0.78 / 1.76 s | 0.36 / 0.56 s |
+| context pack, p50 / p95 | 4.8 / 11.8 s | 2.7 / 8.3 s | 2.7 / 7.5 s | 0.98 / 2.1 s |
+| anonymous RSS under load, median / peak | 236 / 265 MiB | 425 / 476 MiB | 779 / 815 MiB | 688 / 700 MiB |
+| idle daemon before / after | 177 / 199 MiB | 191 / 217 MiB | 551 / 566 MiB | 217 / 255 MiB |
+| the 64 busy sessions together | 85 MiB | 188 MiB | 660 MiB | 194 MiB |
+
+The musl daemon left most of the 16 cores idle while its threads queued on the
+allocator lock. One session is enough to see it:
+
+| one session | musl | musl + jemalloc | musl + mimalloc | glibc |
+| --- | --- | --- | --- | --- |
+| full index plus enhancement of this repository | 29.9 s | 5.7 to 6.4 s | 5.7 to 6.6 s | 5.1 to 5.3 s |
+| peak RSS of the indexing process | 132 MiB | 151 to 153 MiB | 317 to 321 MiB | 181 to 188 MiB |
+| idle `ig --mcp` session, anonymous RSS / threads | 1.16 MiB / 3 | 1.76 MiB / 3 | 7.07 MiB / 3 | 1.35 MiB / 3 |
+
+Idle memory over time, four daemons side by side, 16 sessions each for forty
+minutes with a two-minute pause every ten (builds ran beside this run, so only
+its memory figures are used): musl 154 157 190 177 173 MiB, musl with jemalloc
+166 192 189 196 198 MiB, musl with mimalloc 480 483 476 493 487 MiB, glibc 209
+244 280 286 295 MiB.
+
+jemalloc and mimalloc remove the lock equally well. jemalloc keeps the idle
+session near where it was and the idle daemon near musl's level; mimalloc with
+its defaults costs six times the memory per idle session, which matters more
+than daemon throughput when dozens of sessions share one daemon. A glibc build
+stays about twice as fast under 64 sessions, because SQLite and the vector
+index are C and C++ and still allocate through musl.
+
+jemalloc fixes its page size when it is built, and a jemalloc built for smaller
+pages than the kernel uses aborts at startup. aarch64 kernels run with 4, 16, or
+64 KiB pages, so the aarch64 musl archive is built for 64 KiB
+(`.cargo/config.toml`), which runs on all three. Emulation cannot check that:
+QEMU user mode runs with 4 KiB pages, and the QEMU that the workflows install
+(10.2.3) no longer has an option for the page size. So `ig hardware` reports
+the allocator and its page size, and the release and E2E workflows assert them
+with `scripts/check_allocator.py`. Under that QEMU the aarch64 build reported
+jemalloc with 65,536-byte pages and passed; an aarch64 build for 4 KiB pages
+ran just as well and failed the check, which is the point of it.
+
+What 64 KiB costs on a kernel with 4 KiB pages, measured with x86_64 musl builds
+of the same tree on this 4 KiB host, because no aarch64 host was available. One
+build at a time on the quiet host; the daemon rows are the harness's short mode
+(8 sessions, 60 s of load):
+
+| jemalloc built for | 4 KiB | 16 KiB | 64 KiB |
+| --- | --- | --- | --- |
+| idle `ig --mcp` session, anonymous RSS | 1.76 MiB | 1.82 MiB | 1.89 MiB |
+| full index plus enhancement, peak RSS | 152 MiB | 160 MiB | 171 MiB |
+| full index plus enhancement, wall time | 5.8 s | 6.4 s | 6.4 s |
+| daemon under 8 busy sessions, median / peak | 204 / 228 MiB | 236 / 268 MiB | 295 / 322 MiB |
+| daemon settled after 12 sessions were ended | 125 MiB | 124 MiB | 136 MiB |
+
+A build for 16 KiB would cost less and abort on 64 KiB kernels, which
+enterprise and HPC distributions for aarch64 still use. The aarch64 build
+itself ran under emulation only; its speed and memory were not measured.
+
 Where the memory of a busy hour goes, measured on the glibc build with a
 preloaded shim that logs malloc's own count of bytes in use (`mallinfo2`,
 allocated chunks plus mmapped chunks over all arenas) every five seconds. Under

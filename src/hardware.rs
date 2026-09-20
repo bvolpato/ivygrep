@@ -21,6 +21,9 @@ pub struct HardwareReport {
     pub nvidia_gpu: Option<String>,
     pub nvidia_compute_capability: Option<String>,
     pub installed_build: String,
+    /// `jemalloc` with its page size on the 64-bit musl builds, `system`
+    /// everywhere else.
+    pub allocator: crate::allocator::AllocatorReport,
     pub recommended_build: String,
     pub model_profile: String,
     pub accelerator_applies_to_profile: bool,
@@ -105,6 +108,7 @@ pub fn inspect() -> HardwareReport {
         nvidia_gpu,
         nvidia_compute_capability,
         installed_build,
+        allocator: crate::allocator::inspect(),
         recommended_build,
         model_profile: profile.name().to_string(),
         accelerator_applies_to_profile,
