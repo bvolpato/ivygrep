@@ -542,7 +542,9 @@ hybrid search rerank decision point. A single JSON line prefixed with
 `IVYGREP_RERANKER_CAPTURE` and a tab is written to stderr, separate from normal
 stdout. It includes the schema version, process ID, query, model identity,
 feature schema, and actual accepted pre-learned file candidates with canonical
-previews and native feature vectors. Ineligible routes and rerank gates emit
+previews and native feature vectors. The query in the record is the requested
+one, also for pasted error output, whose features use the text with runtime
+values removed. Ineligible routes and rerank gates emit
 an explicit skipped status. Records contain query text and source content,
 including canonical context even when display context is zero. Training
 collectors must verify a fresh matching process/query record and reject

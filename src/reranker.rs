@@ -309,9 +309,13 @@ pub(crate) fn cache_identity() -> String {
     }
 }
 
-pub(crate) fn rerank_hits<T: RerankInput>(query: &str, hits: &mut [T]) {
+/// Rerank `hits` by the learned model. `query` is the text ranking signals use.
+/// `requested_query` is what the caller asked for: for pasted error output the
+/// signals drop runtime values, and a capture record must still name the request
+/// so a collector can match the record to the query it ran.
+pub(crate) fn rerank_hits<T: RerankInput>(requested_query: &str, query: &str, hits: &mut [T]) {
     if configured_mode().0 == Mode::Deterministic {
-        capture_skipped(query, "deterministic-mode");
+        capture_skipped(requested_query, "deterministic-mode");
         return;
     }
     let file_count = hits
@@ -320,21 +324,24 @@ pub(crate) fn rerank_hits<T: RerankInput>(query: &str, hits: &mut [T]) {
         .collect::<HashSet<_>>()
         .len();
     if file_count < 5 {
-        capture_skipped(query, "fewer-than-five-files");
+        capture_skipped(requested_query, "fewer-than-five-files");
         return;
     }
     let Ok(model) = load_model() else {
-        capture_skipped(query, "model-unavailable");
+        capture_skipped(requested_query, "model-unavailable");
         return;
     };
-    rerank_hits_with_model(query, hits, model, capture_requested());
+    let capture = capture_requested().then_some(requested_query);
+    rerank_hits_with_model(query, hits, model, capture);
 }
 
+/// `capture` is the requested query to name in a capture record, when one is
+/// wanted.
 fn rerank_hits_with_model<T: RerankInput>(
     query: &str,
     hits: &mut [T],
     model: &LearnedModel,
-    capture: bool,
+    capture: Option<&str>,
 ) {
     let mut grouped = HashMap::<PathBuf, FileCandidate>::new();
     for (index, hit) in hits.iter().enumerate() {
@@ -372,7 +379,7 @@ fn rerank_hits_with_model<T: RerankInput>(
             .then_with(|| left.path.cmp(&right.path))
     });
 
-    let mut captured_features = capture.then(|| Vec::with_capacity(files.len()));
+    let mut captured_features = capture.map(|_| Vec::with_capacity(files.len()));
     for (rank, candidate) in files.iter_mut().enumerate() {
         candidate.baseline_rank = rank;
         let features = feature_vector(query, candidate);
@@ -386,8 +393,8 @@ fn rerank_hits_with_model<T: RerankInput>(
             captured_features.push(features);
         }
     }
-    if let Some(captured_features) = captured_features {
-        let mut record = RerankerCapture::new(query);
+    if let (Some(captured_features), Some(requested_query)) = (captured_features, capture) {
+        let mut record = RerankerCapture::new(requested_query);
         record.status = "applied";
         record.model_id = Some(&model.model_id);
         record.candidates = files
@@ -792,7 +799,7 @@ mod tests {
             ),
         ];
         let model = load_model().as_ref().expect("model should load");
-        rerank_hits_with_model("route learned query", &mut hits, model, false);
+        rerank_hits_with_model("route learned query", &mut hits, model, None);
         assert!(
             hits.iter()
                 .all(|hit| hit.score.is_finite() && hit.score > 0.0)
@@ -807,7 +814,7 @@ mod tests {
 
         let mut hits = vec![hit("src/unicode.rs", 1.0, &preview, &["lexical"])];
         let model = load_model().as_ref().expect("model should load");
-        rerank_hits_with_model("unicode", &mut hits, model, false);
+        rerank_hits_with_model("unicode", &mut hits, model, None);
 
         assert!(hits[0].score.is_finite() && hits[0].score > 0.0);
     }
@@ -838,7 +845,7 @@ mod tests {
         let started = std::time::Instant::now();
         for _ in 0..100 {
             let mut hits = template.clone();
-            rerank_hits_with_model("route learned semantic query", &mut hits, model, false);
+            rerank_hits_with_model("route learned semantic query", &mut hits, model, None);
         }
         let average = started.elapsed() / 100;
         assert!(
