@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod doctor;
 pub mod embedding;
 pub mod hardware;
+pub mod index_gc;
 pub mod indexer;
 pub mod ipc;
 pub mod jobs;

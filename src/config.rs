@@ -115,6 +115,19 @@ pub fn mcp_index_wait() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+pub const DEFAULT_INDEX_GC_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// How long a workspace root must stay missing before its index is removed.
+/// `IVYGREP_INDEX_GC_GRACE_SECS` overrides the seven-day default; `0` disables
+/// collection.
+pub fn index_gc_grace() -> Option<std::time::Duration> {
+    let secs = env::var("IVYGREP_INDEX_GC_GRACE_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_INDEX_GC_GRACE_SECS);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

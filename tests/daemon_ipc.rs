@@ -611,12 +611,16 @@ impl Drop for DaemonGuard {
 }
 
 async fn spawn_real_daemon(home: &Path) -> DaemonGuard {
+    spawn_real_daemon_with_stderr(home, std::process::Stdio::null()).await
+}
+
+async fn spawn_real_daemon_with_stderr(home: &Path, stderr: std::process::Stdio) -> DaemonGuard {
     let child = Command::new(env!("CARGO_BIN_EXE_ig"))
         .arg("--daemon")
         .env("IVYGREP_HOME", home)
         .env("IVYGREP_SKIP_WATCHER_RESTORE", "1")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr)
         .spawn()
         .expect("spawn ig --daemon");
     let guard = DaemonGuard(child);
@@ -755,4 +759,180 @@ async fn daemon_ipc_index_storm_does_not_starve_other_workspaces() {
         generation, 1,
         "exactly one index run committed; follower rescans were no-ops"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 8. `ig --gc`: a running daemon makes the pass; without one the CLI does.
+// ---------------------------------------------------------------------------
+
+/// An indexed workspace whose root is deleted and whose grace period is over.
+fn orphaned_index(path: &Path) -> ivygrep::workspace::Workspace {
+    let workspace = ivygrep::workspace::Workspace::resolve(path).unwrap();
+    assert!(
+        workspace.sqlite_path().exists(),
+        "the workspace must be indexed"
+    );
+    fs::remove_dir_all(path).unwrap();
+    let eight_days_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 8 * 24 * 60 * 60;
+    fs::write(
+        workspace.index_dir.join(".root_missing_since"),
+        eight_days_ago.to_string(),
+    )
+    .unwrap();
+    workspace
+}
+
+async fn run_cli_gc(home: &Path) -> serde_json::Value {
+    let home = home.to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_ig"))
+            .args(["--gc", "--json"])
+            .env("IVYGREP_HOME", home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .env_remove("IVYGREP_INDEX_GC_GRACE_SECS")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "ig --gc failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn cli_gc_is_made_by_the_running_daemon() {
+    let home = tempdir().unwrap();
+    isolate_home(home.path());
+    if bind_for_test().await.is_none() {
+        return;
+    }
+    ivygrep::ipc::cleanup_socket();
+    let repo = tempdir().unwrap();
+    create_test_repo(repo.path());
+    let path = ivygrep::config::canonicalize_lossy(repo.path()).unwrap();
+
+    let daemon_stderr = home.path().join("daemon-stderr.log");
+    let _daemon = spawn_real_daemon_with_stderr(
+        home.path(),
+        fs::File::create(&daemon_stderr).unwrap().into(),
+    )
+    .await;
+    let indexed = roundtrip(&DaemonRequest::Index {
+        path: path.clone(),
+        watch: false,
+        skip_gitignore: false,
+    })
+    .await;
+    assert!(matches!(indexed, DaemonResponse::Ack { .. }), "{indexed:?}");
+    // The daemon now holds cached readers of the index that the pass removes.
+    let searched = roundtrip(&DaemonRequest::LiteralSearch {
+        path: Some(path.clone()),
+        query: "daemon_roundtrip_marker".to_string(),
+        limit: Some(5),
+        context: 0,
+        type_filter: None,
+        include_globs: vec![],
+        exclude_globs: vec![],
+        scope_path: None,
+        scope_is_file: false,
+        skip_gitignore: false,
+    })
+    .await;
+    assert!(
+        matches!(&searched, DaemonResponse::SearchResults { hits, .. } if !hits.is_empty()),
+        "{searched:?}"
+    );
+
+    let workspace = orphaned_index(&path);
+    let report = run_cli_gc(home.path()).await;
+    assert_eq!(report["collected"][0]["root"], path.to_str().unwrap());
+    assert!(!workspace.index_dir.exists());
+
+    // Only the daemon logs a removal: the pass ran there, where the readers
+    // and the watcher of the index could be let go first.
+    let mut logged = false;
+    for _ in 0..300 {
+        logged = fs::read_to_string(&daemon_stderr)
+            .unwrap_or_default()
+            .contains("removed the index of");
+        if logged {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(logged, "the daemon must have made the pass");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn cli_gc_stops_a_daemon_that_predates_the_request_and_collects_in_process() {
+    let home = tempdir().unwrap();
+    isolate_home(home.path());
+    let repo = tempdir().unwrap();
+    create_test_repo(repo.path());
+    let path = ivygrep::config::canonicalize_lossy(repo.path()).unwrap();
+    let indexed = ivygrep::workspace::Workspace::resolve(&path).unwrap();
+    ivygrep::indexer::index_workspace(&indexed, ivygrep::embedding::create_hash_model().as_ref())
+        .unwrap();
+    let workspace = orphaned_index(&path);
+
+    let Some((listener, _)) = bind_for_test().await else {
+        return;
+    };
+    // The build version matches, so the client keeps this daemon, but it
+    // cannot parse the new request. It must be stopped, not worked around.
+    let old_daemon = tokio::spawn(async move {
+        let requests = std::sync::Mutex::new(Vec::new());
+        for _ in 0..3 {
+            serve_one(&listener, |request| {
+                let (name, response) = match request {
+                    DaemonRequest::Version => (
+                        "version",
+                        DaemonResponse::Version {
+                            version: Some(BUILD_VERSION.to_string()),
+                        },
+                    ),
+                    DaemonRequest::CollectOrphanedIndexes => (
+                        "collect",
+                        DaemonResponse::Error {
+                            message: "invalid daemon request: unknown variant \
+                                      `collect_orphaned_indexes`"
+                                .to_string(),
+                        },
+                    ),
+                    DaemonRequest::Restart => (
+                        "restart",
+                        DaemonResponse::Ack {
+                            message: "restarting".to_string(),
+                        },
+                    ),
+                    other => panic!("unexpected request: {other:?}"),
+                };
+                requests.lock().unwrap().push(name);
+                response
+            })
+            .await;
+        }
+        drop(listener);
+        ivygrep::ipc::cleanup_socket();
+        requests.into_inner().unwrap()
+    });
+
+    let report = run_cli_gc(home.path()).await;
+    let requests = tokio::time::timeout(std::time::Duration::from_secs(60), old_daemon)
+        .await
+        .expect("`ig --gc` must ask the daemon, and stop the one that cannot answer")
+        .unwrap();
+    assert_eq!(requests, ["version", "collect", "restart"]);
+    assert_eq!(report["collected"][0]["root"], path.to_str().unwrap());
+    assert!(!workspace.index_dir.exists());
 }

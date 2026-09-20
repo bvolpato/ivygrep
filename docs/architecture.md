@@ -732,6 +732,46 @@ watched by the next request or supervisor pass, and that registration replaces
 the record. A root that exists but cannot be watched or read is not gone: it
 keeps the recorded failure, the retries, and the 30 s to 15 min backoff.
 
+Indexes of workspaces that no longer exist are garbage collected
+(`src/index_gc.rs`). A pass removes an index directory only when its root has
+been missing, not merely unreadable, for the grace period, no overlay with a
+live root still reads it as its base, nobody holds its `index.lock` or
+`enhancement.lock`, and no index or enhancement job is active. The first pass
+that finds a root missing records the time in `.root_missing_since` inside the
+index directory, so the grace period survives daemon restarts, and a root that
+comes back clears it. The grace period is `IVYGREP_INDEX_GC_GRACE_SECS`, seven
+days by default because a missing root can be a detached disk or a network
+mount; `0` disables collection. The overlay of a linked worktree that `git
+worktree list` in its repository no longer reports is gone for certain and
+waits ten minutes, or the grace period if that is shorter. A worktree whose
+directory vanished without `git worktree remove` stays listed as prunable and
+keeps the full grace period. The daemon runs a pass every quarter of the grace
+period, between five seconds and ten minutes. For each index that is due it
+first takes the exclusive mutation lease of the workspace, as `Remove` does, so
+a search that still reads the stores finishes and no request starts on them.
+With the lease, `index.lock`, and `enhancement.lock` held it checks the root
+once more, and for the ten-minute rule asks Git once more: listing the indexes
+and waiting for the lease took time, and a checkout that came back meanwhile
+keeps its index. Then it releases everything it keeps for that workspace ID
+(the watcher, cached contexts, resolution entries, and a replacement marker
+left by a root that never came back) and removes the stores. Whatever returns
+at that path later starts from an empty index. `ig --gc` runs one pass with the
+same rules and reports what it removed, what is still waiting, and what is in
+use. It asks a running daemon to make the pass (`CollectOrphanedIndexes`),
+because the daemon holds readers and watchers of the very indexes that go, and
+makes it in its own process only when no daemon runs. A daemon from before the
+request answers `invalid daemon request`; `ig --gc` stops that daemon, as a
+protocol change would have, and then makes the pass itself. While an index
+waits, `ig --status` lists the workspace as not watched with `workspace
+directory no longer exists`, the watcher failure described above. Collected
+workspaces leave `ig --status` and `ig_status`.
+
+An auto-spawned daemon writes to `daemon.log` in the app home. A client rotates
+a log over 10 MiB to `daemon.log.1` when it spawns a daemon, and on Unix a
+running daemon checks once a minute and does the same, redirecting its own
+stdout and stderr to the fresh file. Output that goes to a terminal or a
+service manager is never redirected.
+
 Search responses never wait on background enhancement bookkeeping. After the
 hits are computed, the daemon schedules a blocking task that checks whether
 hash or neural enhancement is needed and triggers the worker, at most once per
@@ -768,7 +808,8 @@ call of such a session would read the new daemon as incompatible and restart
 it, taking down the daemon the new sessions use. A version 9 client that meets
 a version 8 daemon restarts it, as before, and that one call runs in-process. Cancellation
 also removes queued searches from daemon CPU backpressure. Existing requests
-cover version/status, indexing, Web startup, workspace removal, watcher
+cover version/status, indexing, Web startup, workspace removal, collection of
+orphaned indexes (`CollectOrphanedIndexes`), watcher
 recovery (`EnsureWatcher`), restart, progress, and structured errors. A client that reaches a daemon speaking an
 older protocol (for example a development build with the same build version)
 gets a structured version error from the `Version` probe and restarts it.
@@ -937,6 +978,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_RERANK_LIMIT` | Fused candidates the reranker reorders per query. A positive integer overrides the routed default: with the learned reranker, 100 for natural-language, docs/tests/examples, and mixed queries and 30 for identifier, path, and literal or error queries; 30 for every query with the deterministic reranker. Other values are ignored. |
 | `IVYGREP_SEARCH_DEADLINE_SECS` | Server-side daemon search deadline. Default `60`; `0` disables it. Hits gathered before the deadline return with a warning. |
 | `IVYGREP_MCP_INDEX_WAIT_SECS` | Time an MCP call waits for a first index before returning `status: indexing`. Default `20`; `0` returns immediately. |
+| `IVYGREP_INDEX_GC_GRACE_SECS` | How long a workspace root must stay missing before its index is removed. Default `604800` (seven days); `0` disables collection. Overlays of worktrees removed with `git worktree remove` wait at most ten minutes. |
 | `IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT` | Set to disable background hash and neural enhancement. `--wait-for-enhancement` fails. |
 | `IVYGREP_NO_AUTOSPAWN` | Set to prevent daemon auto-start. Also disables background enhancement, so `--wait-for-enhancement` fails. |
 | `IVYGREP_INDEX_THREADS` | Indexing worker threads. Default: physical cores, capped at logical cores. Background hash and neural enhancement insert vectors through at most four of these threads; `1`, or a store under 1,024 vectors, inserts serially. |
@@ -970,6 +1012,7 @@ additionally reads `IVYGREP_ACCELERATOR` and `IVYGREP_CUDA_LIBRARY_PATH`.
 | Index storage concerns | `src/indexer/compression.rs`, `src/indexer/git_state.rs`, `src/indexer/resources.rs`, `src/indexer/staging.rs`, `src/indexer/storage.rs` |
 | Background enhancement | `src/indexer/enhancement.rs`: vector-writer lock and publication into the captured store incarnation |
 | Job state | `jobs.rs`: background job ledger and status records |
+| Index garbage collection | `index_gc.rs`: removes indexes whose workspace root stayed missing past the grace period |
 | Change detection | `merkle.rs` |
 | Contained source reads | `workspace_file.rs`: live reads beneath a selected workspace root, rejecting symlinks and non-regular files |
 | Embeddings and vectors | `embedding.rs`, `vector_store.rs`, `vector_store/` |

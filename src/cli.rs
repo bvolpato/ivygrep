@@ -80,6 +80,10 @@ pub struct Cli {
     #[arg(long = "rm", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
     pub rm_path: Option<PathBuf>,
 
+    /// Remove saved indexes whose workspace directory no longer exists.
+    #[arg(long, default_value_t = false)]
+    pub gc: bool,
+
     /// Show tracked workspaces, index health, vector coverage, and disk usage.
     #[arg(long, default_value_t = false)]
     pub status: bool,
@@ -397,6 +401,7 @@ pub async fn run() -> Result<()> {
     let action_count = [
         cli.add_path.is_some(),
         cli.rm_path.is_some(),
+        cli.gc,
         cli.status,
         cli.doctor,
         cli.daemon,
@@ -412,7 +417,7 @@ pub async fn run() -> Result<()> {
 
     if action_count > 1 {
         bail!(
-            "use only one action at a time: context, agent, hardware, --add, --rm, --status, --doctor, --daemon, --web, or --mcp"
+            "use only one action at a time: context, agent, hardware, --add, --rm, --gc, --status, --doctor, --daemon, --web, or --mcp"
         );
     }
 
@@ -534,6 +539,10 @@ pub async fn run() -> Result<()> {
 
     if cli.status {
         return run_status(cli.json).await;
+    }
+
+    if cli.gc {
+        return run_gc(cli.json).await;
     }
 
     if cli.doctor {
@@ -1284,6 +1293,59 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
 
     if std::io::stderr().is_terminal() {
         eprintln!("\r\x1b[K  ✓ background enhancement complete");
+    }
+    Ok(())
+}
+
+/// One garbage-collection pass with the same rules as the daemon's periodic
+/// one: only roots missing past the grace period, never an index in use. A
+/// running daemon makes the pass, because it holds cached readers and watchers
+/// of the very indexes that go. A pass in this process beside it would unlink
+/// stores under the daemon, or fail halfway through on Windows.
+async fn run_gc(json: bool) -> Result<()> {
+    let request = DaemonRequest::CollectOrphanedIndexes;
+    let report = match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
+        Some(DaemonResponse::OrphanedIndexes { report }) => report,
+        // A daemon from before this request cannot make the pass. Stop it, as
+        // a protocol change would have; after that nothing holds the stores.
+        Some(DaemonResponse::Error { message })
+            if message.starts_with("invalid daemon request") =>
+        {
+            daemon::restart_daemon_process().await;
+            crate::index_gc::collect_orphaned_indexes(&mut crate::index_gc::NoIndexHolder)?
+        }
+        Some(DaemonResponse::Error { message }) => bail!(message),
+        Some(other) => bail!("unexpected daemon response to the collection request: {other:?}"),
+        // No daemon: this process is the only one that could hold anything.
+        None => crate::index_gc::collect_orphaned_indexes(&mut crate::index_gc::NoIndexHolder)?,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if config::index_gc_grace().is_none() {
+        println!("Index garbage collection is disabled (IVYGREP_INDEX_GC_GRACE_SECS=0).");
+        return Ok(());
+    }
+    for collected in &report.collected {
+        println!("Removed index for {}", collected.root.display());
+    }
+    let now = crate::jobs::now_unix();
+    for waiting in &report.waiting {
+        println!(
+            "Keeping index for {}: workspace directory no longer exists, removable in {} h",
+            waiting.root.display(),
+            waiting
+                .collect_after_unix
+                .saturating_sub(now)
+                .div_ceil(3600)
+        );
+    }
+    for index_dir in &report.in_use {
+        println!("Keeping {}: still in use", index_dir.display());
+    }
+    if report.collected.is_empty() && report.waiting.is_empty() && report.in_use.is_empty() {
+        println!("Every indexed workspace still exists.");
     }
     Ok(())
 }
@@ -2120,6 +2182,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             Ok(())
         }
         DaemonResponse::Version { .. }
+        | DaemonResponse::OrphanedIndexes { .. }
         | DaemonResponse::RuntimeStatus { .. }
         | DaemonResponse::WebStarted { .. } => Ok(()),
         DaemonResponse::SearchProgress { .. }
