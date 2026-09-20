@@ -28,7 +28,7 @@ use crate::indexer::{
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{
     BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
-    SearchHit, WorkspaceRuntimeStatus, group_hits_by_file,
+    MIN_DAEMON_PROTOCOL_VERSION, SearchHit, WorkspaceRuntimeStatus, group_hits_by_file,
 };
 use crate::regex_search::regex_search_with_options;
 use crate::search::{
@@ -2054,11 +2054,30 @@ impl DaemonState {
     ) -> Result<Arc<dyn EmbeddingModel>> {
         let cancellation = SearchCancellation::new(false);
         let mut cancel_on_drop = CancelSearchOnDrop(Some(cancellation.clone()));
+        let model = self
+            .prepare_context_model_cancellable(workspace, skip_gitignore, &cancellation, false)
+            .await;
+        cancel_on_drop.disarm();
+        model
+    }
+
+    /// Workspace lease first, CPU permit second, both held by the returned
+    /// model until the context pack is built. `cancellation` ends either wait.
+    /// `wait_for_neural_model` loads the neural query model before returning
+    /// instead of answering with the hash model while it loads, which is what
+    /// an in-process build does.
+    async fn prepare_context_model_cancellable(
+        &self,
+        workspace: &Workspace,
+        skip_gitignore: bool,
+        cancellation: &SearchCancellation,
+        wait_for_neural_model: bool,
+    ) -> Result<Arc<dyn EmbeddingModel>> {
         let search_leases = self
             .acquire_search_leases(
                 std::slice::from_ref(workspace),
                 skip_gitignore,
-                Some(&cancellation),
+                Some(cancellation),
             )
             .await
             .map_err(|response| match response {
@@ -2066,11 +2085,10 @@ impl DaemonState {
                 response => anyhow::anyhow!("context preparation failed: {response:?}"),
             })?
             .ok_or_else(|| anyhow::anyhow!("context preparation cancelled"))?;
-        cancel_on_drop.disarm();
         let permit = self
-            .acquire_cpu_permit()
+            .acquire_search_permit(Some(cancellation))
             .await
-            .ok_or_else(|| anyhow::anyhow!("daemon is shutting down"))?;
+            .ok_or_else(|| anyhow::anyhow!("context preparation cancelled"))?;
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
             let SearchLeaseSet {
@@ -2089,6 +2107,8 @@ impl DaemonState {
             )?;
             let inner = if state.cached_neural_identity(&workspace).is_none() {
                 cached_hash_model()
+            } else if wait_for_neural_model {
+                state.lazy_model.get_or_init(create_search_model).clone()
             } else {
                 state.maybe_start_model_load();
                 state.get_model_for_search(false)?
@@ -3301,6 +3321,11 @@ where
         Ok(prepared) => prepared,
         Err(response) => return ClientRequestOutcome::Respond(response),
     };
+    // A context pack runs several searches plus graph expansion and has no
+    // partial result to return, so only searches get the deadline.
+    let deadline = (!matches!(envelope.request, DaemonRequest::ContextPack { .. }))
+        .then(config::search_deadline)
+        .flatten();
     let handler = handle_request_with_cancellation(state, envelope.request, cancellation.clone());
     tokio::pin!(handler);
     let Some(cancellation) = cancellation else {
@@ -3309,7 +3334,6 @@ where
         return ClientRequestOutcome::Respond(response);
     };
 
-    let deadline = config::search_deadline();
     let deadline_timer = async move {
         match deadline {
             Some(deadline) => tokio::time::sleep(deadline).await,
@@ -3391,7 +3415,14 @@ fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequestEnvelop
         serde_json::from_slice(line).map_err(|err| DaemonResponse::Error {
             message: format!("invalid daemon request: {err}"),
         })?;
-    if envelope.protocol_version != DAEMON_PROTOCOL_VERSION {
+    // Older clients the daemon still serves, such as MCP sessions started
+    // before an upgrade, must not read as incompatible: they would restart the
+    // daemon on every call and take the new sessions' daemon down with it.
+    // `Restart` is accepted from any version: a newer client must be able to
+    // replace this daemon even where it cannot signal the recorded process.
+    if !(MIN_DAEMON_PROTOCOL_VERSION..=DAEMON_PROTOCOL_VERSION).contains(&envelope.protocol_version)
+        && !matches!(envelope.request, DaemonRequest::Restart)
+    {
         return Err(DaemonResponse::Error {
             message: format!(
                 "unsupported daemon protocol version {}; expected {DAEMON_PROTOCOL_VERSION}",
@@ -3642,6 +3673,7 @@ fn is_search_request(request: &DaemonRequest) -> bool {
         DaemonRequest::Search { .. }
             | DaemonRequest::RegexSearch { .. }
             | DaemonRequest::LiteralSearch { .. }
+            | DaemonRequest::ContextPack { .. }
     )
 }
 
@@ -4564,6 +4596,83 @@ async fn handle_request_with_cancellation(
             });
 
             finish_cancellable_search(result, cancellation.as_ref())
+        }
+        DaemonRequest::ContextPack {
+            path,
+            query,
+            budget_tokens,
+            since,
+            context,
+            type_filter,
+            include_globs,
+            exclude_globs,
+            scope_path,
+            scope_is_file,
+            skip_gitignore,
+        } => {
+            // The daemon builds the pack with its shared model, preview cache,
+            // leases, and CPU permits, so sessions do not each hold their own.
+            let cancellation = cancellation.unwrap_or_else(|| SearchCancellation::new(false));
+            let workspace = match state.resolve_workspace(&path) {
+                Ok(workspace) => workspace,
+                Err(err) => {
+                    return DaemonResponse::Error {
+                        message: err.to_string(),
+                    };
+                }
+            };
+            let options = SearchOptions {
+                limit: None,
+                context: context.min(crate::search::MAX_SEARCH_CONTEXT_LINES),
+                type_filter,
+                include_globs,
+                exclude_globs,
+                scope_filter: scope_from_request(scope_path, scope_is_file),
+                skip_gitignore,
+                force_neural: false,
+                progress_tx: None,
+                cancel_token: Some(cancellation.flag.clone()),
+            };
+            let bundle = match state
+                .prepare_context_model_cancellable(&workspace, skip_gitignore, &cancellation, true)
+                .await
+            {
+                Ok(model) => {
+                    let build_workspace = workspace.clone();
+                    let build_query = query.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let bundle = crate::context::build_context_bundle_with_options(
+                            &build_workspace,
+                            &build_query,
+                            Some(model.as_ref()),
+                            &options,
+                            budget_tokens,
+                            &crate::context::ContextBuildOptions {
+                                since: since.as_deref(),
+                            },
+                        )?;
+                        Ok(serde_json::to_value(bundle)?)
+                    })
+                    .await
+                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
+                }
+                Err(err) => Err(err),
+            };
+            if cancellation.is_cancelled() {
+                return cancelled_search_response();
+            }
+            match bundle {
+                Ok(bundle) => {
+                    state.schedule_search_enhancement(
+                        vec![workspace],
+                        query_uses_neural(&query, false),
+                    );
+                    DaemonResponse::ContextPack { bundle }
+                }
+                Err(err) => DaemonResponse::Error {
+                    message: err.to_string(),
+                },
+            }
         }
         DaemonRequest::CancelSearch { search_id } => {
             if let Some(cancellation) = state.cancel_search(search_id) {
@@ -6170,6 +6279,7 @@ where
         | DaemonRequest::RegexSearch { .. }
         | DaemonRequest::LiteralSearch { .. }
         | DaemonRequest::CancelSearch { .. } => 120, // wait for active search shutdown
+        DaemonRequest::ContextPack { .. } => 600, // several searches plus graph expansion
         DaemonRequest::Remove { .. } => 30,     // cleanup
     };
 
@@ -11211,6 +11321,184 @@ mod tests {
             "cancelled registration must be released"
         );
         drop(held);
+    }
+
+    fn context_pack_request_for(workspace: &Workspace, query: &str) -> DaemonRequest {
+        DaemonRequest::ContextPack {
+            path: workspace.root.clone(),
+            query: query.to_string(),
+            budget_tokens: 2_000,
+            since: None,
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_context_pack_is_byte_identical_to_the_in_process_pack() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        for (path, text) in [
+            (
+                "src/session.rs",
+                "pub fn refresh_session(token: &str) -> bool {\n    validate_token(token)\n}\n\npub fn validate_token(token: &str) -> bool {\n    !token.is_empty()\n}\n",
+            ),
+            (
+                "src/handler.rs",
+                "use crate::session::refresh_session;\n\npub fn handle_refresh(token: &str) -> u16 {\n    if refresh_session(token) { 200 } else { 401 }\n}\n",
+            ),
+            (
+                "tests/session_test.rs",
+                "#[test]\nfn refresh_session_rejects_empty_tokens() {\n    assert!(!refresh_session(\"\"));\n}\n",
+            ),
+            (
+                "docs/sessions.md",
+                "# Sessions\n\nrefresh_session validates the token before it extends a session.\n",
+            ),
+        ] {
+            let path = repo.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let query = "fix refresh_session so expired tokens are rejected";
+
+        let response =
+            handle_request(test_state(), context_pack_request_for(&workspace, query)).await;
+        // What a client embeds: the bundle after it crossed the socket.
+        let wire = serde_json::to_string(&response).unwrap();
+        let DaemonResponse::ContextPack { bundle } = serde_json::from_str(&wire).unwrap() else {
+            panic!("expected a context pack, got {response:?}");
+        };
+
+        let local = crate::context::build_context_bundle_with_options(
+            &workspace,
+            query,
+            Some(create_hash_model().as_ref()),
+            &SearchOptions {
+                limit: None,
+                context: 2,
+                ..Default::default()
+            },
+            2_000,
+            &crate::context::ContextBuildOptions::default(),
+        )
+        .unwrap();
+        assert!(!local.items.is_empty());
+        assert_eq!(
+            serde_json::to_string(&bundle).unwrap(),
+            serde_json::to_string(&serde_json::to_value(&local).unwrap()).unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn parked_context_pack_stops_on_cancel_and_disconnect_but_not_on_the_search_deadline() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        unsafe { std::env::set_var("IVYGREP_SEARCH_DEADLINE_SECS", "1") };
+        let (_repo, workspace) = indexed_workspace("context_cancel_marker");
+        let state = test_state();
+        let permits = state.cpu_permits.available_permits();
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+        let park = |request_id| {
+            let envelope = DaemonRequestEnvelope::with_request_id(
+                context_pack_request_for(&workspace, "context_cancel_marker"),
+                request_id,
+            );
+            let (client, server) = tokio::io::duplex(1024);
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                let mut reader = BufReader::new(server);
+                handle_client_request(task_state, envelope, &mut reader).await
+            });
+            (client, task)
+        };
+
+        // `notifications/cancelled` reaches the daemon as `CancelSearch`.
+        let request_id = uuid::Uuid::new_v4();
+        let (_client, task) = park(request_id);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!task.is_finished(), "a context pack has no search deadline");
+        let cancel = handle_request(
+            state.clone(),
+            DaemonRequest::CancelSearch {
+                search_id: request_id,
+            },
+        )
+        .await;
+        assert!(matches!(cancel, DaemonResponse::Ack { .. }));
+        let outcome = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("cancel must stop the parked context pack")
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ClientRequestOutcome::Respond(DaemonResponse::Error { message })
+                if message == "search cancelled"
+        ));
+
+        // A client that disappears mid-build.
+        let (client, task) = park(uuid::Uuid::new_v4());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !task.is_finished(),
+            "context pack should be parked on the lease"
+        );
+        drop(client);
+        let outcome = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("disconnect must cancel the parked context pack")
+            .unwrap();
+        unsafe { std::env::remove_var("IVYGREP_SEARCH_DEADLINE_SECS") };
+        assert!(matches!(outcome, ClientRequestOutcome::Disconnected));
+        assert!(state.search_cancellations.lock().entries.is_empty());
+        assert_eq!(state.cpu_permits.available_permits(), permits);
+
+        // Nothing of the cancelled builds holds the workspace.
+        drop(held);
+        let response = handle_request(
+            state.clone(),
+            context_pack_request_for(&workspace, "context_cancel_marker"),
+        )
+        .await;
+        assert!(
+            matches!(response, DaemonResponse::ContextPack { .. }),
+            "{response:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_serves_the_previous_client_protocol_and_rejects_others() {
+        let request = |protocol_version: u32| {
+            parse_daemon_request(
+                serde_json::json!({"protocol_version": protocol_version, "type": "version"})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        // An MCP session that outlived an upgrade must not restart the daemon.
+        assert!(request(MIN_DAEMON_PROTOCOL_VERSION).is_ok());
+        assert!(request(DAEMON_PROTOCOL_VERSION).is_ok());
+        assert!(request(MIN_DAEMON_PROTOCOL_VERSION - 1).is_err());
+        assert!(request(DAEMON_PROTOCOL_VERSION + 1).is_err());
+        // A newer client can always replace this daemon.
+        let restart =
+            serde_json::json!({"protocol_version": DAEMON_PROTOCOL_VERSION + 1, "type": "restart"});
+        assert!(matches!(
+            parse_daemon_request(restart.to_string().as_bytes())
+                .unwrap()
+                .request,
+            DaemonRequest::Restart
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -666,3 +666,138 @@ fn e2e_mcp_first_call_reports_indexing_instead_of_blocking() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
 }
+
+/// One MCP session answering a single context-pack call for `repo`.
+fn mcp_context_pack(home: &Path, repo: &Path, autospawn: bool) -> (Value, Option<usize>) {
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin("ig"));
+    command
+        .env("IVYGREP_HOME", home)
+        .env("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT", "1")
+        .arg("--mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    if autospawn {
+        command.env_remove("IVYGREP_NO_AUTOSPAWN");
+    } else {
+        command.env("IVYGREP_NO_AUTOSPAWN", "1");
+    }
+    let mut child = command.spawn().expect("Failed to spawn ig --mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut call = |id: usize, arguments: Value| -> Value {
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                   "params": {"name": "ig_search", "arguments": arguments}})
+        )
+        .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    // The first call indexes the workspace; with a daemon it may still be indexing.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut id = 1;
+    loop {
+        let response = call(
+            id,
+            json!({"query": "refresh_session", "path": repo.to_string_lossy(), "literal": true}),
+        );
+        if response["result"]["structuredContent"]["status"] != "indexing" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "index never finished: {response}"
+        );
+        id += 1;
+        thread::sleep(Duration::from_millis(100));
+    }
+    let response = call(
+        id + 1,
+        json!({"query": "fix refresh_session so expired tokens are rejected",
+               "path": repo.to_string_lossy(), "output": "context_pack", "budget_tokens": 2000}),
+    );
+    let threads = fs::read_to_string(format!("/proc/{}/status", child.id()))
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Threads:")?.trim().parse().ok())
+        });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    (response["result"].clone(), threads)
+}
+
+#[test]
+fn e2e_mcp_context_pack_through_the_daemon_matches_the_in_process_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("ivygrep_home");
+    let repo = tmp.path().join("repo");
+    for (path, text) in [
+        (
+            "src/session.rs",
+            "pub fn refresh_session(token: &str) -> bool {\n    validate_token(token)\n}\n\npub fn validate_token(token: &str) -> bool {\n    !token.is_empty()\n}\n",
+        ),
+        (
+            "src/handler.rs",
+            "use crate::session::refresh_session;\n\npub fn handle_refresh(token: &str) -> u16 {\n    if refresh_session(token) { 200 } else { 401 }\n}\n",
+        ),
+        (
+            "tests/session_test.rs",
+            "#[test]\nfn refresh_session_rejects_empty_tokens() {\n    assert!(!refresh_session(\"\"));\n}\n",
+        ),
+    ] {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let (through_daemon, threads) = mcp_context_pack(&home, &repo, true);
+    let mut daemon = DaemonGuard {
+        pid: find_watcher_pid(&home),
+    };
+    assert!(daemon.pid.is_some(), "MCP did not start the daemon");
+    assert_eq!(through_daemon["isError"], false, "{through_daemon}");
+    assert!(
+        !through_daemon["structuredContent"]["context_pack"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Building in the MCP process starts the index thread pools there and
+    // keeps them, with the model and preview cache, for the session's life.
+    if let Some(threads) = threads {
+        assert!(
+            threads <= 8,
+            "the MCP process built the pack itself: {threads} threads"
+        );
+    }
+
+    // Without a daemon the same call builds in-process and must answer the same.
+    let pid = daemon.pid.take().unwrap();
+    #[cfg(unix)]
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    #[cfg(windows)]
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while home.join("daemon.pid").exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (in_process, _) = mcp_context_pack(&home, &repo, false);
+    assert_eq!(
+        serde_json::to_string(&through_daemon).unwrap(),
+        serde_json::to_string(&in_process).unwrap()
+    );
+}
