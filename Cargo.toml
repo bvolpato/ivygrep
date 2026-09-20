@@ -94,7 +94,7 @@ tree-sitter-cpp = "0.23.4"
 tree-sitter-scala = "0.26.0"
 tree-sitter-bash = "0.25.1"
 tree-sitter-haskell = { package = "ivygrep-tree-sitter-haskell", path = "vendor/tree-sitter-haskell", version = "=0.23.1-ivygrep.1" }
-tree-sitter-ocaml = "0.25.0"
+tree-sitter-ocaml = "0.26.0"
 tree-sitter-lua = "0.5.0"
 tree-sitter-dart = "0.2.0"
 tree-sitter-objc = "3.0.2"
