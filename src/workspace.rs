@@ -1350,6 +1350,19 @@ pub fn detect_workspace_root(path: &Path) -> Result<PathBuf> {
     Ok(current)
 }
 
+/// Whether a workspace root no longer exists as a directory, such as a deleted
+/// Git worktree. A root that exists but cannot be read (permissions, a stalled
+/// mount) is not gone.
+pub(crate) fn root_is_gone(root: &Path) -> bool {
+    match fs::metadata(root) {
+        Ok(metadata) => !metadata.is_dir(),
+        Err(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
 fn is_git_workspace_root(path: &Path) -> bool {
     let marker = path.join(".git");
     if marker.is_dir() {
