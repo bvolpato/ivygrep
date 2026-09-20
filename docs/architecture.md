@@ -766,6 +766,25 @@ waits, `ig --status` lists the workspace as not watched with `workspace
 directory no longer exists`, the watcher failure described above. Collected
 workspaces leave `ig --status` and `ig_status`.
 
+On Linux with glibc an idle daemon returns freed memory to the OS. glibc keeps
+freed memory in one malloc arena per thread, up to eight per core, and a daemon
+that served a burst from many sessions has about a hundred threads that each
+touched one: after 32 sessions stopped calling, it kept 668 MiB of anonymous
+memory, nearly all of it free space inside 127 arenas. The daemon counts
+requests (IPC and Web UI), index runs, and watch updates, samples the count
+every 30 seconds, and calls `malloc_trim` once after two quiet samples, 60 to
+90 seconds without activity.
+It never trims while requests arrive. In the same workload a daemon with the
+trim went from 697 MiB to 228 MiB 80 seconds after the last request. Capping
+the arenas instead (`MALLOC_ARENA_MAX=4`) kept memory low under load too but
+cost 16% of the throughput and doubled the median search latency in the same
+run. This concerns glibc builds, that is builds from source and the CUDA
+archive. The static musl archives that `install.sh` and the Homebrew formula
+install compile the trim out and do not need it: musl's allocator has no arenas
+and gives memory back as it is freed, and an idle musl daemon stayed between
+174 and 185 MiB through an hour of 64 busy sessions, at the price of an
+allocator lock that every thread shares.
+
 An auto-spawned daemon writes to `daemon.log` in the app home. A client rotates
 a log over 10 MiB to `daemon.log.1` when it spawns a daemon, and on Unix a
 running daemon checks once a minute and does the same, redirecting its own

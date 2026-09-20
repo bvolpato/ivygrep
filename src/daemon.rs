@@ -1543,6 +1543,35 @@ pub(crate) struct DaemonState {
     /// backoff that keeps a broken watcher from being retried on every
     /// client request.
     watcher_recovery: Arc<Mutex<HashMap<String, WatcherRecovery>>>,
+    /// Requests, index runs, and watch updates, for the idle memory trim.
+    activity: Arc<DaemonActivity>,
+}
+
+/// What the daemon is doing, as far as the idle memory trim needs to know.
+#[derive(Default)]
+struct DaemonActivity {
+    /// Requests, index runs, and watch updates started so far. Only samples of it are
+    /// compared, so it may wrap.
+    started: AtomicU64,
+    /// Requests being served and index runs and watch updates in progress right now.
+    in_flight: AtomicUsize,
+}
+
+impl DaemonActivity {
+    fn begin(self: &Arc<Self>) -> InFlightWork {
+        self.started.fetch_add(1, Ordering::Relaxed);
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        InFlightWork(self.clone())
+    }
+}
+
+/// One request, index run, or watch update in flight; counted until dropped.
+struct InFlightWork(Arc<DaemonActivity>);
+
+impl Drop for InFlightWork {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// First retry delay after a failed watcher registration; doubles per
@@ -2817,6 +2846,7 @@ fn create_daemon_state() -> DaemonState {
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         web_server: Arc::new(Mutex::new(None)),
         watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
+        activity: Arc::new(DaemonActivity::default()),
     }
 }
 
@@ -2862,6 +2892,8 @@ async fn run_daemon_inner() -> Result<()> {
         spawn_watcher_supervisor(state.clone());
     }
     spawn_index_gc(state.clone());
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    spawn_idle_memory_trim(state.clone());
     #[cfg(unix)]
     spawn_daemon_log_rotation();
 
@@ -3050,6 +3082,7 @@ pub(crate) async fn handle_web_request(
     state: DaemonState,
     request: DaemonRequest,
 ) -> DaemonResponse {
+    let _in_flight = state.activity.begin();
     if !is_search_request(&request) {
         return handle_request(state, request).await;
     }
@@ -3478,6 +3511,7 @@ async fn handle_connection(
         };
         let (response, keep_alive) = match request {
             Ok(Some(envelope)) => {
+                let _in_flight = state.activity.begin();
                 match handle_client_request(state.clone(), envelope, &mut reader).await {
                     ClientRequestOutcome::Respond(response) => (response, true),
                     // The client went away mid-request; its search was
@@ -3681,6 +3715,9 @@ async fn run_index_request(
     lead: Option<InflightIndexLead>,
     arrived_at: std::time::Instant,
 ) -> DaemonResponse {
+    // Counted here, not only in the request that asked for it: a `StartIndex`
+    // request answers at once and the index runs on in a detached task.
+    let _in_flight = state.activity.begin();
     // Generation observed on arrival: if a full walk that started after this
     // request arrived advances it while the request waits for the exclusive
     // lease, the rescan is redundant. Earlier walks cannot vouch for edits made
@@ -5503,6 +5540,9 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 }) else {
                     break;
                 };
+                // Counted until the index run below ends, not through the
+                // debounce and retry waits after it.
+                let in_flight = state.activity.begin();
                 control.retrying.store(false, Ordering::Relaxed);
                 let pending = control.pending_events.swap(0, Ordering::Relaxed);
                 control
@@ -5613,6 +5653,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                     }
                 };
 
+                drop(in_flight);
                 match result {
                     Ok(changed) => {
                         if external_git_exclude_path.as_deref().is_some_and(|path| {
@@ -6098,6 +6139,83 @@ fn open_daemon_log_file() -> Result<File> {
         .create(true)
         .append(true)
         .open(log_path)?)
+}
+
+/// How often the idle memory trim samples daemon activity. Two quiet samples
+/// in a row, 60 to 90 seconds with no request or watch update started or in
+/// flight, trim once.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const IDLE_MEMORY_TRIM_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Decides when an idle daemon gives freed memory back to the OS.
+///
+/// glibc keeps freed memory in one arena per thread, up to eight per core. A
+/// daemon that served a burst from many sessions has about a hundred threads
+/// that each touched an arena, and it kept 670 MiB of mostly free memory for
+/// as long as it lived. `malloc_trim` returned 450 MiB of that once the
+/// sessions went quiet. It runs once per quiet period, never while a request
+/// or a watch update is in flight, and on the blocking pool: it takes one
+/// arena lock at a time, so a request that arrives during the call waits at
+/// most for the arena its thread allocates from.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[derive(Default)]
+struct IdleMemoryTrim {
+    last_activity: u64,
+    quiet_samples: u32,
+    trimmed_at: Option<u64>,
+    /// The previous sample saw work in flight.
+    was_in_flight: bool,
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+impl IdleMemoryTrim {
+    /// Takes one sample of the daemon's activity and says whether to trim now.
+    fn sample(&mut self, activity: u64, in_flight: usize) -> bool {
+        if activity != self.last_activity || in_flight > 0 {
+            self.last_activity = activity;
+            self.quiet_samples = 0;
+            self.was_in_flight = in_flight > 0;
+            return false;
+        }
+        if std::mem::take(&mut self.was_in_flight) {
+            // The work ended at some point since the last sample, possibly
+            // just now. The quiet period starts here, not a sample ago.
+            return false;
+        }
+        self.quiet_samples = self.quiet_samples.saturating_add(1);
+        if self.quiet_samples < 2 || self.trimmed_at == Some(activity) {
+            return false;
+        }
+        self.trimmed_at = Some(activity);
+        true
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn spawn_idle_memory_trim(state: DaemonState) {
+    tokio::spawn(async move {
+        let mut trim = IdleMemoryTrim::default();
+        loop {
+            tokio::time::sleep(IDLE_MEMORY_TRIM_INTERVAL).await;
+            let quiet = trim.sample(
+                state.activity.started.load(Ordering::Relaxed),
+                state.activity.in_flight.load(Ordering::Relaxed),
+            );
+            if quiet {
+                // Walks every arena, so keep it off the async workers.
+                let _ = tokio::task::spawn_blocking(|| {
+                    let started = std::time::Instant::now();
+                    // SAFETY: `malloc_trim` only releases free heap pages.
+                    unsafe { libc::malloc_trim(0) };
+                    daemon_log(&format!(
+                        "idle: returned freed memory to the OS in {:?}",
+                        started.elapsed()
+                    ));
+                })
+                .await;
+            }
+        }
+    });
 }
 
 /// How often a running daemon checks its log size.
@@ -6710,6 +6828,7 @@ mod tests {
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
             watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
+            activity: Arc::new(DaemonActivity::default()),
         }
     }
 
@@ -13085,6 +13204,47 @@ mod tests {
             current.starts_with('[') && current.contains("] test line"),
             "daemon log should use a timestamp prefix, got {current:?}"
         );
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn idle_memory_trim_runs_once_per_quiet_period_and_never_under_load() {
+        let mut trim = IdleMemoryTrim::default();
+        // Requests keep arriving: every sample sees a new count.
+        assert!((1..=20).all(|activity| !trim.sample(activity, 0)));
+        // The first quiet sample is not idle yet; the second one trims.
+        assert!(!trim.sample(20, 0));
+        assert!(trim.sample(20, 0));
+        // An idle daemon does not trim again and again.
+        assert!((0..100).all(|_| !trim.sample(20, 0)));
+        // One request restarts the cycle.
+        assert!(!trim.sample(21, 0));
+        assert!(!trim.sample(21, 0));
+        assert!(trim.sample(21, 0));
+        // A long index run or context pack: nothing new arrives, but work is
+        // in flight, however long it takes. The quiet period starts after it.
+        assert!((0..100).all(|_| !trim.sample(22, 1)));
+        // It may have ended right before this sample, so this one only starts
+        // the quiet period, and the trim still comes two samples later.
+        assert!(!trim.sample(22, 0));
+        assert!(!trim.sample(22, 0));
+        assert!(trim.sample(22, 0));
+        // A daemon that never served anything has nothing to give back twice.
+        let mut fresh = IdleMemoryTrim::default();
+        assert!(!fresh.sample(0, 0));
+        assert!(fresh.sample(0, 0));
+        assert!(!fresh.sample(0, 0));
+
+        // The counters the samples come from.
+        let activity = Arc::new(DaemonActivity::default());
+        let request = activity.begin();
+        let watch_update = activity.begin();
+        assert_eq!(activity.started.load(Ordering::Relaxed), 2);
+        assert_eq!(activity.in_flight.load(Ordering::Relaxed), 2);
+        drop(request);
+        drop(watch_update);
+        assert_eq!(activity.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(activity.started.load(Ordering::Relaxed), 2);
     }
 
     #[cfg(unix)]
