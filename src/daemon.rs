@@ -318,6 +318,22 @@ struct WatchEventFilter {
     /// Same rule as the file walker, so events below a nested worktree or
     /// clone never reach the enclosing workspace's index.
     nested_checkouts: crate::workspace::NestedCheckouts,
+    /// Directories below the root whose `.git` entry this filter has seen.
+    /// An event for an entry that is already here changes nothing.
+    checkout_markers: HashSet<PathBuf>,
+}
+
+/// `checkout_markers` forgets everything past this many directories. The next
+/// event of a forgotten marker costs one index lookup.
+const MAX_TRACKED_CHECKOUT_MARKERS: usize = 4096;
+
+/// What an event says about the `.git` entries of directories below the root.
+#[derive(Default)]
+struct CheckoutMarkerChange {
+    /// A directory with files in this index became a checkout of its own.
+    appeared_over_indexed_files: bool,
+    /// Directories whose `.git` entry went away.
+    disappeared: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -856,6 +872,7 @@ impl WatchEventFilter {
             git_exclude_path: None,
             root_gitignore: None,
             nested_checkouts: crate::workspace::NestedCheckouts::default(),
+            checkout_markers: HashSet::new(),
         };
         filter.refresh();
         filter
@@ -896,16 +913,108 @@ impl WatchEventFilter {
             self.refresh();
             return WatchChange::FullReconciliation;
         }
+        let markers = self.checkout_marker_change(event);
+        if markers.appeared_over_indexed_files {
+            return WatchChange::FullReconciliation;
+        }
 
+        // A directory that lost its `.git` entry is reported as a changed
+        // path. The index update then finds it gone, which costs nothing for
+        // a deleted worktree, or still there, which makes it scan the
+        // workspace and take the files back.
         let paths = self
             .paths_to_reindex(event)
             .into_iter()
+            .chain(markers.disappeared)
             .collect::<HashSet<_>>();
         if paths.is_empty() {
             WatchChange::None
         } else {
             WatchChange::Paths(paths)
         }
+    }
+
+    /// What `event` says about `.git` entries that appeared or went away.
+    /// `git init`, a clone, or `git worktree add` in a directory that is
+    /// already indexed turns it into a workspace of its own, and removing the
+    /// entry gives its files back to this workspace. Neither touches a source
+    /// file, and everything below `.git` is ignored, so only the entry itself
+    /// can tell. Only events for a path named `.git` cost anything here.
+    fn checkout_marker_change(&mut self, event: &notify::Event) -> CheckoutMarkerChange {
+        use notify::EventKind;
+        use notify::event::ModifyKind;
+        // A `.git` directory is busy, and some backends report that as a
+        // change of the directory. Only an entry that appears counts.
+        let appears = matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) | EventKind::Any
+        );
+        let mut change = CheckoutMarkerChange::default();
+        for path in &event.paths {
+            if path.file_name().is_none_or(|name| name != ".git") {
+                continue;
+            }
+            let Some((marker, rel)) = self.normalize_watch_path(path) else {
+                continue;
+            };
+            let (Some(dir), Some(rel_dir)) = (marker.parent(), rel.parent()) else {
+                continue;
+            };
+            // The workspace's own `.git`, a marker inside another checkout,
+            // and markers in directories that are not indexed say nothing
+            // about this index.
+            if rel_dir.as_os_str().is_empty()
+                || is_always_ignored_watch_path(rel_dir)
+                || crate::walker::is_ivygrep_owned_path(&self.workspace.root, dir)
+                || dir.parent().is_some_and(|parent| {
+                    self.nested_checkouts.contains(&self.workspace.root, parent)
+                })
+                || (!self.skip_gitignore
+                    && self.root_gitignore.as_ref().is_some_and(|gitignore| {
+                        gitignore.matched_path_or_any_parents(dir, true).is_ignore()
+                    }))
+            {
+                continue;
+            }
+            if std::fs::symlink_metadata(&marker).is_err() {
+                self.checkout_markers.remove(rel_dir);
+                change.disappeared.push(rel_dir.to_path_buf());
+                continue;
+            }
+            if self.checkout_markers.len() >= MAX_TRACKED_CHECKOUT_MARKERS {
+                self.checkout_markers.clear();
+            }
+            // A checkout that is created together with its directory, as an
+            // agent worktree is, never had files in this index: no scan.
+            if self.checkout_markers.insert(rel_dir.to_path_buf())
+                && appears
+                && self.index_has_files_below(rel_dir)
+            {
+                change.appeared_over_indexed_files = true;
+            }
+        }
+        change
+    }
+
+    /// Whether this workspace's index holds chunks of a file below `rel_dir`.
+    /// Anything that keeps the lookup from answering counts as yes.
+    fn index_has_files_below(&self, rel_dir: &Path) -> bool {
+        // An overlay answers from two stores; leave that to the scan.
+        if self.workspace.has_overlay() || self.workspace.base_ref_path().exists() {
+            return true;
+        }
+        let first = format!("{}/", crate::workspace::index_path_string(rel_dir));
+        // `0` follows `/` in byte order, so this is every path with the prefix.
+        let past = format!("{}0", first.trim_end_matches('/'));
+        crate::indexer::open_sqlite_readonly(&self.workspace.sqlite_path())
+            .and_then(|sqlite| {
+                Ok(sqlite.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path >= ?1 AND file_path < ?2)",
+                    rusqlite::params![first, past],
+                    |row| row.get::<_, bool>(0),
+                )?)
+            })
+            .unwrap_or(true)
     }
 
     fn paths_to_reindex(&self, event: &notify::Event) -> Vec<PathBuf> {
@@ -12112,6 +12221,131 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!("the index never became readable: {last_error:?}");
+    }
+
+    /// Poll until a literal search returns exactly `expected`. A loaded
+    /// runner needs far longer than the watcher's debounce.
+    async fn wait_for_literal_hit_paths(
+        workspace: &Workspace,
+        needle: &str,
+        expected: &[PathBuf],
+    ) -> bool {
+        for _ in 0..1200 {
+            if literal_hit_paths(workspace, needle).await == expected {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn indexed_directory_that_becomes_a_checkout_leaves_the_index_and_returns_without_its_marker()
+     {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        std::fs::create_dir_all(main.join("child")).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn parent_of_the_checkout() {}\n").unwrap();
+        std::fs::write(
+            main.join("child/inner.rs"),
+            "pub fn became_a_checkout_marker() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(&main).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let inner = [PathBuf::from("child/inner.rs")];
+        assert_eq!(
+            literal_hit_paths(&workspace, "became_a_checkout_marker").await,
+            inner
+        );
+
+        let state = test_state();
+        let _watcher_cleanup = WatcherCleanup(&state);
+        register_watcher(&state, &main).unwrap();
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
+
+        // `git init` in an indexed directory touches no source file: the only
+        // events are for `child/.git` and below it.
+        git(&main.join("child"), &["init", "-b", "main"]);
+        assert!(
+            wait_for_literal_hit_paths(&workspace, "became_a_checkout_marker", &[]).await,
+            "the parent kept serving files of a directory that became a repository"
+        );
+
+        // Without its marker the directory belongs to the parent again.
+        std::fs::remove_dir_all(main.join("child/.git")).unwrap();
+        assert!(
+            wait_for_literal_hit_paths(&workspace, "became_a_checkout_marker", &inner).await,
+            "the files did not come back after the repository marker went away"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn checkout_marker_costs_a_scan_only_where_this_index_holds_files() {
+        use notify::EventKind;
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        std::fs::create_dir_all(main.join("child")).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("child/inner.rs"), "pub fn indexed_below() {}\n").unwrap();
+        let workspace = Workspace::resolve(&main).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let mut filter = WatchEventFilter::new(&workspace);
+        let event = |kind, path: &Path| notify::Event::new(kind).add_path(path.to_path_buf());
+
+        // An agent worktree arrives with its directory. Nothing below it was
+        // ever in this index, so its marker must not scan the base.
+        let agent = workspace.root.join(".claude/worktrees/agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(agent.join(".git"), "gitdir: /nowhere\n").unwrap();
+        let created = EventKind::Create(CreateKind::File);
+        assert!(matches!(
+            filter.change_for_event(&event(created, &agent.join(".git"))),
+            WatchChange::None
+        ));
+        // Removed with its directory: reported as the directory, which the
+        // index update finds gone and drops without a scan.
+        std::fs::remove_dir_all(&agent).unwrap();
+        let removed = EventKind::Remove(RemoveKind::Any);
+        let WatchChange::Paths(paths) =
+            filter.change_for_event(&event(removed, &agent.join(".git")))
+        else {
+            panic!("a marker that went away must be reported as its directory");
+        };
+        assert_eq!(
+            paths,
+            HashSet::from([PathBuf::from(".claude/worktrees/agent")])
+        );
+
+        // A marker in a directory whose files this index holds.
+        let marker = workspace.root.join("child/.git");
+        std::fs::create_dir(&marker).unwrap();
+        let created = EventKind::Create(CreateKind::Folder);
+        assert!(matches!(
+            filter.change_for_event(&event(created, &marker)),
+            WatchChange::FullReconciliation
+        ));
+        // A busy `.git` directory is reported again and again, and so is
+        // everything below it. Neither is news.
+        let modified = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        for (kind, path) in [
+            (created, marker.clone()),
+            (modified, marker.clone()),
+            (created, marker.join("index.lock")),
+        ] {
+            assert!(matches!(
+                filter.change_for_event(&event(kind, &path)),
+                WatchChange::None
+            ));
+        }
     }
 
     #[tokio::test]

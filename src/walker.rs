@@ -248,14 +248,29 @@ mod tests {
         }
     }
 
-    /// A workspace holding a linked worktree, a nested clone, an absorbed
-    /// submodule, and a submodule with an embedded `.git` directory.
-    fn write_nested_checkouts(root: &Path) {
+    /// A workspace holding a linked worktree, a nested clone, a clone whose
+    /// Git directory is elsewhere (`git clone --separate-git-dir`), an
+    /// absorbed submodule, a submodule with an embedded `.git` directory, and
+    /// a listed submodule whose Git directory is elsewhere. `outside` is a
+    /// directory beside the workspace for the Git directories kept elsewhere.
+    fn write_nested_checkouts(root: &Path, outside: &Path) {
         let file = |path: &str, contents: &str| {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, contents).unwrap();
         };
+        file("detached/lib.rs", "fn detached() {}\n");
+        write_git_dir(&outside.join("detached.git"), false);
+        file(
+            "detached/.git",
+            &format!("gitdir: {}\n", outside.join("detached.git").display()),
+        );
+        file("vendor/listed/lib.rs", "fn listed() {}\n");
+        write_git_dir(&outside.join("listed.git"), false);
+        file(
+            "vendor/listed/.git",
+            &format!("gitdir: {}\n", outside.join("listed.git").display()),
+        );
         file("main.rs", "fn main() {}\n");
         file(".claude/notes.md", "kept\n");
         file(".claude/worktrees/agent/main.rs", "fn main() {}\n");
@@ -277,18 +292,20 @@ mod tests {
         write_git_dir(&root.join("vendor/embedded/.git"), false);
         file(
             ".gitmodules",
-            "[submodule \"embedded\"]\n\tpath = vendor/embedded\n\turl = https://example.invalid/e.git\n",
+            "[submodule \"embedded\"]\n\tpath = vendor/embedded\n\turl = https://example.invalid/e.git\n\
+             [submodule \"listed\"]\n\tpath = vendor/listed\n\turl = https://example.invalid/l.git\n",
         );
     }
 
     #[test]
     fn nested_worktrees_and_clones_are_separate_workspaces_but_submodules_stay() {
         let tmp = tempfile::tempdir().unwrap();
-        write_git_dir(&tmp.path().join(".git"), false);
-        write_nested_checkouts(tmp.path());
+        let root = tmp.path().join("repo");
+        write_git_dir(&root.join(".git"), false);
+        write_nested_checkouts(&root, &tmp.path().join("git-dirs"));
 
         for skip_gitignore in [false, true] {
-            let mut files = collect_files(tmp.path(), skip_gitignore)
+            let mut files = collect_files(&root, skip_gitignore)
                 .into_iter()
                 .collect::<Vec<_>>();
             files.sort();
@@ -299,17 +316,22 @@ mod tests {
                     ".gitmodules",
                     "main.rs",
                     "vendor/absorbed/lib.rs",
-                    "vendor/embedded/lib.rs"
+                    "vendor/embedded/lib.rs",
+                    "vendor/listed/lib.rs"
                 ]
             );
-            let mut matcher = SourcePathMatcher::new(tmp.path(), skip_gitignore);
+            let mut matcher = SourcePathMatcher::new(&root, skip_gitignore);
             for (path, allowed) in [
                 ("main.rs", true),
                 ("vendor/absorbed/lib.rs", true),
                 ("vendor/embedded/lib.rs", true),
+                ("vendor/listed/lib.rs", true),
                 (".claude/worktrees/agent/main.rs", false),
                 (".claude/worktrees/agent/deleted.rs", false),
                 ("clone/lib.rs", false),
+                // `git clone --separate-git-dir`: a full Git directory that
+                // is neither a listed submodule nor below `.git/modules`.
+                ("detached/lib.rs", false),
                 // A deleted worktree's paths must still reach the index as deletions.
                 (".claude/worktrees/removed/main.rs", true),
             ] {
@@ -318,13 +340,78 @@ mod tests {
         }
     }
 
+    /// The same rule against checkouts that Git itself made.
+    #[test]
+    fn git_made_submodule_stays_and_separate_git_dir_clone_and_worktree_do_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=ivygrep",
+                    "-c",
+                    "user.email=ivygrep@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "protocol.file.allow=always",
+                ])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let upstream = tmp.path().join("upstream");
+        let root = tmp.path().join("repo");
+        for repository in [&upstream, &root] {
+            std::fs::create_dir(repository).unwrap();
+            git(repository, &["init", "-b", "main"]);
+            std::fs::write(repository.join("lib.rs"), "fn lib() {}\n").unwrap();
+            git(repository, &["add", "."]);
+            git(repository, &["commit", "-m", "initial"]);
+        }
+        let upstream_url = upstream.to_str().unwrap();
+        git(&root, &["submodule", "add", upstream_url, "vendor/sub"]);
+        git(&root, &["commit", "-m", "submodule"]);
+        let detached_git_dir = tmp.path().join("detached.git");
+        git(
+            &root,
+            &[
+                "clone",
+                "--separate-git-dir",
+                detached_git_dir.to_str().unwrap(),
+                upstream_url,
+                "detached",
+            ],
+        );
+        git(
+            &root,
+            &["worktree", "add", "-b", "agent", ".claude/worktrees/agent"],
+        );
+        // Git absorbed the submodule's directory and gave the clone a `.git`
+        // file as well: only where they point tells the two apart.
+        assert!(root.join("vendor/sub/.git").is_file());
+        assert!(root.join("detached/.git").is_file());
+
+        let mut files = collect_files(&root, false).into_iter().collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files, [".gitmodules", "lib.rs", "vendor/sub/lib.rs"]);
+    }
+
     #[test]
     fn a_plain_directory_of_clones_keeps_indexing_them() {
         let tmp = tempfile::tempdir().unwrap();
-        write_nested_checkouts(tmp.path());
+        let root = tmp.path().join("clones");
+        write_nested_checkouts(&root, &tmp.path().join("git-dirs"));
 
-        let files = collect_files(tmp.path(), false);
+        let files = collect_files(&root, false);
         assert!(files.contains("clone/lib.rs"));
+        assert!(files.contains("detached/lib.rs"));
         assert!(files.contains(".claude/worktrees/agent/main.rs"));
     }
 
