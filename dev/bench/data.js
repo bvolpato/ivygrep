@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789900236185,
+  "lastUpdate": 1789904163715,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -67270,6 +67270,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2075.46,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9432d4eeff08e86d29abe550bb45b3b3ae6ed11b",
+          "message": "[fix] Collect indexes of deleted workspaces and rotate the daemon log while running (#402)\n\n* [fix] Collect indexes of deleted workspaces and rotate the daemon log while running\n\nNothing removed the index of a workspace whose directory was deleted, so 500\nremoved agent worktrees left 501 index directories behind and stayed in status\noutput. The daemon now removes an index once its root has been missing, not\nmerely unreadable, for IVYGREP_INDEX_GC_GRACE_SECS (seven days by default, 0\ndisables it), and the overlay of a worktree that git worktree list no longer\nreports after ten minutes. It never removes an index whose root exists, that a\nlive overlay still reads as its base, or whose lock or job is in use. ig --gc\nruns one pass by hand.\n\ndaemon.log only rotated when a client spawned a daemon, so a daemon that stays\nup for days grew it without bound. On Unix the running daemon now rotates it\nat the existing 10 MiB cap and repoints only the descriptors that write to it.\n\n* [fix] Collect indexes inside the daemon, under the mutation lease, and recheck the root\n\nReview follow-ups for index garbage collection.\n\nig --gc ran the pass in the CLI process with nothing released, so a running\ndaemon kept cached readers and watcher state for an index being deleted. The\npass is now a daemon request. A daemon that predates the request answers\n\"invalid daemon request\"; ig --gc then stops it and runs the pass in-process,\nwhich is also what happens when no daemon runs.\n\nThe daemon pass now takes the exclusive workspace mutation lease before it\nclears and unlinks, as Remove does, so a search that still reads the index\nfinishes first. After taking the index locks the pass rechecks that the root is\nstill gone, and that a worktree on the short grace is still unregistered, and\nkeeps the index of anything that came back.\n\n* [docs] Keep one changelog entry each for nested checkouts and index collection\n\nRebasing the review follow-ups left the earlier wording of both entries next to the current one, and main carried the nested-checkout entry twice.\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-09-20T06:54:26-04:00",
+          "tree_id": "4fc32deeb1a8560ccbd2812e300e1d70fb483dba",
+          "url": "https://github.com/bvolpato/ivygrep/commit/9432d4eeff08e86d29abe550bb45b3b3ae6ed11b"
+        },
+        "date": 1789904162892,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 95831.49,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 5532.71,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 80943.33,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 239258.23,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 8.64,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1316.63,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1071.5,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 1324.45,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 1313.7,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.18,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 100.36,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 3764.98,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1423.78,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1439.18,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 2511.46,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 2820.12,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3249.85,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 390.05,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1403.37,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 273208.22,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 80,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 378052.23,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 24628.09,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 90494.45,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 112.02,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 1686.23,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 249.47,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 615.9,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 4966.85,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 76.89,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 566.26,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2539.57,
             "unit": "µs"
           }
         ]
