@@ -157,12 +157,36 @@ The trainer fits features that come from the file path (`PATH_FEATURES` in
 stores every document at `documents/<position>.<extension>`, so there these
 features describe the export: `primary_source` is the dataset's language tag.
 For a corpus whose documents all sit in a flat `documents/` directory, the
-trainer leaves the path features' pair differences out of the fit, their weights
-stay zero, and the model file names them under `fixed_zero_features`. The
-embedded model was fit before this rule existed. Its three non-zero path weights
-were set to zero afterwards; `fixed_zero_features.replaced_fitted_weights` keeps
-the fitted values, and the fit ledger is bound to the new model bytes. Its
-`training` and `evaluation` records describe the fit before that edit.
+trainer reads the path features as zero, in the fit and in every evaluation of
+it (validation, which picks the hyperparameters, and `--evaluation-pair`, which
+decides the acceptance gate). Their weights stay zero, and the model file names
+them under `fixed_zero_features`. The embedded model was fit before this rule
+existed. Its three non-zero path weights were set to zero afterwards;
+`fixed_zero_features.replaced_fitted_weights` keeps the fitted values, and the
+fit ledger is bound to the new model bytes.
+
+Every metrics record in a model file names the weights it was computed for
+(`weights_sha256`, a checksum of the feature order and the weights), and
+`render_public_reranker.py` refuses a model whose `evaluation` record names other
+weights, or matrices whose results do not report the model file's checksum. When
+weights change after a fit, evaluate them again:
+
+```bash
+python3 scripts/train_public_reranker.py \
+  --reevaluate benchmarks/public/reranker_model.json \
+  --fit-ledger benchmarks/public/reranker_fit_query_ids.json \
+  --evaluation-pair /tmp/ivygrep-reranker-eval/codetrans-dl=/tmp/ivygrep-reranker-traces/codetrans-dl.json \
+  --output benchmarks/public/reranker_model.json
+```
+
+This fits nothing. It checks that no evaluation query is a fit ID, writes the
+`evaluation` record for the weights in the file with its date and capture commit,
+moves records computed for other weights to `original_fit`, and binds the ledger
+to the new model bytes; pin the printed ledger checksum in `manifest.json`. The
+embedded model's `evaluation` was made this way on captures of the `reranker-eval`
+and `reranker-train` profiles at main. The traces of its original fit no longer
+exist, so `original_fit` keeps that fit's records as history, under the checksum
+of the fitted weights.
 
 `train_public_reranker.py --fit-ledger-output PATH` writes the exact used-ID
 ledger bound to a newly generated model. Skipped IDs are excluded from fit

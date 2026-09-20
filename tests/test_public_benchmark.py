@@ -37,6 +37,7 @@ renderer = load_script("render_public_benchmark")
 embedding_renderer = load_script("render_embedding_bakeoff")
 matrix_runner = load_script("run_public_benchmark_matrix")
 reranker_trainer = load_script("train_public_reranker")
+sys.modules["train_public_reranker"] = reranker_trainer
 reranker_renderer = load_script("render_public_reranker")
 current_head_runner = load_script("run_current_head_benchmark")
 
@@ -1171,24 +1172,105 @@ class PublicBenchmarkTest(unittest.TestCase):
                 )
 
     def test_public_reranker_evidence_passes_acceptance_gate(self):
-        report = reranker_renderer.build_report(
-            ROOT / "benchmarks" / "public" / "reranker_model.json",
-            ROOT
-            / "docs"
-            / "benchmarks"
-            / "public-reranker-deterministic-results.json",
-            ROOT
-            / "docs"
-            / "benchmarks"
-            / "public-reranker-learned-results.json",
+        # The published report is evidence for the model it names, so it is
+        # checked against its own matrices, not rebuilt around the checkout model.
+        benchmarks = ROOT / "docs" / "benchmarks"
+        published = json.loads((benchmarks / "public-reranker-results.json").read_text())
+        integrated, _ = reranker_renderer.integrated_evaluation(
+            benchmarks / "public-reranker-deterministic-results.json",
+            benchmarks / "public-reranker-learned-results.json",
         )
-        self.assertTrue(report["model"]["offline_evaluation"]["gate"]["passed"])
-        self.assertTrue(report["integrated_evaluation"]["gate"]["passed"])
+        self.assertEqual(published["integrated_evaluation"], integrated)
+        self.assertTrue(published["model"]["offline_evaluation"]["gate"]["passed"])
+        self.assertTrue(integrated["gate"]["passed"])
         self.assertGreaterEqual(
-            report["integrated_evaluation"]["metrics"]["ndcg_at_10"][
-                "relative_delta"
-            ],
-            0.05,
+            integrated["metrics"]["ndcg_at_10"]["relative_delta"], 0.05
+        )
+
+    def test_reranker_report_is_evidence_for_one_ranking_function(self):
+        model_path = ROOT / "benchmarks" / "public" / "reranker_model.json"
+        model = json.loads(model_path.read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            matrices = {}
+            for mode in ("deterministic", "learned"):
+                configuration = {"reranker_mode": mode}
+                if mode == "learned":
+                    configuration["reranker_model_sha256"] = contracts.sha256_file(
+                        model_path
+                    )
+                metrics = {
+                    name: {"mean": 0.5 if mode == "deterministic" else 0.6}
+                    for name in (
+                        *reranker_renderer.QUALITY_METRICS,
+                        *reranker_renderer.LATENCY_METRICS,
+                    )
+                }
+                matrices[mode] = root / f"{mode}.json"
+                matrices[mode].write_text(
+                    json.dumps(
+                        {
+                            "ivygrep_commit": "a" * 40,
+                            "profile": "reranker-eval",
+                            "tasks": ["fixture"],
+                            "queries": 1,
+                            "runtime": {"machine": "fixture"},
+                            "summary": {"neural": {"metrics": metrics}},
+                            "task_summary": {"fixture": {"neural": metrics}},
+                            "results": [
+                                {
+                                    "binary": {"sha256": "b" * 64},
+                                    "index_configuration": configuration,
+                                }
+                            ],
+                        }
+                    )
+                )
+            report = reranker_renderer.build_report(
+                model_path, matrices["deterministic"], matrices["learned"]
+            )
+            self.assertEqual(report["model"]["sha256"], contracts.sha256_file(model_path))
+            self.assertEqual(report["model"]["offline_evaluation"], model["evaluation"])
+
+            # A hand edit of a weight leaves the evaluation record behind.
+            edited = copy.deepcopy(model)
+            edited["weights"][0] += 0.5
+            edited_path = root / "edited.json"
+            edited_path.write_text(json.dumps(edited))
+            with self.assertRaisesRegex(ValueError, "not computed for its weights"):
+                reranker_renderer.build_report(
+                    edited_path, matrices["deterministic"], matrices["learned"]
+                )
+            # Matrices from a binary with other model bytes, or from one that does
+            # not report its model, are not evidence for this file.
+            published = ROOT / "docs" / "benchmarks"
+            with self.assertRaisesRegex(ValueError, "did not run this model file"):
+                reranker_renderer.build_report(
+                    model_path,
+                    published / "public-reranker-deterministic-results.json",
+                    published / "public-reranker-learned-results.json",
+                )
+
+    def test_embedded_model_records_metrics_only_for_the_weights_it_ships(self):
+        model = json.loads((ROOT / "benchmarks/public/reranker_model.json").read_text())
+        shipped = reranker_trainer.model_weights_sha256(
+            model["feature_schema"], model["weights"]
+        )
+        self.assertEqual(model["evaluation"]["weights_sha256"], shipped)
+        if any(name in model["training"] for name in reranker_trainer.FIT_METRICS):
+            self.assertEqual(model["training"]["weights_sha256"], shipped)
+        # What the fit produced before fixed_zero_features was applied is history
+        # under its own checksum: the shipped weights with the fitted values back.
+        fitted = dict(zip(model["feature_schema"], model["weights"], strict=True))
+        fitted.update(model["fixed_zero_features"]["replaced_fitted_weights"])
+        history = model["original_fit"]
+        self.assertNotEqual(history["weights_sha256"], shipped)
+        self.assertEqual(
+            history["weights_sha256"],
+            reranker_trainer.model_weights_sha256(
+                model["feature_schema"],
+                [fitted[name] for name in model["feature_schema"]],
+            ),
         )
 
     def test_public_core_report_is_not_claimed_as_unseen_queries(self):
@@ -1401,6 +1483,110 @@ class PublicBenchmarkTest(unittest.TestCase):
             examples, sources = reranker_trainer.load_examples([(dataset, result_path)])
             self.assertTrue(examples[0]["synthetic_paths"])
             self.assertTrue(sources[0]["synthetic_corpus_paths"])
+
+    def test_evaluation_ignores_path_features_of_corpora_with_exported_paths(self):
+        names = list(contracts.RERANK_FEATURE_SCHEMA)
+        primary = names.index("primary_source")
+        # A fit that also had a corpus with real paths can weight path features.
+        weights = [0.0] * len(names)
+        weights[primary] = 1.0
+        relevant = [0.0] * len(names)
+        relevant[primary] = 1.0
+
+        def example(synthetic_paths):
+            return {
+                "dataset": "fixture",
+                "query_id": "q1",
+                "synthetic_paths": synthetic_paths,
+                "judgments": {"d2": 1},
+                "candidates": [
+                    {"document_id": "d1", "features": [0.0] * len(names), "grade": 0, "rank": 0},
+                    {"document_id": "d2", "features": relevant, "grade": 1, "rank": 1},
+                ],
+            }
+
+        # Validation picks the hyperparameters and --evaluation-pair decides the
+        # gate through evaluate(): a real path may reorder, an exported one not.
+        self.assertEqual(
+            reranker_trainer.evaluate([example(False)], weights)["mrr_at_10"], 1.0
+        )
+        exported = example(True)
+        self.assertEqual(reranker_trainer.evaluate([exported], weights)["mrr_at_10"], 0.5)
+        self.assertEqual(
+            reranker_trainer.score_candidate(exported, exported["candidates"][0], weights),
+            reranker_trainer.score_candidate(exported, exported["candidates"][1], weights),
+        )
+        self.assertEqual(relevant[primary], 1.0, "scoring must not edit the capture")
+
+    def test_reevaluation_replaces_records_computed_for_other_weights(self):
+        names = list(contracts.RERANK_FEATURE_SCHEMA)
+        model = {
+            "schema_version": 2,
+            "model_id": "fixture-model",
+            "feature_schema": names,
+            "weights": [0.0] * len(names),
+            "fixed_zero_features": {"replaced_fitted_weights": {"primary_source": -2.0}},
+            "training": {"queries": 1, "sources": [], "learned_all": {"ndcg_at_10": 0.9}},
+            "evaluation": {"queries": 7, "gate": {"passed": True}},
+        }
+
+        def ledger(repository):
+            return {
+                "model_id": "fixture-model",
+                "model_sha256": "c" * 64,
+                "sources": [
+                    {
+                        "provenance": {"query_corpus": {"repository": repository}},
+                        "query_ids": ["q1"],
+                    }
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset, result_path, _, _ = native_training_fixture(Path(temporary))
+            updated = reranker_trainer.reevaluate_model(
+                copy.deepcopy(model),
+                ledger("other/queries"),
+                [(dataset, result_path)],
+                0.05,
+                0.02,
+                "2026-01-02",
+            )
+            shipped = reranker_trainer.model_weights_sha256(names, model["weights"])
+            evaluation = updated["evaluation"]
+            self.assertEqual(evaluation["weights_sha256"], shipped)
+            self.assertEqual(evaluation["queries"], 1)
+            self.assertEqual(evaluation["evaluated_at"], "2026-01-02")
+            self.assertEqual(evaluation["capture_commits"], ["a" * 40])
+            self.assertEqual(evaluation["fit_overlap_queries"], 0)
+            self.assertNotIn("fit_query_ids", evaluation["sources"][0])
+            self.assertNotIn("learned_all", updated["training"])
+            history = updated["original_fit"]
+            self.assertEqual(history["evaluation"], model["evaluation"])
+            self.assertEqual(history["training_metrics"], {"learned_all": {"ndcg_at_10": 0.9}})
+            self.assertNotEqual(history["weights_sha256"], shipped)
+
+            # A second pass keeps the history and only renews the evaluation.
+            again = reranker_trainer.reevaluate_model(
+                copy.deepcopy(updated),
+                ledger("other/queries"),
+                [(dataset, result_path)],
+                0.05,
+                0.02,
+                "2026-01-03",
+            )
+            self.assertEqual(again["original_fit"], history)
+            self.assertEqual(again["evaluation"]["evaluated_at"], "2026-01-03")
+
+            with self.assertRaisesRegex(ValueError, "overlaps 1 actual"):
+                reranker_trainer.reevaluate_model(
+                    copy.deepcopy(model),
+                    ledger("fixture/queries"),
+                    [(dataset, result_path)],
+                    0.05,
+                    0.02,
+                    "2026-01-02",
+                )
 
     def test_embedded_model_gives_no_weight_to_path_features_fit_on_exported_paths(self):
         model = json.loads((ROOT / "benchmarks/public/reranker_model.json").read_text())

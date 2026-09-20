@@ -10,6 +10,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import train_public_reranker as trainer
+
 
 QUALITY_METRICS = ("ndcg_at_10", "mrr_at_10", "precision_at_5", "recall_at_20")
 LATENCY_METRICS = ("warm_latency_p50_ms", "warm_latency_p95_ms")
@@ -27,8 +29,9 @@ def metric(matrix: dict, name: str) -> float:
     return float(matrix["summary"]["neural"]["metrics"][name]["mean"])
 
 
-def build_report(model_path: Path, baseline_path: Path, learned_path: Path) -> dict:
-    model = json.loads(model_path.read_text(encoding="utf-8"))
+def integrated_evaluation(baseline_path: Path, learned_path: Path) -> tuple[dict, dict]:
+    """The deterministic-against-learned comparison of two matrices, and the
+    learned matrix. Nothing here depends on a model file."""
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     learned = json.loads(learned_path.read_text(encoding="utf-8"))
     if baseline["ivygrep_commit"] != learned["ivygrep_commit"]:
@@ -85,21 +88,8 @@ def build_report(model_path: Path, baseline_path: Path, learned_path: Path) -> d
         for values in tasks.values()
     )
     latency_passed = metrics["warm_latency_p95_ms"]["absolute_delta"] < 75.0
-    return {
-        "schema_version": 1,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "ivygrep_commit": learned["ivygrep_commit"],
-        "binary": learned_binary,
-        "runtime": learned["runtime"],
-        "model": {
-            "model_id": model["model_id"],
-            "schema_version": model["schema_version"],
-            "feature_count": len(model["feature_schema"]),
-            "training": model["training"],
-            "offline_evaluation": model["evaluation"],
-            "sha256": sha256_file(model_path),
-        },
-        "integrated_evaluation": {
+    return (
+        {
             "profile": learned["profile"],
             "queries": learned["queries"],
             "tasks": tasks,
@@ -116,6 +106,49 @@ def build_report(model_path: Path, baseline_path: Path, learned_path: Path) -> d
             "deterministic_evidence_sha256": sha256_file(baseline_path),
             "learned_evidence_sha256": sha256_file(learned_path),
         },
+        learned,
+    )
+
+
+def build_report(model_path: Path, baseline_path: Path, learned_path: Path) -> dict:
+    model = json.loads(model_path.read_text(encoding="utf-8"))
+    model_sha256 = sha256_file(model_path)
+    # A report is evidence for one ranking function. The offline record must
+    # have been computed for the weights in the model file, and the learned
+    # matrix must have run the bytes of that file.
+    evaluation = model.get("evaluation") or {}
+    if evaluation.get("weights_sha256") != trainer.model_weights_sha256(
+        model["feature_schema"], model["weights"]
+    ):
+        raise ValueError(
+            "the model's evaluation record was not computed for its weights; "
+            "run train_public_reranker.py --reevaluate"
+        )
+    integrated, learned = integrated_evaluation(baseline_path, learned_path)
+    executed = {
+        result["index_configuration"].get("reranker_model_sha256")
+        for result in learned["results"]
+    }
+    if executed != {model_sha256}:
+        raise ValueError(
+            "the learned matrix did not run this model file: results report "
+            f"{sorted(map(str, executed))}, the file is {model_sha256}"
+        )
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "ivygrep_commit": learned["ivygrep_commit"],
+        "binary": learned["results"][0]["binary"],
+        "runtime": learned["runtime"],
+        "model": {
+            "model_id": model["model_id"],
+            "schema_version": model["schema_version"],
+            "feature_count": len(model["feature_schema"]),
+            "training": model["training"],
+            "offline_evaluation": evaluation,
+            "sha256": model_sha256,
+        },
+        "integrated_evaluation": integrated,
     }
 
 
@@ -126,6 +159,12 @@ def percent(value: float) -> str:
 def render_markdown(report: dict) -> str:
     integrated = report["integrated_evaluation"]
     metrics = integrated["metrics"]
+    offline = report["model"]["offline_evaluation"]
+    task_cap = (
+        "every task stayed within the two-point loss cap."
+        if offline["gate"]["per_task_passed"]
+        else "at least one task lost more than the two-point cap."
+    )
     task_rows = "\n".join(
         f"| {task} | {values['ndcg_at_10']['deterministic']:.4f} | "
         f"{values['ndcg_at_10']['learned']:.4f} | "
@@ -158,11 +197,11 @@ retrieval traces. The deterministic ranker remains available with
 
 ## Offline transfer check
 
-The model artifact also records {report['model']['offline_evaluation']['queries']}
-held-out public queries across eight tasks. It improved aggregate nDCG@10 by
-{percent(report['model']['offline_evaluation']['relative_ndcg'])} and MRR@10 by
-{percent(report['model']['offline_evaluation']['relative_mrr'])}; every task stayed
-within the two-point loss cap.
+The model artifact also records {offline['queries']} held-out public queries
+across {len(offline['tasks'])} tasks, evaluated for the weights it ships. Aggregate
+nDCG@10 changed by {percent(offline['relative_ndcg'])} and MRR@10 by
+{percent(offline['relative_mrr'])}; {task_cap}
+The offline acceptance gate {'passed' if offline['gate']['passed'] else 'failed'}.
 
 Raw evidence: [`public-reranker-results.json`](public-reranker-results.json),
 [`public-reranker-deterministic-results.json`](public-reranker-deterministic-results.json),

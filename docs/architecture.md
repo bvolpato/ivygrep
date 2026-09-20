@@ -545,10 +545,14 @@ public benchmark exports, which store every document at
 language tag, and path coverage is a number in the query that happens to occur
 in a position. The fit had still produced weights, -1.97 for `primary_source`,
 and in a repository that weight penalized every code file against docs,
-templates, and scripts. `scripts/train_public_reranker.py` leaves path features
-out of the fit for corpora with such paths and records that in the model file
-as `fixed_zero_features`. Path roles stay the job of the deterministic ranker,
-whose order the learned stage starts from.
+templates, and scripts. `scripts/train_public_reranker.py` reads path features
+as zero for corpora with such paths, in the fit and in the evaluations that
+judge it, and records that in the model file as `fixed_zero_features`. Path
+roles stay the job of the deterministic ranker, whose order the learned stage
+starts from. Every metrics record in the model file names the weights it was
+computed for; the `evaluation` record is the trainer's evaluation of the weights
+the binary embeds, and the records of the original fit are kept as
+`original_fit`.
 
 Setting `IVYGREP_RERANKER_CAPTURE=1` enables an opt-in diagnostic record at the
 hybrid search rerank decision point. A single JSON line prefixed with

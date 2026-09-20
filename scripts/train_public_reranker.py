@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -52,6 +53,18 @@ def git_revision(root: Path) -> str:
         text=True,
         stdout=subprocess.PIPE,
     ).stdout.strip()
+
+
+def model_weights_sha256(feature_schema, weights) -> str:
+    """Identity of a ranking function: the feature order and the weights. Every
+    metrics record in a model file names the function it was computed for, so a
+    later edit of the weights cannot keep a record it did not produce."""
+    return contracts.canonical_sha256(
+        {
+            "feature_schema": [str(name) for name in feature_schema],
+            "weights": [float(weight) for weight in weights],
+        }
+    )
 
 
 def synthetic_corpus_paths(paths) -> bool:
@@ -351,26 +364,42 @@ def split_examples(examples: list[dict]) -> tuple[list[dict], list[dict]]:
     return train, validation
 
 
+def ranking_features(example: dict, candidate: dict) -> list[float]:
+    """The candidate's features as the fit and every evaluation of it see them.
+    Path features of a corpus with synthetic paths are zero (see PATH_FEATURES):
+    they must not move a weight, and when a fit that also had a real-path corpus
+    gave them weights, a file name like `documents/000000123.py` must not pick
+    the hyperparameters or pass the acceptance gate either."""
+    features = candidate["features"]
+    if not example.get("synthetic_paths"):
+        return features
+    features = list(features)
+    for index in PATH_FEATURE_INDEXES:
+        features[index] = 0.0
+    return features
+
+
 def training_pairs(examples: list[dict]) -> list[tuple[list[float], float]]:
     pairs = []
     for example in examples:
-        candidates = example["candidates"]
-        for preferred in candidates:
-            for other in candidates:
-                grade_delta = preferred["grade"] - other["grade"]
+        candidates = [
+            (candidate["grade"], ranking_features(example, candidate))
+            for candidate in example["candidates"]
+        ]
+        for preferred_grade, preferred in candidates:
+            for other_grade, other in candidates:
+                grade_delta = preferred_grade - other_grade
                 if grade_delta <= 0:
                     continue
-                difference = [
-                    left - right
-                    for left, right in zip(
-                        preferred["features"], other["features"], strict=True
+                pairs.append(
+                    (
+                        [
+                            left - right
+                            for left, right in zip(preferred, other, strict=True)
+                        ],
+                        float(grade_delta),
                     )
-                ]
-                if example.get("synthetic_paths"):
-                    # Only corpora with real paths fit PATH_FEATURES.
-                    for index in PATH_FEATURE_INDEXES:
-                        difference[index] = 0.0
-                pairs.append((difference, float(grade_delta)))
+                )
     return pairs
 
 
@@ -399,10 +428,12 @@ def train_weights(
     return weights
 
 
-def score_candidate(candidate: dict, weights: list[float]) -> float:
+def score_candidate(example: dict, candidate: dict, weights: list[float]) -> float:
     return sum(
         weight * value
-        for weight, value in zip(weights, candidate["features"], strict=True)
+        for weight, value in zip(
+            weights, ranking_features(example, candidate), strict=True
+        )
     )
 
 
@@ -413,7 +444,7 @@ def evaluate(examples: list[dict], weights: list[float] | None) -> dict[str, flo
         if weights is not None:
             candidates.sort(
                 key=lambda candidate: (
-                    -score_candidate(candidate, weights),
+                    -score_candidate(example, candidate, weights),
                     candidate["rank"],
                 )
             )
@@ -463,6 +494,7 @@ def evaluation_report(
         or relative_mrr >= minimum_relative_gain
     )
     return {
+        "weights_sha256": model_weights_sha256(FEATURE_NAMES, weights),
         "queries": len(examples),
         "sources": provenance,
         "baseline": baseline,
@@ -480,10 +512,91 @@ def evaluation_report(
     }
 
 
+FIT_METRICS = (
+    "baseline_validation",
+    "learned_validation",
+    "baseline_all",
+    "learned_all",
+)
+
+
+def reevaluate_model(
+    model: dict,
+    ledger: dict,
+    pairs: list[tuple[Path, Path]],
+    minimum_relative_gain: float,
+    maximum_task_loss: float,
+    evaluated_at: str,
+) -> dict:
+    """Replace the model's evaluation record with one computed for its weights.
+
+    For weights that changed after the fit (see fixed_zero_features). Records
+    computed for other weights move to `original_fit`, labelled as history."""
+    if model.get("feature_schema") != list(FEATURE_NAMES):
+        raise ValueError("model feature schema differs from this trainer")
+    weights = [float(weight) for weight in model["weights"]]
+    current = model_weights_sha256(FEATURE_NAMES, weights)
+    examples, provenance = load_examples(pairs)
+    if not examples:
+        raise ValueError("evaluation captures contain no applied candidate pools")
+    overlap = contracts.audit_fit_queries(
+        ledger, [dataset for dataset, _ in pairs], "fit-disjoint-diagnostic"
+    )
+    evaluation = evaluation_report(
+        examples, provenance, weights, minimum_relative_gain, maximum_task_loss
+    )
+    commits = set()
+    for source, (_, result_path) in zip(evaluation["sources"], pairs, strict=True):
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        commits.add(result["execution_provenance"]["source_commit"])
+        # The result checksum binds the query IDs; an embedded model stays small.
+        source["skipped_queries"] = dict(
+            Counter(row["reason"] for row in source["skipped_queries"])
+        )
+        del source["fit_query_ids"]
+    evaluation["scope"] = (
+        "Evaluation of the weights in this file on the native captures named in "
+        "sources, made with --reevaluate and not as part of a fit."
+    )
+    evaluation["evaluated_at"] = evaluated_at
+    evaluation["capture_commits"] = sorted(commits)
+    evaluation["fit_overlap_queries"] = overlap["overlap_queries"]
+
+    previous = model.get("evaluation")
+    stale_fit_metrics = {
+        name: model["training"].pop(name)
+        for name in FIT_METRICS
+        if name in model["training"]
+        and model["training"].get("weights_sha256") != current
+    }
+    if "original_fit" not in model and (
+        stale_fit_metrics
+        or (previous is not None and previous.get("weights_sha256") != current)
+    ):
+        fitted = list(weights)
+        replaced = (model.get("fixed_zero_features") or {}).get(
+            "replaced_fitted_weights", {}
+        )
+        for name, value in replaced.items():
+            fitted[FEATURE_NAMES.index(name)] = float(value)
+        model["original_fit"] = {
+            "note": (
+                "History. These records were computed for the weights the fit "
+                "produced (weights_sha256 below), before fixed_zero_features was "
+                "applied. They do not describe the weights in this file."
+            ),
+            "weights_sha256": model_weights_sha256(FEATURE_NAMES, fitted),
+            "training_metrics": stale_fit_metrics,
+            "evaluation": previous,
+        }
+    model["evaluation"] = evaluation
+    return model
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pair", action="append", required=True)
+    parser.add_argument("--pair", action="append", default=[])
     parser.add_argument("--evaluation-pair", action="append", default=[])
     parser.add_argument("--minimum-relative-gain", type=float, default=0.05)
     parser.add_argument("--maximum-task-loss", type=float, default=0.02)
@@ -493,7 +606,54 @@ def main() -> int:
         type=Path,
         help="Write the exact native fit-ID ledger bound to the newly written model.",
     )
+    parser.add_argument(
+        "--reevaluate",
+        type=Path,
+        metavar="MODEL",
+        help=(
+            "Fit nothing. Evaluate MODEL's weights on the --evaluation-pair captures, "
+            "write the model with that evaluation record to --output, and bind "
+            "--fit-ledger to the new model bytes."
+        ),
+    )
+    parser.add_argument(
+        "--fit-ledger",
+        type=Path,
+        help="With --reevaluate: MODEL's fit ledger, rewritten in place.",
+    )
     args = parser.parse_args()
+    if args.reevaluate:
+        if args.pair or not args.evaluation_pair or not args.fit_ledger:
+            parser.error(
+                "--reevaluate takes --evaluation-pair and --fit-ledger, and no --pair"
+            )
+        ledger = contracts.load_fit_ledger(
+            args.reevaluate, args.fit_ledger, contracts.sha256_file(args.fit_ledger)
+        )
+        model = reevaluate_model(
+            json.loads(args.reevaluate.read_text(encoding="utf-8")),
+            ledger,
+            [parse_pair(value) for value in args.evaluation_pair],
+            args.minimum_relative_gain,
+            args.maximum_task_loss,
+            datetime.now(timezone.utc).date().isoformat(),
+        )
+        write_training_json(args.output, model)
+        ledger["model_sha256"] = sha256_file(args.output)
+        write_training_json(args.fit_ledger, ledger)
+        print(
+            json.dumps(
+                {
+                    "evaluation": model["evaluation"],
+                    "fit_ledger_sha256": sha256_file(args.fit_ledger),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0 if model["evaluation"]["gate"]["passed"] else 1
+    if not args.pair:
+        parser.error("--pair is required")
     pairs = [parse_pair(value) for value in args.pair]
     examples, provenance = load_examples(pairs)
     if not examples:
@@ -545,6 +705,7 @@ def main() -> int:
         "weights": weights,
         "training": {
             "ivygrep_commit": git_revision(root),
+            "weights_sha256": model_weights_sha256(FEATURE_NAMES, weights),
             "queries": len(examples),
             "train_queries": len(train),
             "validation_queries": len(validation),
