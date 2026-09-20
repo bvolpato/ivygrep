@@ -117,11 +117,13 @@ pub(super) fn fuse_rrf_with_context(
         .iter()
         .map(|(_, score)| *score)
         .fold(0.0f32, f32::max);
-    // The vote may reorder and add results, never remove one. The score
-    // filter below keeps candidates within a ratio of the best score, and a
-    // vote worth several rank votes to the leader would push low-share tail
-    // candidates under that ratio. Each candidate's vote is kept so the
-    // filter can also judge the score it would have had without it.
+    // The vote reorders results; it must not make the score filter return a
+    // shorter list. The filter below keeps candidates within a ratio of the
+    // best score, and a vote worth several rank votes to the leader would
+    // push low-share tail candidates under that ratio. Each candidate's vote
+    // is kept so the filter can also judge the score it would have had
+    // without it. `limit` still applies to the voted order: in a full list a
+    // file the vote ranks under the cutoff is ordinary reranking.
     let mut lexical_margins: HashMap<u64, f32> = HashMap::new();
     for (rank, (chunk, lexical_score)) in lexical.into_iter().enumerate() {
         let lexical_margin = if best_lexical_score > 0.0 {
@@ -539,6 +541,18 @@ pub(super) fn fuse_rrf_with_context(
                 .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
         });
     }
+    // Span promotion below swaps which chunk represents a scored position
+    // and leaves the score where it is. An unvoted ratio describes a score,
+    // so it stays with the position: remember the chunk each one was scored
+    // for, and re-key the ratios once the swaps are done.
+    let scored_chunks = if unvoted_ratios.is_empty() {
+        Vec::new()
+    } else {
+        ranked
+            .iter()
+            .map(|item| item.chunk.vector_key)
+            .collect::<Vec<_>>()
+    };
     // A qualified member in prose is an explicit request for that definition.
     // Keep the winning file and score, but center its preview on the exact
     // member instead of a nearby helper with stronger prose overlap.
@@ -563,6 +577,18 @@ pub(super) fn fuse_rrf_with_context(
             &query.primary_tokens,
             REPRESENTATIVE_SPAN_MIN_COVERAGE,
         );
+    }
+    let swapped = scored_chunks
+        .iter()
+        .zip(&ranked)
+        .filter(|(scored, item)| **scored != item.chunk.vector_key)
+        .map(|(scored, item)| (item.chunk.vector_key, unvoted_ratios.get(scored).copied()))
+        .collect::<Vec<_>>();
+    for (chunk, ratio) in swapped {
+        match ratio {
+            Some(ratio) => unvoted_ratios.insert(chunk, ratio),
+            None => unvoted_ratios.remove(&chunk),
+        };
     }
 
     // Per-file hit diversity cap: keep the best chunk per file at full score,
@@ -601,8 +627,9 @@ pub(super) fn fuse_rrf_with_context(
     let mut filtered = if unvoted_ratios.is_empty() {
         filter_meaningful_scores_with_query(ranked, query, enable_backfill)
     } else {
-        // A file is returned if it clears the score filter with the vote or
-        // without it: the vote may reorder and add results, never remove one.
+        // A file clears the score filter if it does so with the vote or
+        // without it, so the vote never shortens the list the filter returns;
+        // `limit` truncates afterwards, in voted order.
         // What the voted pass kept stays as it is, in its order. The filter
         // keeps strong path matches and literal matches under its score cut,
         // so a rescued candidate can outscore results it kept; rescued

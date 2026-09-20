@@ -9715,6 +9715,81 @@ export function registerCommands(p: Plugin) {
 
     #[test]
     #[serial]
+    fn long_query_vote_keeps_the_unvoted_score_with_the_position_a_span_takes() {
+        // The leader file's best-scored chunk carries the vote, so most of its
+        // score is voted. Span promotion shows another chunk of that file in
+        // its position and leaves the score there. That chunk's own score is
+        // mostly unvoted. Judged with its ratio, the position's unvoted score
+        // doubles, the unvoted score cut rises with it, and the tail files
+        // the cut exists to keep are dropped.
+        let prompt = "Given a string of text, count the vowels and consonants in each word and \
+                      report the frequency of every unique word";
+        assert!(is_long_query(prompt));
+        let module = |id: &str, path: &str, body: &str| {
+            let mut chunk = make_chunk_with_path(id, path, body);
+            chunk.kind = "Module".to_string();
+            chunk
+        };
+        let mut lexical = vec![
+            (
+                module(
+                    "leader-summary",
+                    "notes/leader.py",
+                    "count the vowels and consonants of each word",
+                ),
+                100.0,
+            ),
+            (
+                module(
+                    "leader-detail",
+                    "notes/leader.py",
+                    "count the vowels and consonants of each word in the text string and \
+                     report the frequency of every unique word given",
+                ),
+                3.0,
+            ),
+        ];
+        for index in 0..3 {
+            lexical.push((
+                module(
+                    &format!("tail-{index}"),
+                    &format!("notes/tail_{index}.py"),
+                    "count the vowels and consonants of each word in the text string and report",
+                ),
+                5.0,
+            ));
+        }
+        let ranked = fuse_rrf(
+            FusionCandidates {
+                lexical,
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![],
+            },
+            1.0,
+            prompt,
+            Some(20),
+        );
+        let ids = ranked
+            .iter()
+            .map(|(chunk, _, _)| chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids.first(),
+            Some(&"leader-detail"),
+            "the representative span takes the leader's position: {ranked:#?}"
+        );
+        assert_eq!(
+            ids,
+            ["leader-detail", "tail-0", "tail-1", "tail-2"],
+            "the tail clears the unvoted score cut of the position's own score: {ranked:#?}"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn long_query_vote_orders_results_without_truncating_the_tail() {
         // One clear BM25 leader and fifteen sessions with a fifth of its score.
         // Their text shares no word with the prompt, so no boost narrows the
@@ -9750,7 +9825,7 @@ export function registerCommands(p: Plugin) {
         assert_eq!(
             ranked.len(),
             16,
-            "the vote orders candidates but does not decide which ones are returned"
+            "the vote orders candidates but does not shorten the list the score filter returns"
         );
         assert!(
             ranked.windows(2).all(|pair| pair[0].1 >= pair[1].1),

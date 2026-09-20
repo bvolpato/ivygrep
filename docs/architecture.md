@@ -409,20 +409,22 @@ When hash votes are discounted, neural corroboration votes from the neural
 tier's own rank, and semantic-only discoveries keep full weight.
 
 Lexical rank votes are nearly flat at the top (3.2/61 against 3.2/62) and the
-BM25 score term is logarithmic, so a BM25 margin barely reaches the fused score.
-For a lookup that is intended: structural boosts choose among near-tied matches.
-A query of 13 or more terms, pasted source included, sums dozens of term scores,
-and its margin is the strongest evidence available. Its lexical candidates also
-vote with their share of the best BM25 score (`score / best score`, weight 1.0).
-The weight sits at the low end of a plateau from 1 to 4 on the tuning halves of
-the public benchmarks. The vote may reorder and add results but never remove
-one: a vote worth several rank votes to the leader would push low-share tail
-candidates under the score filter's 35%-of-best cut. Files that clear that
-filter only without the vote are therefore appended after the results the voted
-pass kept, one chunk per file and ahead of backfill, so the kept order and the
-hits the learned reranker scores per file stay as the voted pass produced them. On a notes benchmark
-whose questions need several sessions each, the vote without this rule returned
-shorter lists and lost recall@20.
+BM25 score term is logarithmic, so a BM25 margin barely reaches the fused
+score. For a lookup that is intended: structural boosts choose among near-tied
+matches. A query of 13 or more terms, pasted source included, sums dozens of
+term scores, and its margin is the strongest evidence available. Its lexical
+candidates also vote with their share of the best BM25 score (`score / best
+score`, weight 1.0). The weight sits at the low end of a plateau from 1 to 4 on
+the tuning halves of the public benchmarks. The vote reorders results but must
+not make the score filter return a shorter list: a vote worth several rank
+votes to the leader would push low-share tail candidates under the score
+filter's 35%-of-best cut. Files that clear that filter only without the vote
+are therefore appended after the results the voted pass kept, one chunk per
+file and ahead of backfill, so the kept order and the hits the learned reranker
+scores per file stay as the voted pass produced them. `limit` then truncates in
+voted order, so in a full list a file the vote ranks under the cutoff is
+ordinary reranking. On a notes benchmark whose questions need several sessions
+each, the vote without this rule returned shorter lists and lost recall@20.
 
 `src/search_presentation.rs` selects representative spans, loads source text,
 and builds explanations. Output records source signals and whether neural
