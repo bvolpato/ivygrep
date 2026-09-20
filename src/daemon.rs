@@ -3126,9 +3126,7 @@ fn start_web_server(state: &DaemonState, web_config: crate::web::WebConfig) -> R
         return Ok(crate::web::initial_url(&web_config, local_addr));
     }
 
-    let std_listener = std::net::TcpListener::bind(bind_addr)?;
-    std_listener.set_nonblocking(true)?;
-    let web_listener = tokio::net::TcpListener::from_std(std_listener)?;
+    let web_listener = crate::web::bind_listener(bind_addr)?;
     let local_addr = web_listener.local_addr()?;
     let url = crate::web::initial_url(&web_config, local_addr);
     let web_state = state.clone();
