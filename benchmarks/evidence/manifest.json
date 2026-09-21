@@ -25,7 +25,7 @@
     {
       "id": "public-retrieval-challenge-current",
       "kind": "quality",
-      "label": "Historical challenge retrieval matrix (v1.1.9)",
+      "label": "Challenge retrieval matrix at main e9119a4",
       "path": "docs/benchmarks/public-sota-challenge-results.json",
       "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70"
     },
@@ -46,7 +46,7 @@
     {
       "id": "learned-reranker",
       "kind": "quality",
-      "label": "Held-out learned reranker",
+      "label": "Historical held-out learned reranker (v0.10.1)",
       "path": "docs/benchmarks/public-reranker-results.json",
       "publication_commit": "14efc6643aadaf5114768d575610399ee48d5085"
     },

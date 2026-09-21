@@ -69,19 +69,19 @@ def default_output_name(matrix: dict) -> str:
 
 def report_page_title(matrix: dict) -> str:
     if matrix["profile"] == "sota-challenge":
-        return "Held-Out Challenge Retrieval Benchmark"
+        return "Challenge Retrieval Benchmark"
     return "Public Code-Retrieval Benchmark"
 
 
 def report_heading(matrix: dict) -> str:
     if matrix["profile"] == "sota-challenge":
-        return "Held-out challenge retrieval"
+        return "Challenge retrieval"
     return "Code-retrieval quality and cost"
 
 
 def report_description(matrix: dict) -> str:
     if matrix["profile"] == "sota-challenge":
-        return "Held-out CoIR challenge retrieval quality, latency, indexing, memory, and index-size results."
+        return "CoIR challenge retrieval quality, latency, indexing, memory, and index-size results."
     return "Public CoIR quality, latency, indexing, memory, and index-size results."
 
 
@@ -187,6 +187,7 @@ def dataset_scope_note(matrix: dict) -> str:
             + ", ".join(undeclared)
             + ". Treat downloaded corpora as evaluation inputs; do not redistribute them without checking upstream terms."
         )
+    notes.extend(matrix.get("scope_notes", []))
     return " ".join(notes)
 
 

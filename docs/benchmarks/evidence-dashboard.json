@@ -597,234 +597,234 @@
     },
     {
       "id": "public-retrieval-challenge-current",
-      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/83e32213c58ae16a9b7cadecad0138910225ce70/docs/benchmarks/public-sota-challenge-results.json",
+      "immutable_url": null,
       "kind": "quality",
-      "label": "Historical challenge retrieval matrix (v1.1.9)",
+      "label": "Challenge retrieval matrix at main e9119a4",
       "path": "docs/benchmarks/public-sota-challenge-results.json",
-      "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70",
-      "publication_status": "pinned",
-      "sha256": "531bc5985d4f3313a23c8311f2076c5ca41a37c326f2eaf0d850925a471090d6",
-      "source_commit": "82686c6ff6e6030a08365ac30a3a51a541cab9a7",
+      "publication_commit": null,
+      "publication_status": "not pinned to an immutable revision",
+      "sha256": "bc00040a59bc60ab629a2459c40dac1cd92fcf026fd9b6824bb60d0e42a4bb2e",
+      "source_commit": "e9119a4f683f4fb7bd7faa370b5124612ab600bc",
       "summary": {
         "binary_sha256": [
-          "0aae1ce9283e371584d404030eeb22a3cf0b581182d68239bd1b81d48e62cc92"
+          "e19f6736a63d030d7eb413a5b6532b81a2dcd2722b839aa4b02cfdefef6eb38f"
         ],
         "binary_versions": [
-          "ivygrep 1.1.9"
+          "ivygrep 1.2.16"
         ],
-        "index_size_bytes": 68721684.0,
+        "index_size_bytes": 79868883.33333333,
         "mode": "blended",
         "models": [
           {
-            "architecture": "static-embedding",
+            "architecture": "model2vec-static",
             "dimensions": 256,
-            "document_character_limit": 1024,
-            "license": "Apache-2.0",
-            "max_input_tokens": 0,
-            "model_asset_bytes": 125729604,
-            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "document_character_limit": 16384,
+            "license": "MIT",
+            "max_input_tokens": 512,
+            "model_asset_bytes": 33514412,
+            "model_id": "minishlab/potion-code-16M-v2",
             "model_weight_dtype": "f32",
-            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "model_weights_sha256": "75cf7a6c2171b230ad19b1e7d8e0b1aee86da5a02af8e7cacedd9921d227623c",
             "normalize_embeddings": true,
-            "parameter_count": 31254528,
+            "parameter_count": 16244992,
             "pooling": "token-mean",
-            "profile": "static-retrieval-v1",
-            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
-            "schema_version": 1,
+            "profile": "potion-code-16m-v2",
+            "revision": "e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b",
+            "schema_version": 2,
             "vector_quantization": "f16"
           }
         ],
         "modes": {
           "blended": {
             "index_ms": {
-              "coefficient_of_variation": 0.10874024370890771,
-              "maximum": 1011.1130850855261,
-              "mean": 882.7605559878672,
-              "minimum": 780.2985038142651,
-              "standard_deviation": 95.99159799473155
+              "coefficient_of_variation": 0.02731616946641655,
+              "maximum": 1966.668023262173,
+              "mean": 1904.5128071059783,
+              "minimum": 1839.342812076211,
+              "standard_deviation": 52.02399458986759
             },
             "index_size_bytes": {
-              "coefficient_of_variation": 0.00041282181272919493,
-              "maximum": 68748877.0,
-              "mean": 68721684.0,
-              "minimum": 68682540.0,
-              "standard_deviation": 28369.810162682912
+              "coefficient_of_variation": 8.838159338857291e-06,
+              "maximum": 79869466.0,
+              "mean": 79868883.33333333,
+              "minimum": 79867890.0,
+              "standard_deviation": 705.8939171166035
             },
             "mrr_at_10": {
-              "coefficient_of_variation": 0.0006950916259382036,
-              "maximum": 0.5654365079365079,
-              "mean": 0.5651587301587301,
-              "minimum": 0.5646031746031746,
-              "standard_deviation": 0.00039283710065920216
+              "coefficient_of_variation": 0.0008201720940547721,
+              "maximum": 0.6213082010582011,
+              "mean": 0.6206152998236331,
+              "minimum": 0.6200998677248677,
+              "standard_deviation": 0.0005090113500587793
             },
             "ndcg_at_10": {
-              "coefficient_of_variation": 0.00048690701244744685,
-              "maximum": 0.5957375815447534,
-              "mean": 0.5955325425189598,
-              "minimum": 0.5951224644673725,
-              "standard_deviation": 0.00028996897109313883
+              "coefficient_of_variation": 0.0005944745224899604,
+              "maximum": 0.6390494949512813,
+              "mean": 0.6385353126403762,
+              "minimum": 0.6381446226321833,
+              "standard_deviation": 0.0003795929750748652
             },
             "peak_child_rss_bytes": {
-              "coefficient_of_variation": 0.0011726908382468958,
-              "maximum": 350744576.0,
-              "mean": 350169770.6666667,
-              "minimum": 349810688.0,
-              "standard_deviation": 410640.8818918166
+              "coefficient_of_variation": 0.11141128047208516,
+              "maximum": 704319488.0,
+              "mean": 648967509.3333334,
+              "minimum": 546836480.0,
+              "standard_deviation": 72302301.19960655
             },
             "warm_latency_p95_ms": {
-              "coefficient_of_variation": 0.06679434166299274,
-              "maximum": 829.8704629996791,
-              "mean": 778.1926153305297,
-              "minimum": 707.0794890169054,
-              "standard_deviation": 51.97886342800528
+              "coefficient_of_variation": 0.012359143868686962,
+              "maximum": 2122.8296482004225,
+              "mean": 2091.7815677821636,
+              "minimum": 2059.5377730205655,
+              "standard_deviation": 25.85262933808733
             }
           },
           "hash": {
             "index_ms": {
-              "coefficient_of_variation": 0.07018397087674068,
-              "maximum": 978.7331828847528,
-              "mean": 899.5790889021009,
-              "minimum": 824.2220199899748,
-              "standard_deviation": 63.13603257682997
+              "coefficient_of_variation": 0.0404491812864101,
+              "maximum": 2023.3334130607545,
+              "mean": 1934.4122268569965,
+              "minimum": 1832.9141130670905,
+              "standard_deviation": 78.2453908467869
             },
             "index_size_bytes": {
-              "coefficient_of_variation": 0.0005552100500293834,
-              "maximum": 47664574.0,
-              "mean": 47641694.666666664,
-              "minimum": 47604625.0,
-              "standard_deviation": 26451.147679364607
+              "coefficient_of_variation": 8.653110954922062e-05,
+              "maximum": 54804275.0,
+              "mean": 54799592.666666664,
+              "minimum": 54793094.0,
+              "standard_deviation": 4741.869556292
             },
             "mrr_at_10": {
-              "coefficient_of_variation": 0.0,
-              "maximum": 0.5582361111111112,
-              "mean": 0.5582361111111112,
-              "minimum": 0.5582361111111112,
-              "standard_deviation": 0.0
+              "coefficient_of_variation": 0.002808874081102227,
+              "maximum": 0.6120958994708995,
+              "mean": 0.6103829365079365,
+              "minimum": 0.6080403439153439,
+              "standard_deviation": 0.0017144888099042091
             },
             "ndcg_at_10": {
-              "coefficient_of_variation": 0.0,
-              "maximum": 0.589953602737296,
-              "mean": 0.589953602737296,
-              "minimum": 0.589953602737296,
-              "standard_deviation": 0.0
+              "coefficient_of_variation": 0.002488687046720407,
+              "maximum": 0.6328683589022617,
+              "mean": 0.6310499343936372,
+              "minimum": 0.629036350059667,
+              "standard_deviation": 0.0015704857975592074
             },
             "peak_child_rss_bytes": {
-              "coefficient_of_variation": 0.0033835641267997763,
-              "maximum": 240996352.0,
-              "mean": 240159402.66666666,
-              "minimum": 239058944.0,
-              "standard_deviation": 812594.7395765958
+              "coefficient_of_variation": 0.0017603587426801457,
+              "maximum": 446955520.0,
+              "mean": 446021632.0,
+              "minimum": 445034496.0,
+              "standard_deviation": 785158.0793156667
             },
             "warm_latency_p95_ms": {
-              "coefficient_of_variation": 0.0348351038349656,
-              "maximum": 717.5615259911865,
-              "mean": 688.9409646391869,
-              "minimum": 658.8319699512795,
-              "standard_deviation": 23.99933003936744
+              "coefficient_of_variation": 0.013640646860655784,
+              "maximum": 1765.9506499767303,
+              "mean": 1745.5952102318406,
+              "minimum": 1712.1862387284636,
+              "standard_deviation": 23.81104782442473
             }
           },
           "hybrid": {
             "index_ms": {
-              "coefficient_of_variation": 0.05946517358541459,
-              "maximum": 856.9905139738694,
-              "mean": 800.6568409036845,
-              "minimum": 740.5505737988278,
-              "standard_deviation": 47.61119802668727
+              "coefficient_of_variation": 0.01744655093909051,
+              "maximum": 1938.7616352178156,
+              "mean": 1904.7908886956673,
+              "minimum": 1859.6800263039768,
+              "standard_deviation": 33.232031267944436
             },
             "index_size_bytes": {
-              "coefficient_of_variation": 0.00014676170930161717,
-              "maximum": 47665413.0,
-              "mean": 47656822.333333336,
-              "minimum": 47648281.0,
-              "standard_deviation": 6994.196705523484
+              "coefficient_of_variation": 0.00012204974426829475,
+              "maximum": 54800789.0,
+              "mean": 54796037.0,
+              "minimum": 54786579.0,
+              "standard_deviation": 6687.842302766017
             },
             "mrr_at_10": {
-              "coefficient_of_variation": 0.0010563555230235716,
-              "maximum": 0.5582361111111112,
-              "mean": 0.5578194444444445,
-              "minimum": 0.5569861111111111,
-              "standard_deviation": 0.0005892556509888294
+              "coefficient_of_variation": 0.001640433301790511,
+              "maximum": 0.6038822751322751,
+              "mean": 0.6026847442680777,
+              "minimum": 0.6014609788359789,
+              "standard_deviation": 0.0009886641249784525
             },
             "ndcg_at_10": {
-              "coefficient_of_variation": 0.000758606573011231,
-              "maximum": 0.589953602737296,
-              "mean": 0.5896373119362257,
-              "minimum": 0.5890047303340851,
-              "standard_deviation": 0.0004473027405274944
+              "coefficient_of_variation": 0.0014666487101270794,
+              "maximum": 0.6242681656839039,
+              "mean": 0.6230919183359064,
+              "minimum": 0.6220400776764026,
+              "standard_deviation": 0.0009138569583179646
             },
             "peak_child_rss_bytes": {
-              "coefficient_of_variation": 0.0020224995456690972,
-              "maximum": 240279552.0,
-              "mean": 239908181.33333334,
-              "minimum": 239222784.0,
-              "standard_deviation": 485214.18774896604
+              "coefficient_of_variation": 0.1385085854749791,
+              "maximum": 576233472.0,
+              "mean": 481916245.3333333,
+              "minimum": 431374336.0,
+              "standard_deviation": 66749537.458533
             },
             "warm_latency_p95_ms": {
-              "coefficient_of_variation": 0.1028520656585142,
-              "maximum": 825.8488810388371,
-              "mean": 722.4611586813504,
-              "minimum": 654.4748030137271,
-              "standard_deviation": 74.30662252842049
+              "coefficient_of_variation": 0.07532710766928777,
+              "maximum": 2425.4101398400962,
+              "mean": 2191.9096525137625,
+              "minimum": 2074.6944779530168,
+              "standard_deviation": 165.11021439625532
             }
           },
           "neural": {
             "index_ms": {
-              "coefficient_of_variation": 0.09968684939034907,
-              "maximum": 1055.419999989681,
-              "mean": 932.0195486458639,
-              "minimum": 831.2338480027393,
-              "standard_deviation": 92.91009237472134
+              "coefficient_of_variation": 0.03052602199973199,
+              "maximum": 1989.131009671837,
+              "mean": 1918.173438248535,
+              "minimum": 1845.7262930460274,
+              "standard_deviation": 58.55420457527632
             },
             "index_size_bytes": {
-              "coefficient_of_variation": 0.00042732732813656195,
-              "maximum": 68760171.0,
-              "mean": 68730514.66666667,
-              "minimum": 68690501.0,
-              "standard_deviation": 29370.427193957454
+              "coefficient_of_variation": 2.659499319890902e-05,
+              "maximum": 79865788.0,
+              "mean": 79862786.0,
+              "minimum": 79861197.0,
+              "standard_deviation": 2123.9502505159267
             },
             "mrr_at_10": {
-              "coefficient_of_variation": 0.0,
-              "maximum": 0.5660846560846561,
-              "mean": 0.5660846560846561,
-              "minimum": 0.5660846560846561,
-              "standard_deviation": 0.0
+              "coefficient_of_variation": 0.0009070670089603283,
+              "maximum": 0.632709656084656,
+              "mean": 0.6319556878306879,
+              "minimum": 0.6313207671957672,
+              "standard_deviation": 0.000573226155556049
             },
             "ndcg_at_10": {
-              "coefficient_of_variation": 0.0,
-              "maximum": 0.5962874144745992,
-              "mean": 0.5962874144745992,
-              "minimum": 0.5962874144745992,
-              "standard_deviation": 0.0
+              "coefficient_of_variation": 0.0006665431284775979,
+              "maximum": 0.6509059797375792,
+              "mean": 0.6503377164854821,
+              "minimum": 0.6498544301482935,
+              "standard_deviation": 0.0004334781361132104
             },
             "peak_child_rss_bytes": {
-              "coefficient_of_variation": 0.000402110511351741,
-              "maximum": 338415616.0,
-              "mean": 338283178.6666667,
-              "minimum": 338096128.0,
-              "standard_deviation": 136027.2219553457
+              "coefficient_of_variation": 0.028431512669205766,
+              "maximum": 548601856.0,
+              "mean": 527661738.6666667,
+              "minimum": 514236416.0,
+              "standard_deviation": 15002221.407956475
             },
             "warm_latency_p95_ms": {
-              "coefficient_of_variation": 0.030881568821145886,
-              "maximum": 825.6440609693527,
-              "mean": 798.3754236483946,
-              "minimum": 765.922870952636,
-              "standard_deviation": 24.6550855905094
+              "coefficient_of_variation": 0.015035197711175487,
+              "maximum": 1812.568558845669,
+              "mean": 1777.9164495877922,
+              "minimum": 1747.5034119561315,
+              "standard_deviation": 26.73132533350362
             }
           }
         },
-        "mrr_at_10": 0.5651587301587301,
-        "ndcg_at_10": 0.5955325425189598,
-        "peak_child_rss_bytes": 350169770.6666667,
+        "mrr_at_10": 0.6206152998236331,
+        "ndcg_at_10": 0.6385353126403762,
+        "peak_child_rss_bytes": 648967509.3333334,
         "profile": "sota-challenge",
         "queries": 600,
         "repetitions": 3,
         "runtime": {
           "cpu_model": "x86_64",
-          "logical_cpus": 32,
+          "logical_cpus": 16,
           "machine": "x86_64",
-          "physical_memory_bytes": 134966132736,
-          "python": "3.13.12",
-          "release": "6.17.0-22-generic",
+          "physical_memory_bytes": 65976365056,
+          "python": "3.14.6",
+          "release": "6.8.0-1061-aws",
           "system": "Linux"
         },
         "tasks": [
@@ -835,7 +835,7 @@
           "CodeSearchNet-python",
           "CodeSearchNet-java"
         ],
-        "warm_latency_p95_ms": 778.1926153305297
+        "warm_latency_p95_ms": 2091.7815677821636
       }
     },
     {
@@ -1098,7 +1098,7 @@
       "id": "learned-reranker",
       "immutable_url": "https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-reranker-results.json",
       "kind": "quality",
-      "label": "Held-out learned reranker",
+      "label": "Historical held-out learned reranker (v0.10.1)",
       "path": "docs/benchmarks/public-reranker-results.json",
       "publication_commit": "14efc6643aadaf5114768d575610399ee48d5085",
       "publication_status": "pinned",
@@ -1371,9 +1371,9 @@
         ]
       },
       "public-retrieval-challenge-current": {
-        "status": "historical",
+        "status": "current",
         "versions": [
-          "1.1.9"
+          "1.2.16"
         ]
       },
       "public-retrieval-compact-current": {
