@@ -597,12 +597,12 @@
     },
     {
       "id": "public-retrieval-challenge-current",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/4422276eeae4c02eab41880cea244c8ce5c267c2/docs/benchmarks/public-sota-challenge-results.json",
       "kind": "quality",
       "label": "Challenge retrieval matrix at main e9119a4",
       "path": "docs/benchmarks/public-sota-challenge-results.json",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
+      "publication_commit": "4422276eeae4c02eab41880cea244c8ce5c267c2",
+      "publication_status": "pinned",
       "sha256": "bc00040a59bc60ab629a2459c40dac1cd92fcf026fd9b6824bb60d0e42a4bb2e",
       "source_commit": "e9119a4f683f4fb7bd7faa370b5124612ab600bc",
       "summary": {
