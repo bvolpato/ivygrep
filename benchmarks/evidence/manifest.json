@@ -27,7 +27,7 @@
       "kind": "quality",
       "label": "Challenge retrieval matrix at main e9119a4",
       "path": "docs/benchmarks/public-sota-challenge-results.json",
-      "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70"
+      "publication_commit": "4422276eeae4c02eab41880cea244c8ce5c267c2"
     },
     {
       "id": "public-retrieval-compact-current",
