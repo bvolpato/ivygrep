@@ -890,10 +890,18 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn("--max-query-chars 2048", report)
 
         html = renderer.html(matrix)
+        self.assertIn("<title>ivygrep Challenge Retrieval Benchmark</title>", html)
+        self.assertIn("<h1>Challenge retrieval</h1>", html)
         self.assertIn("public-sota-challenge-results.json", html)
         self.assertNotIn("public-sota-challenge.md", html)
         self.assertIn("sota-challenge", html)
         self.assertIn("query char limit", html)
+
+        matrix["scope_notes"] = ["Calibration used <development samples>."]
+        self.assertIn(matrix["scope_notes"][0], renderer.markdown(matrix))
+        annotated_html = renderer.html(matrix)
+        self.assertIn("Calibration used &lt;development samples&gt;.", annotated_html)
+        self.assertNotIn(matrix["scope_notes"][0], annotated_html)
 
     def test_dataset_scope_note_discloses_sampling_and_license_limits(self):
         matrix = {

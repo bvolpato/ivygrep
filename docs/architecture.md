@@ -537,6 +537,17 @@ context requests retain a second snippet until rendering; both snippets come
 from the same file read, with no additional file I/O. Model weights, routing,
 candidate budgets, and rerank gates are unchanged.
 
+The published learned-reranker report is historical evidence from v0.10.1,
+not an acceptance result for the current ranking stack. The learned stage
+currently runs only on the literal/error route. Its public training corpora
+use synthetic `documents/<position>.<extension>` paths, so path-derived
+weights need repository-level validation before they can be changed.
+Removing those weights improved issue-to-file localization but caused a
+significant loss on a separate codefeedback-st holdout. The shipped weights
+and quality floors therefore remain unchanged; use
+`IVYGREP_RERANKER=deterministic` to compare repository queries without the
+learned stage.
+
 Setting `IVYGREP_RERANKER_CAPTURE=1` enables an opt-in diagnostic record at the
 hybrid search rerank decision point. A single JSON line prefixed with
 `IVYGREP_RERANKER_CAPTURE` and a tab is written to stderr, separate from normal
