@@ -4,9 +4,11 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::context_graph::{
     FileEdgeKind, GraphExpansion, expand_context_graph, expand_context_tests, extract_file_graph,
@@ -30,6 +32,72 @@ const MAX_ITEMS: usize = 20;
 const TARGET_CONTEXT_ITEMS: usize = 14;
 const MAX_ANCHOR_SYMBOLS: usize = 3;
 const RRF_K: f64 = 10.0;
+const SEED_CHUNK_CACHE_BYTES: usize = 32 * 1024 * 1024;
+type SeedChunkKey = (PathBuf, [u8; 32]);
+type SeedChunkCell = Arc<OnceLock<Arc<Vec<SeedChunk>>>>;
+
+struct SeedChunk {
+    text: String,
+    start_line: usize,
+    end_line: usize,
+}
+
+fn cached_seed_chunks(path: &Path, content: &str) -> Arc<Vec<SeedChunk>> {
+    static CACHE: OnceLock<
+        parking_lot::Mutex<crate::byte_cache::ByteCache<SeedChunkKey, SeedChunkCell>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        parking_lot::Mutex::new(crate::byte_cache::ByteCache::new(
+            256,
+            SEED_CHUNK_CACHE_BYTES,
+        ))
+    });
+    let key = (
+        path.to_path_buf(),
+        Sha256::digest(content.as_bytes()).into(),
+    );
+    let key_bytes =
+        std::mem::size_of::<(SeedChunkKey, SeedChunkCell)>() + path.as_os_str().len() + 128;
+    let cell = {
+        let mut cache = cache.lock();
+        if let Some(cell) = cache.get(&key) {
+            cell.clone()
+        } else {
+            let cell = Arc::new(OnceLock::new());
+            cache.insert(key.clone(), cell.clone(), key_bytes);
+            cell
+        }
+    };
+    // Concurrent requests share one parse. Other files can parse independently.
+    let chunks = cell
+        .get_or_init(|| {
+            Arc::new(
+                crate::chunking::chunk_source(path, content)
+                    .into_iter()
+                    .map(|chunk| SeedChunk {
+                        text: chunk.text,
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .clone();
+    let bytes = key_bytes
+        + chunks.capacity() * std::mem::size_of::<SeedChunk>()
+        + chunks
+            .iter()
+            .map(|chunk| chunk.text.capacity())
+            .sum::<usize>();
+    let mut cache = cache.lock();
+    if cache
+        .get(&key)
+        .is_some_and(|cached| Arc::ptr_eq(cached, &cell))
+    {
+        cache.insert(key, cell, bytes);
+    }
+    chunks
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,6 +212,28 @@ pub fn build_context_bundle_with_options(
     budget_tokens: usize,
     context_options: &ContextBuildOptions<'_>,
 ) -> Result<ContextBundle> {
+    build_context_bundle_with_search_context(
+        workspace,
+        task,
+        embedding_model,
+        base_options,
+        budget_tokens,
+        context_options,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_context_bundle_with_search_context(
+    workspace: &Workspace,
+    task: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    base_options: &SearchOptions,
+    budget_tokens: usize,
+    context_options: &ContextBuildOptions<'_>,
+    cached_search_context: Option<&SearchContext>,
+) -> Result<ContextBundle> {
+    let _timer = crate::performance::StageTimer::start("context_assembly");
     let fallback_model;
     let reconciliation_model = if let Some(model) = embedding_model {
         model
@@ -153,17 +243,27 @@ pub fn build_context_bundle_with_options(
     };
     reconcile_worktree_overlay(workspace, reconciliation_model)?;
 
-    let input = collect_context_input(workspace, task, context_options.since, base_options)?;
+    let input = {
+        let _timer = crate::performance::StageTimer::start("context_input");
+        collect_context_input(workspace, task, context_options.since, base_options)?
+    };
 
     let wants_vectors = embedding_model.is_some();
     let wants_neural = embedding_model.is_some_and(|model| model.model_identity().is_some());
-    let search_context = SearchContext::load(
-        workspace,
-        embedding_model
-            .filter(|_| wants_vectors)
-            .map(EmbeddingModel::dimensions),
-        wants_neural,
-    )?;
+    let loaded_context;
+    let search_context = if let Some(context) = cached_search_context {
+        context
+    } else {
+        let _timer = crate::performance::StageTimer::start("context_reader_load");
+        loaded_context = SearchContext::load(
+            workspace,
+            embedding_model
+                .filter(|_| wants_vectors)
+                .map(EmbeddingModel::dimensions),
+            wants_neural,
+        )?;
+        &loaded_context
+    };
     let candidate_limit = (budget_tokens / 250).clamp(8, 24);
     let mut candidates = BTreeMap::<(PathBuf, usize, usize), Candidate>::new();
     let mut input_graph_seeds = Vec::new();
@@ -171,6 +271,7 @@ pub fn build_context_bundle_with_options(
     let mut primary_hits = Vec::new();
     let mut fallback_input_count = 0usize;
 
+    let seeds_timer = crate::performance::StageTimer::start("context_seeds");
     for seed in input.seeds.iter().take(24) {
         let Some(hit) = context_seed_hit(&workspace.root, seed, task)? else {
             continue;
@@ -219,6 +320,7 @@ pub fn build_context_bundle_with_options(
         }
     }
 
+    drop(seeds_timer);
     let query_specs = [
         (
             task.to_string(),
@@ -237,12 +339,13 @@ pub fn build_context_bundle_with_options(
         ),
     ];
 
+    let retrieval_timer = crate::performance::StageTimer::start("context_retrieval");
     for (query, requested_role, weight, context_lines, retrieval_label) in query_specs {
         let mut options = base_options.clone();
         options.limit = Some(candidate_limit);
         options.context = context_lines;
         let hits = hybrid_search_with_context(
-            &search_context,
+            search_context,
             workspace,
             &query,
             embedding_model,
@@ -282,6 +385,8 @@ pub fn build_context_bundle_with_options(
         }
     }
 
+    drop(retrieval_timer);
+    let symbols_timer = crate::performance::StageTimer::start("context_symbols");
     let anchor_symbols = anchor_symbols(task, &primary_hits);
     let relationship_anchors = relationship_anchor_keys(task, &anchor_symbols);
     let mut symbol_options = base_options.clone();
@@ -290,7 +395,7 @@ pub fn build_context_bundle_with_options(
     for symbol in &anchor_symbols {
         match search_symbol_definitions_with_context(
             workspace,
-            &search_context,
+            search_context,
             symbol,
             &symbol_options,
         ) {
@@ -312,7 +417,7 @@ pub fn build_context_bundle_with_options(
         }
         match search_symbol_relationships_with_context(
             workspace,
-            &search_context,
+            search_context,
             symbol,
             &symbol_options,
         ) {
@@ -341,13 +446,15 @@ pub fn build_context_bundle_with_options(
             Err(error) => tracing::debug!("context relationship expansion failed: {error:#}"),
         }
     }
+    drop(symbols_timer);
+    let anchor_timer = crate::performance::StageTimer::start("context_anchor_tests");
     if !anchor_symbols.is_empty() {
         let mut options = base_options.clone();
         options.limit = Some(candidate_limit.min(12));
         options.context = 8;
         let query = format!("test {}", anchor_symbols.join(" "));
         match hybrid_search_with_context(
-            &search_context,
+            search_context,
             workspace,
             &query,
             embedding_model,
@@ -375,6 +482,8 @@ pub fn build_context_bundle_with_options(
         }
     }
 
+    drop(anchor_timer);
+    let graph_timer = crate::performance::StageTimer::start("context_graph");
     let mut transient_seen = HashSet::new();
     let transient_seeds = input_graph_seeds
         .iter()
@@ -386,7 +495,7 @@ pub fn build_context_bundle_with_options(
         workspace,
         task,
         &transient_seeds,
-        &search_context,
+        search_context,
         base_options,
         &mut candidates,
     );
@@ -400,7 +509,7 @@ pub fn build_context_bundle_with_options(
         .filter(|path| seen_seed_paths.insert(path.clone()))
         .take(12)
         .collect::<Vec<_>>();
-    match expand_context_graph(workspace, &search_context, &seed_paths, base_options) {
+    match expand_context_graph(workspace, search_context, &seed_paths, base_options) {
         Ok(expansions) => {
             for (rank, expansion) in expansions.into_iter().enumerate() {
                 match search_context.representative_hit_for_file(
@@ -433,7 +542,7 @@ pub fn build_context_bundle_with_options(
         }
         Err(error) => tracing::debug!("context graph expansion failed: {error:#}"),
     }
-    match expand_context_tests(workspace, &search_context, &seed_paths, base_options) {
+    match expand_context_tests(workspace, search_context, &seed_paths, base_options) {
         Ok(expansions) => {
             let mut test_hits = Vec::new();
             for expansion in expansions {
@@ -477,6 +586,8 @@ pub fn build_context_bundle_with_options(
         Err(error) => tracing::debug!("context test graph expansion failed: {error:#}"),
     }
 
+    drop(graph_timer);
+    let _timer = crate::performance::StageTimer::start("context_budget");
     Ok(assemble_bundle(
         task,
         &workspace.root,
@@ -492,17 +603,15 @@ fn context_seed_hit(root: &Path, seed: &ContextSeed, task: &str) -> Result<Optio
     let Some(content) = context_seed_content(root, seed)? else {
         return Ok(None);
     };
-    let mut chunks = crate::chunking::chunk_source(&seed.file_path, &content);
-    if chunks.is_empty() {
-        return Ok(None);
-    }
+    let chunks = cached_seed_chunks(&seed.file_path, &content);
     let terms = significant_task_terms(task);
-    chunks.sort_by(|left, right| {
+    let Some(chunk) = chunks.iter().min_by(|left, right| {
         seed_chunk_score(right, seed.line, &terms)
             .cmp(&seed_chunk_score(left, seed.line, &terms))
             .then_with(|| left.start_line.cmp(&right.start_line))
-    });
-    let chunk = chunks.remove(0);
+    }) else {
+        return Ok(None);
+    };
     let preview = crate::chunking::strip_chunk_header(&chunk.text, &seed.file_path).to_string();
     Ok(Some(SearchHit {
         file_path: seed.file_path.clone(),
@@ -608,11 +717,7 @@ fn git_seed_command(_root: &Path) -> std::io::Result<Command> {
     ))
 }
 
-fn seed_chunk_score(
-    chunk: &crate::chunking::Chunk,
-    line: Option<usize>,
-    terms: &[String],
-) -> usize {
+fn seed_chunk_score(chunk: &SeedChunk, line: Option<usize>, terms: &[String]) -> usize {
     let line_score = line.map_or(0, |line| {
         if (chunk.start_line..=chunk.end_line).contains(&line) {
             10_000
@@ -2039,6 +2144,30 @@ fn language_fence(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parsed_context_inputs_share_one_value_and_content_edits_use_new_chunks() {
+        let path = PathBuf::from(format!("seed-{}.rs", uuid::Uuid::new_v4()));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let workers = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    cached_seed_chunks(&path, "pub fn before() {}\n")
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut chunks = workers.into_iter().map(|worker| worker.join().unwrap());
+        let first = chunks.next().unwrap();
+        let second = chunks.next().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first[0].text.contains("before"));
+        let edited = cached_seed_chunks(&path, "pub fn after_() {}\n");
+        assert!(!Arc::ptr_eq(&first, &edited));
+        assert!(edited[0].text.contains("after_"));
+    }
 
     fn candidate(path: &str, line: usize, role: ContextRole, text: &str, score: f64) -> Candidate {
         Candidate {

@@ -4,13 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep - Local semantic search for code, notes, and agent context</title>
-    <meta name="description" content="Preindex code and notes for fast local semantic retrieval, then build bounded, branch-aware implementation context for coding agents.">
+    <meta name="description" content="Search local code and notes by meaning or exact text. Build context packs with related code, line numbers, and selection reasons.">
     <meta name="theme-color" content="#06070a">
     <link rel="canonical" href="https://bvolpato.github.io/ivygrep/">
 
     <!-- Open Graph -->
     <meta property="og:title" content="ivygrep - Local semantic search for code and notes">
-    <meta property="og:description" content="Preindex code, notes, and memories for fast local retrieval. Build branch-aware context packs for coding agents.">
+    <meta property="og:description" content="Search code and notes on your machine. Give coding agents context from related files and current Git changes.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep/">
     <meta property="og:site_name" content="ivygrep">
@@ -22,7 +22,7 @@
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="ivygrep - Local semantic search for code and notes">
-    <meta name="twitter:description" content="Preindex code, notes, and memories for fast local retrieval. Build branch-aware context packs for coding agents.">
+    <meta name="twitter:description" content="Search code and notes on your machine. Give coding agents context from related files and current Git changes.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
     <meta name="twitter:image:alt" content="ivygrep search and bounded task-context workflow">
 
@@ -33,7 +33,7 @@
       "name": "ivygrep",
       "url": "https://bvolpato.github.io/ivygrep/",
       "codeRepository": "https://github.com/bvolpato/ivygrep",
-      "description": "Local semantic search for code, notes, and memories plus bounded, branch-aware context packs for coding agents.",
+      "description": "Local search for code and notes, with context packs for coding agents.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Linux, macOS, Windows",
       "isAccessibleForFree": true,
@@ -95,8 +95,8 @@
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Search local knowledge.<br/><span class="highlight-gradient">Build focused context.</span></h1>
-            <p class="subtitle slide-up delay-2">Preindex code, notes, and memories for fast semantic retrieval. Turn coding tasks and current Git changes into one explained implementation map. Everything stays local.</p>
+            <h1 class="slide-up delay-1">Search code and notes.<br/><span class="highlight-gradient">Build context for your task.</span></h1>
+            <p class="subtitle slide-up delay-2">Find code and notes by meaning or exact text. Build a context pack with related code, line numbers, and selection reasons. Files and queries stay on your machine.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -167,7 +167,7 @@
     <section id="context-packs" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Task context</span>
-            <h2 class="section-title text-center">One task. One branch. One implementation map.</h2>
+            <h2 class="section-title text-center">Give your agent the code behind the task.</h2>
             <p class="text-center subtitle-small">Not a longer result list. A bounded pack connecting current work to code an agent needs to understand before editing.</p>
         </div>
 
@@ -200,9 +200,9 @@ Signals: lexical, symbol, git change.</pre>
         </div>
 
         <div class="grid grid-3 mt-4">
-            <div class="glass-card fade-in-scroll"><h3>Branch-aware</h3><p>Committed and uncommitted changes shape selection before graph expansion begins.</p></div>
-            <div class="glass-card fade-in-scroll"><h3>Relationship-aware</h3><p>Owning code, callers, dependencies, tests, configuration, and docs stay connected.</p></div>
-            <div class="glass-card fade-in-scroll"><h3>Budget-aware</h3><p>Selection, deduplication, and trimming produce one pack sized for the receiving agent.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Use current changes</h3><p>Context packs include staged and uncommitted changes. With <code>--since main</code>, they also use commits since the branch point.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Include related code</h3><p>Each pack can include definitions, callers, dependencies, tests, configuration, and documentation. Selection reasons explain each item.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Set a token budget</h3><p>The <code>--budget</code> option limits the rendered pack in estimated tokens. Context packs supply evidence for an agent to inspect.</p></div>
         </div>
     </section>
 
@@ -218,9 +218,9 @@ Signals: lexical, symbol, git change.</pre>
             <div class="grid grid-2 align-center">
                 <div>
                     <h3>Local semantic recall</h3>
-                    <p>Index notes once. CLI, MCP, Web, and TUI search them while watcher keeps index current.</p>
+                    <p>Index your notes once. Search them from the CLI, MCP, Web UI, or TUI. A filesystem watcher updates changed files.</p>
                     <p><strong>74.9%</strong> recall@20 at <strong>87.63 ms</strong> warm p95 on MemoryQuest (v1.2.7).</p>
-                    <p class="benchmark-note">Benchmark measures retrieval only; answer accuracy is outside scope.</p>
+                    <p class="benchmark-note">This historical benchmark measures retrieval. It does not measure answer accuracy or the current model.</p>
                     <p class="benchmark-links"><a href="benchmarks/public-memory-retrieval.html">Methodology and results</a><a href="benchmarks/public-memory-retrieval-results.json">Raw JSON</a></p>
                 </div>
                 <div class="install-code relative">
@@ -238,7 +238,7 @@ Signals: lexical, symbol, git change.</pre>
 
         <div class="grid grid-3 mt-4">
             <div class="glass-card fade-in-scroll"><h3>Local vaults</h3><p>Search Markdown, text, JSON, and other supported documents without uploading notes or queries.</p></div>
-            <div class="glass-card fade-in-scroll"><h3>Live memory</h3><p>Filesystem watcher updates changed chunks and vectors instead of rebuilding whole collection.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Updated notes</h3><p>The filesystem watcher indexes changed files. Background workers update their hash vectors and neural vectors.</p></div>
             <div class="glass-card fade-in-scroll"><h3>Inspect evidence</h3><p>Results preserve exact file paths, lines, scores, and previews so retrieved memories stay auditable.</p></div>
         </div>
     </section>
@@ -334,8 +334,8 @@ Signals: lexical, symbol, git change.</pre>
             </div>
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">2</div>
-                <h3>Hybrid fusion</h3>
-                <p>BM25, literal matches, symbols, paths, and vector hits combine through Reciprocal Rank Fusion.</p>
+                <h3>Rank matching files</h3>
+                <p>Search combines exact text, keywords, symbols, paths, and vector matches. Results include file paths, line numbers, and previews.</p>
             </div>
             <div class="flow-arrow">
                 <svg width="40" height="20" viewBox="0 0 40 20" fill="none"><path d="M0 10h35M30 5l5 5-5 5" stroke="currentColor" stroke-width="2"/></svg>
@@ -343,7 +343,7 @@ Signals: lexical, symbol, git change.</pre>
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">3</div>
                 <h3>Local vectors</h3>
-                <p>The daemon adds hash vectors and locally cached 256-dimensional potion-code-16m-v2 vectors in the background. macOS releases use Accelerate-backed CPU math; the shell installer can select Apple Silicon Metal or Linux CUDA archives when available.</p>
+                <p>Background workers add hash vectors and neural vectors. The default <code>potion-code-16m-v2</code> model downloads 33.5 MB of assets and runs on CPU. Metal and CUDA accelerate optional transformer profiles.</p>
             </div>
         </div>
 
@@ -392,7 +392,8 @@ Signals: lexical, symbol, git change.</pre>
             </div>
             <p class="benchmark-note">Median of three sequential v1.2.7 trials on deterministic synthetic CC0 data in hash-only mode. These are scale and footprint measurements, not semantic quality or agent outcomes. Hardware, repository shape, index state, and load affect absolute results.</p>
             <p class="benchmark-links" aria-label="Benchmark links">
-                <a href="benchmarks/public-million-current.json">Latest measured release (v1.2.7)</a>
+                <a href="benchmarks/resource-load.html">Current model cost and concurrent latency</a>
+                <a href="benchmarks/public-million-current.json">Historical scale results (v1.2.7)</a>
                 <a href="benchmarks/public-million.html">Public million-chunk benchmark</a>
                 <a href="benchmarks/evidence-dashboard.html">Benchmark dashboard</a>
             </p>

@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod allocator;
+mod byte_cache;
 pub mod chunking;
 pub mod cli;
 pub mod config;
@@ -20,6 +21,7 @@ pub mod mcp;
 pub mod merkle;
 pub(crate) mod neural_metadata;
 pub mod path_glob;
+mod performance;
 pub mod protocol;
 pub(crate) mod query_aliases;
 pub mod regex_search;

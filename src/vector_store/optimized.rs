@@ -140,6 +140,9 @@ pub struct VectorStore {
     path: PathBuf,
     index: Index,
     quantization: ScalarKind,
+    // Compute retention once at open time. Serializing to estimate a mapping
+    // would visit every graph node on each return to the context pool.
+    retained_bytes_at_open: usize,
     // USearch retains a pointer to the buffer passed to view_from_buffer().
     // Keep the index field first so it is dropped before its backing storage.
     #[cfg(target_os = "windows")]
@@ -279,9 +282,23 @@ impl VectorStore {
             path: path.to_path_buf(),
             index,
             quantization,
+            retained_bytes_at_open: 0,
             #[cfg(target_os = "windows")]
             _readonly_buffer: None,
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn new_readonly(path: &Path, index: Index, quantization: ScalarKind) -> Self {
+        let mapped_bytes = existing_index_path(path)
+            .and_then(|path| fs::metadata(path).ok())
+            .map_or(0, |metadata| {
+                usize::try_from(metadata.len()).unwrap_or(usize::MAX)
+            });
+        let retained_bytes_at_open = index.memory_usage().saturating_add(mapped_bytes);
+        let mut store = Self::new(path, index, quantization);
+        store.retained_bytes_at_open = retained_bytes_at_open;
+        store
     }
 
     /// Atomically replace an existing store with a freshly allocated empty index.
@@ -325,6 +342,7 @@ impl VectorStore {
             match view_result {
                 Ok(()) => Ok(Self {
                     path: path.to_path_buf(),
+                    retained_bytes_at_open: index.memory_usage().saturating_add(buffer.len()),
                     index,
                     quantization,
                     _readonly_buffer: Some(buffer),
@@ -338,6 +356,9 @@ impl VectorStore {
                     unsafe { fallback.view_from_buffer(&buffer) }?;
                     Ok(Self {
                         path: path.to_path_buf(),
+                        retained_bytes_at_open: fallback
+                            .memory_usage()
+                            .saturating_add(buffer.len()),
                         index: fallback,
                         quantization: ScalarKind::F32,
                         _readonly_buffer: Some(buffer),
@@ -359,10 +380,10 @@ impl VectorStore {
                     }
                     let fallback = create_index(dimensions, ScalarKind::F32, tier)?;
                     fallback.view(path_str)?;
-                    return Ok(Self::new(path, fallback, ScalarKind::F32));
+                    return Ok(Self::new_readonly(path, fallback, ScalarKind::F32));
                 }
             }
-            Ok(Self::new(path, index, quantization))
+            Ok(Self::new_readonly(path, index, quantization))
         }
     }
 
@@ -486,6 +507,10 @@ impl VectorStore {
 
     pub fn size(&self) -> usize {
         self.index.size()
+    }
+
+    pub(crate) fn estimated_retained_bytes(&self) -> usize {
+        self.retained_bytes_at_open
     }
 
     /// Dimensionality of the vectors stored in this index. Useful for asserting

@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Turn coding tasks into bounded, branch-aware context.</strong><br/>
-  Search, indexing, and context generation run locally. Optional model profiles download pinned assets on first use.
+  <strong>Search code and notes. Build context for coding tasks.</strong><br/>
+  Files and queries stay on your machine. The default model downloads its pinned assets on first use.
 </p>
 
 <p align="center">
@@ -50,12 +50,15 @@ Why: task anchor; changed implementation.
 Signals: lexical, symbol, git change.
 ```
 
-Search answers where. Context answers what an agent needs to change safely.
+Search returns ranked file paths, line numbers, and previews. Context packs add related code and explain why each item was selected.
 
-The context command combines task anchors with commits since the branch point, staged and dirty files,
-issue or trace paths, and indexed relationships. It returns one bounded Markdown pack with path, lines,
-role, reason, and retrieval signals. `--since` takes a branch or revision such as `main`, `HEAD~3`, or
-`@{upstream}` and requires a Git worktree; omit it for non-Git directories.
+The context command uses your task, file paths in pasted text, and staged or uncommitted changes.
+With `--since`, it also uses commits since the selected revision.
+The pack can include definitions, callers, dependencies, tests, configuration, and documentation.
+It trims the rendered Markdown to the requested estimated token budget. It does not generate an answer or modify files.
+
+Use `--since main`, `--since HEAD~3`, or `--since '@{upstream}'` inside a Git worktree.
+For a directory without Git, omit `--since`.
 
 ## Install
 
@@ -75,7 +78,13 @@ winget install --id BrunoVolpato.ivygrep --exact
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. GPU builds only speed up transformer profiles (`IVYGREP_MODEL_PROFILE=code|code-hq|general`); the default `potion-code-16m-v2` profile runs on CPU. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
+Installers select a compatible archive, verify its SHA-256 checksum, and install `ig`.
+Apple Silicon gets a Metal build. Compatible NVIDIA Linux hosts get a CUDA build.
+CUDA requires CUDA 13 and compute capability 8.0 or newer. Other hosts use the portable build.
+
+The default `potion-code-16m-v2` model runs on CPU in every build.
+Metal and CUDA accelerate the optional transformer profiles: `general`, `code`, and `code-hq`.
+Run `ig hardware` to check compatibility and see the matching reinstall command.
 
 Build from source on macOS or Linux:
 
@@ -107,14 +116,14 @@ for language, `--include`/`--exclude` path globs, `--lexical-only`, `--hash`, an
 uses lightweight local embeddings for faster startup and no model download,
 with lower semantic quality. Run `ig --help` for full reference.
 
-Standalone uppercase `AND`, `OR`, and `NOT` are Boolean operators. `ig "settings NOT render"` keeps
-only results without `render`, and a malformed one-line expression such as a trailing `OR` fails with an
-error instead of guessing. A query that spans several lines or has 13 or more words and is not a valid
-Boolean expression, such as pasted issue text with SQL or an emphasized `NOT`, is searched as plain text
-instead: the operator words count as ordinary words, and the results come with a warning that says so
-(on stderr for the CLI, in `warnings` for MCP and the Web UI). A prompt that does parse is still a
-Boolean query, so an uppercase `NOT` in it excludes the next term. To search those words as text, write
-them in lowercase or wrap them in backticks or quotes.
+Standalone uppercase `AND`, `OR`, and `NOT` are Boolean operators.
+For example, `ig "settings NOT render"` excludes results that contain `render`.
+Short malformed expressions, such as a trailing `OR`, return an error.
+
+If an invalid Boolean query spans multiple lines or has at least 13 words, ivygrep searches it as plain text.
+The results include a warning. The CLI writes it to stderr. MCP and the Web UI return it in `warnings`.
+Valid Boolean expressions keep their Boolean meaning, including in long prompts.
+To search operator words as text, use lowercase letters or wrap the words in backticks or quotes.
 
 Multi-line queries that read as pasted source rank the code that contains the snippet above one-line
 definition signatures that share a few of its identifiers. Multi-paragraph prompts, pasted issue text,
@@ -201,7 +210,7 @@ For implementation, request output=context_pack with budget_tokens=8000.
 
 1. A Git-aware walker finds changed or indexable files.
 2. Tree-sitter and bounded text fallbacks produce structural chunks.
-3. SQLite stores metadata and relationships; Tantivy stores lexical postings; USearch stores hash and optional model vectors.
+3. SQLite stores metadata and relationships. Tantivy stores lexical postings. USearch stores hash vectors and model vectors.
 4. Query routing runs bounded exact, lexical, symbol, hash, and optional neural passes before fusion.
 5. Context expands primary hits through code relationships and recent changes,
    then trims rendered evidence to requested token budget.
@@ -219,9 +228,22 @@ worktrees, protocols, security boundaries, and module ownership.
 
 ## System performance
 
-On the deterministic synthetic one-million-chunk CC0 corpus, v1.2.7 median hash-only warm CLI p95 is 6.19 ms, controlled indexing reaches 150,576 chunks/s, and the final index is 0.42 GiB across three sequential trials. This is a scale and footprint measurement, not semantic quality or agent-task performance. Hardware, repository shape, index state, and load affect absolute results.
+The historical v1.2.7 benchmark used a deterministic synthetic corpus with one million chunks.
+Across three hash-only trials, median warm CLI p95 was 6.19 ms. Controlled indexing reached 150,576 chunks/s.
+The final index used 0.42 GiB. These results measure scale and footprint, not retrieval quality or coding-task accuracy.
+They do not describe the current neural model under concurrent load.
 
-[Latest measured release (v1.2.7)](https://bvolpato.github.io/ivygrep/benchmarks/public-million-current.json) · [Million-chunk methodology and historical paired study](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
+The [resource and latency report](docs/benchmarks/resource-load.html) measures the released binary with both static model profiles.
+It includes repeated enhancement measurements, forced-neural p99, eight MCP clients, RSS, CPU, and disk writes.
+The model-screening report remains separate because it used one repetition.
+
+[Historical scale measurements (v1.2.7)](https://bvolpato.github.io/ivygrep/benchmarks/public-million-current.json) · [Million-chunk methodology](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
+
+The source implementation limits cached results to 64 MiB and cached neural queries to 4 MiB.
+Parsed context input has a shared 32 MiB cache. Content digests prevent reuse after a file changes.
+Idle search contexts share a 256 MiB estimated budget. Each index run has a 32 MiB estimated budget for queued payloads.
+A large file can exceed the indexing target when it runs alone. These budgets do not cap total process RSS.
+See [memory budgets and diagnostics](docs/architecture.md#memory-budgets-and-performance-diagnostics) for scope and timing commands.
 
 ## Local and private
 
@@ -230,7 +252,14 @@ profiles download pinned model assets on first use unless cache is already
 populated. Use `--hash`, `./build.sh --hash-only`, or
 `cargo build --locked --no-default-features` to avoid model downloads.
 
-`ig --web` binds to loopback by default and always prints an authenticated URL: the Web API requires the per-daemon session token on loopback too, so other local users cannot read indexed code through it. The printed URL contains the token, so keep terminal output and logs that capture it private. The browser opens through an owner-only redirect file under the ivygrep app home, which keeps the token out of process arguments; set `IVYGREP_NO_BROWSER=1` to skip the browser. A non-loopback listener still uses plain HTTP. Use a trusted network, Tailscale, or an encrypted tunnel, and never expose the listener directly to the internet. File contents, including non-ignored dotfiles, can appear in the local index and snippets.
+`ig --web` binds to loopback by default. Its Web API requires a session token, including on loopback.
+The printed URL contains that token. Keep terminal output and logs that capture it private.
+The browser opens through an owner-only redirect file in the app home. This keeps the token out of process arguments.
+To skip the browser, set `IVYGREP_NO_BROWSER=1`.
+
+Non-loopback listeners use plain HTTP. Use a trusted network, Tailscale, or an encrypted tunnel.
+Never expose the listener directly to the internet.
+Indexed file contents can appear in snippets. This includes dotfiles that your ignore rules permit.
 
 Report vulnerabilities through a [private security advisory](SECURITY.md). Release archives include checksums, SBOMs, and provenance.
 

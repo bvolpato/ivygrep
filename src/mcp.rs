@@ -1309,7 +1309,8 @@ enum WorkspaceReadiness {
     Indexing(Value),
 }
 
-const MCP_INDEX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const MCP_INDEX_POLL_INITIAL: std::time::Duration = std::time::Duration::from_millis(20);
+const MCP_INDEX_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(500);
 const DEFAULT_INDEX_RETRY_AFTER_SECS: u64 = 10;
 
 /// Re-index when the caller wants ignored files but the index excludes them.
@@ -1405,6 +1406,7 @@ fn wait_for_daemon_index(
         path: Some(workspace.root.clone()),
     };
     let mut resubmitted = false;
+    let mut poll_interval = MCP_INDEX_POLL_INITIAL;
     loop {
         // Only the wait stops; the daemon keeps indexing for the next call.
         if cancellation.is_cancelled() {
@@ -1499,9 +1501,9 @@ fn wait_for_daemon_index(
             )));
         }
         std::thread::sleep(
-            MCP_INDEX_POLL_INTERVAL
-                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            poll_interval.min(deadline.saturating_duration_since(std::time::Instant::now())),
         );
+        poll_interval = (poll_interval * 2).min(MCP_INDEX_POLL_MAX);
     }
 }
 

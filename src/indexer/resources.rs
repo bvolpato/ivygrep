@@ -34,9 +34,35 @@ const LARGE_TANTIVY_WORKLOAD_BYTES: u64 = 8 * MIB;
 
 pub(super) const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
+thread_local! {
+    static BACKGROUND_INDEXING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) struct BackgroundIndexing(bool);
+
+pub(crate) fn background_indexing() -> BackgroundIndexing {
+    BackgroundIndexing(BACKGROUND_INDEXING.replace(true))
+}
+
+pub(super) fn is_background_indexing() -> bool {
+    BACKGROUND_INDEXING.get()
+}
+
+impl Drop for BackgroundIndexing {
+    fn drop(&mut self) {
+        BACKGROUND_INDEXING.set(self.0);
+    }
+}
+
 pub(super) fn indexing_pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
+    static BACKGROUND_POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    let pool = if BACKGROUND_INDEXING.get() {
+        &BACKGROUND_POOL
+    } else {
+        &POOL
+    };
+    pool.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
             .num_threads(indexing_worker_count())
             .thread_name(|index| format!("ivygrep-index-{index}"))
@@ -47,10 +73,12 @@ pub(super) fn indexing_pool() -> &'static rayon::ThreadPool {
 
 fn indexing_worker_count() -> usize {
     let logical = num_cpus::get().max(1);
+    let physical = num_cpus::get_physical();
     configured_indexing_worker_count(
         logical,
-        num_cpus::get_physical(),
+        physical,
         std::env::var("IVYGREP_INDEX_THREADS").ok().as_deref(),
+        BACKGROUND_INDEXING.get(),
     )
 }
 
@@ -83,12 +111,19 @@ fn configured_indexing_worker_count(
     logical: usize,
     physical: usize,
     configured: Option<&str>,
+    background: bool,
 ) -> usize {
+    let available = physical.clamp(1, logical.max(1));
+    let default = if background {
+        (available / 2).max(1)
+    } else {
+        available
+    };
     configured
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|count| *count > 0)
-        .unwrap_or(physical)
-        .clamp(1, logical)
+        .unwrap_or(default)
+        .clamp(1, logical.max(1))
 }
 
 pub(super) fn neural_enhance_batch_size(neural_model: &dyn EmbeddingModel) -> usize {
@@ -406,14 +441,31 @@ mod tests {
 
     #[test]
     fn indexing_workers_default_to_physical_cores_and_respect_bounds() {
-        assert_eq!(configured_indexing_worker_count(32, 16, None), 16);
-        assert_eq!(configured_indexing_worker_count(32, 16, Some("64")), 32);
-        assert_eq!(configured_indexing_worker_count(32, 16, Some("8")), 8);
+        assert_eq!(configured_indexing_worker_count(32, 16, None, false), 16);
         assert_eq!(
-            configured_indexing_worker_count(32, 16, Some("invalid")),
+            configured_indexing_worker_count(32, 16, Some("64"), false),
+            32
+        );
+        assert_eq!(
+            configured_indexing_worker_count(32, 16, Some("8"), false),
+            8
+        );
+        assert_eq!(
+            configured_indexing_worker_count(32, 16, Some("invalid"), false),
             16
         );
-        assert_eq!(configured_indexing_worker_count(32, 16, Some("0")), 16);
+        assert_eq!(
+            configured_indexing_worker_count(32, 16, Some("0"), false),
+            16
+        );
+    }
+
+    #[test]
+    fn background_indexing_respects_available_cpus_before_sharing_them() {
+        assert_eq!(configured_indexing_worker_count(32, 16, None, true), 8);
+        assert_eq!(configured_indexing_worker_count(2, 16, None, true), 1);
+        assert_eq!(configured_indexing_worker_count(1, 16, None, true), 1);
+        assert_eq!(configured_indexing_worker_count(2, 16, Some("2"), true), 2);
     }
 
     #[test]
