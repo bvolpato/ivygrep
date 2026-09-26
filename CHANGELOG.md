@@ -4,6 +4,8 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-26
+
 ### Upgrade notes
 
 - The default neural model is now `potion-code-16m-v2`. Indexes keep working without a rebuild and the index format is unchanged: search ignores neural vectors built by `static-retrieval-v1` and answers from lexical, literal, symbol, and hash evidence until the next neural enhancement re-embeds the index, which the daemon schedules after the first search (done within 8 seconds for 11,214 chunks in a local run; a direct rebuild embeds 25,460 chunks in 6 seconds). Until then `--force-neural` reports an incompatible neural model, and `ig --status` and `ig --doctor` report a healthy index that still lists `static-retrieval-v1`. The first neural use downloads 33.5 MB instead of 125.7 MB. Hosts without network access need the new model in the Hugging Face cache (`uv run scripts/cache_neural_model.py --profile potion-code-v2 --cache "$HF_HOME"`); without it neural enhancement fails and search stays on lexical and hash results. Set `IVYGREP_MODEL_PROFILE=static-retrieval-v1` (or `static`) to keep the previous model, its cached download, and existing vectors.
