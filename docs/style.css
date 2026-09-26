@@ -59,7 +59,7 @@ body {
 .bg-fx-glow {
     position: absolute; top: -250px; left: 50%;
     transform: translateX(-50%);
-    width: 900px; height: 450px;
+    width: min(900px, 100vw); height: 450px;
     background: linear-gradient(135deg, var(--accent-green), var(--accent-blue));
     filter: blur(180px); opacity: 0.12;
     z-index: 0; pointer-events: none; border-radius: 50%;

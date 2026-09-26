@@ -70,6 +70,9 @@ const REFUSED_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(1);
 const DAEMON_IDLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
 const MAX_NEURAL_QUERY_CACHE_ENTRIES: usize = 128;
+const MAX_QUERY_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_NEURAL_QUERY_CACHE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_IDLE_SEARCH_CONTEXT_BYTES: usize = 256 * 1024 * 1024;
 /// Cap on cached workspace/dimension keys. Idle contexts additionally share a
 /// global retention cap, keeping open SQLite/Tantivy/vector views bounded when
 /// `--all` searches touch many workspaces.
@@ -723,22 +726,36 @@ struct CachedNeuralStatus {
 }
 
 struct SearchContextPool {
-    idle: Mutex<Vec<SearchContext>>,
+    idle: Mutex<Vec<(SearchContext, usize)>>,
     idle_context_count: Arc<AtomicUsize>,
+    idle_context_bytes: Arc<AtomicUsize>,
 }
 
 impl SearchContextPool {
     fn take_idle(&self) -> Option<SearchContext> {
         let context = self.idle.lock().pop();
-        if context.is_some() {
+        if let Some((_, bytes)) = &context {
             self.idle_context_count.fetch_sub(1, Ordering::Relaxed);
+            self.idle_context_bytes.fetch_sub(*bytes, Ordering::Relaxed);
         }
-        context
+        context.map(|(context, _)| context)
     }
 
     fn retain_idle(&self, context: SearchContext) {
         let mut idle = self.idle.lock();
         if idle.len() >= MAX_IDLE_SEARCH_CONTEXTS_PER_KEY {
+            return;
+        }
+        let bytes = context.estimated_retained_bytes();
+        if self
+            .idle_context_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |retained| {
+                retained
+                    .checked_add(bytes)
+                    .filter(|total| *total <= MAX_IDLE_SEARCH_CONTEXT_BYTES)
+            })
+            .is_err()
+        {
             return;
         }
         if self
@@ -748,7 +765,9 @@ impl SearchContextPool {
             })
             .is_ok()
         {
-            idle.push(context);
+            idle.push((context, bytes));
+        } else {
+            self.idle_context_bytes.fetch_sub(bytes, Ordering::Relaxed);
         }
     }
 }
@@ -759,6 +778,8 @@ impl Drop for SearchContextPool {
         if retained > 0 {
             self.idle_context_count
                 .fetch_sub(retained, Ordering::Relaxed);
+            let bytes = self.idle.lock().iter().map(|(_, bytes)| bytes).sum();
+            self.idle_context_bytes.fetch_sub(bytes, Ordering::Relaxed);
         }
     }
 }
@@ -805,11 +826,45 @@ struct QueryCacheKey {
 }
 
 struct QueryResultCache {
-    results: LruCache<QueryCacheKey, Vec<crate::protocol::SearchHit>>,
+    results: crate::byte_cache::ByteCache<QueryCacheKey, Vec<crate::protocol::SearchHit>>,
+}
+
+fn query_result_bytes(key: &QueryCacheKey, hits: &[SearchHit]) -> usize {
+    fn strings_bytes(strings: &Vec<String>) -> usize {
+        strings.capacity() * std::mem::size_of::<String>()
+            + strings.iter().map(String::capacity).sum::<usize>()
+    }
+    std::mem::size_of::<QueryCacheKey>()
+        + strings_bytes(&key.workspace_ids)
+        + key.signatures.capacity() * std::mem::size_of::<SearchContextSignature>()
+        + key.query.capacity()
+        + key.type_filter.as_ref().map_or(0, String::capacity)
+        + strings_bytes(&key.include_globs)
+        + strings_bytes(&key.exclude_globs)
+        + key.reranker.capacity()
+        + key
+            .scope_filter
+            .as_ref()
+            .map_or(0, |scope| scope.rel_path.as_os_str().len())
+        + std::mem::size_of_val(hits)
+        + hits
+            .iter()
+            .map(|hit| {
+                hit.file_path.as_os_str().len()
+                    + hit.preview.capacity()
+                    + hit.reason.capacity()
+                    + strings_bytes(&hit.sources)
+            })
+            .sum::<usize>()
+}
+
+struct BackgroundCpuPermit {
+    _cpu: tokio::sync::OwnedSemaphorePermit,
+    _background: tokio::sync::OwnedSemaphorePermit,
 }
 
 struct NeuralQueryCache {
-    vectors: LruCache<String, Vec<f32>>,
+    vectors: crate::byte_cache::ByteCache<String, Vec<f32>>,
 }
 
 fn bounded_lru<K: std::hash::Hash + Eq, V>(capacity: usize) -> LruCache<K, V> {
@@ -819,7 +874,10 @@ fn bounded_lru<K: std::hash::Hash + Eq, V>(capacity: usize) -> LruCache<K, V> {
 impl Default for QueryResultCache {
     fn default() -> Self {
         Self {
-            results: bounded_lru(MAX_QUERY_CACHE_ENTRIES),
+            results: crate::byte_cache::ByteCache::new(
+                MAX_QUERY_CACHE_ENTRIES,
+                MAX_QUERY_CACHE_BYTES,
+            ),
         }
     }
 }
@@ -827,7 +885,10 @@ impl Default for QueryResultCache {
 impl Default for NeuralQueryCache {
     fn default() -> Self {
         Self {
-            vectors: bounded_lru(MAX_NEURAL_QUERY_CACHE_ENTRIES),
+            vectors: crate::byte_cache::ByteCache::new(
+                MAX_NEURAL_QUERY_CACHE_ENTRIES,
+                MAX_NEURAL_QUERY_CACHE_BYTES,
+            ),
         }
     }
 }
@@ -838,7 +899,11 @@ impl NeuralQueryCache {
     }
 
     fn insert(&mut self, query: String, vector: Vec<f32>) {
-        self.vectors.put(query.trim().to_string(), vector);
+        let query = query.trim().to_string();
+        let bytes = std::mem::size_of::<(String, Vec<f32>)>()
+            + query.capacity()
+            + vector.capacity() * std::mem::size_of::<f32>();
+        self.vectors.insert(query, vector, bytes);
     }
 }
 
@@ -848,18 +913,19 @@ impl QueryResultCache {
     }
 
     fn insert(&mut self, key: QueryCacheKey, hits: Vec<crate::protocol::SearchHit>) {
-        self.results.put(key, hits);
+        let bytes = query_result_bytes(&key, &hits);
+        self.results.insert(key, hits, bytes);
     }
 
     fn remove_workspace(&mut self, workspace_id: &str) {
         let keys = self
             .results
-            .iter()
-            .filter(|(key, _)| key.workspace_ids.iter().any(|id| id == workspace_id))
-            .map(|(key, _)| key.clone())
+            .keys()
+            .filter(|key| key.workspace_ids.iter().any(|id| id == workspace_id))
+            .cloned()
             .collect::<Vec<_>>();
         for key in keys {
-            self.results.pop(&key);
+            self.results.remove(&key);
         }
     }
 }
@@ -1521,6 +1587,7 @@ pub(crate) struct DaemonState {
     ready_workspaces: Arc<Mutex<LruCache<WorkspaceReadinessCacheKey, WorkspaceReadinessSignature>>>,
     search_contexts: Arc<Mutex<LruCache<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
+    idle_search_context_bytes: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
     neural_queries: Arc<Mutex<NeuralQueryCache>>,
     search_cancellations: Arc<Mutex<SearchCancellationRegistry>>,
@@ -1540,6 +1607,7 @@ pub(crate) struct DaemonState {
     /// Tokio's blocking pool (default cap 512), oversubscribing CPU and memory
     /// with no backpressure. See #58.
     cpu_permits: Arc<tokio::sync::Semaphore>,
+    background_cpu_permits: Arc<tokio::sync::Semaphore>,
     web_server: Arc<Mutex<Option<WebServerRuntime>>>,
     /// Watcher registrations that failed, per workspace id, with the retry
     /// backoff that keeps a broken watcher from being retried on every
@@ -1689,7 +1757,23 @@ impl DaemonState {
     }
 
     pub(crate) async fn acquire_cpu_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let _timer = crate::performance::StageTimer::start("foreground_cpu_wait");
         self.cpu_permits.clone().acquire_owned().await.ok()
+    }
+
+    async fn acquire_background_cpu_permit(&self) -> Option<BackgroundCpuPermit> {
+        let _timer = crate::performance::StageTimer::start("background_cpu_wait");
+        let background = self
+            .background_cpu_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .ok()?;
+        let cpu = self.cpu_permits.clone().acquire_owned().await.ok()?;
+        Some(BackgroundCpuPermit {
+            _cpu: cpu,
+            _background: background,
+        })
     }
 
     fn workspace_mode_coordinator(&self, workspace_id: &str) -> Arc<WorkspaceModeCoordinator> {
@@ -1850,6 +1934,7 @@ impl DaemonState {
         if cancellation.is_cancelled() {
             return None;
         }
+        let _timer = crate::performance::StageTimer::start("foreground_cpu_wait");
         tokio::select! {
             biased;
             () = cancellation.cancelled() => None,
@@ -2228,6 +2313,7 @@ impl DaemonState {
         cancellation: &SearchCancellation,
         wait_for_neural_model: bool,
     ) -> Result<Arc<dyn EmbeddingModel>> {
+        let _timer = crate::performance::StageTimer::start("context_prepare");
         let search_leases = self
             .acquire_search_leases(
                 std::slice::from_ref(workspace),
@@ -2554,6 +2640,7 @@ impl DaemonState {
                 let pool = Arc::new(SearchContextPool {
                     idle: Mutex::new(Vec::new()),
                     idle_context_count: self.idle_search_context_count.clone(),
+                    idle_context_bytes: self.idle_search_context_bytes.clone(),
                 });
                 cache.put(
                     key,
@@ -2787,13 +2874,12 @@ impl DaemonState {
         if !self.query_result_cache_enabled {
             return;
         }
-        // Don't cache very large result sets (e.g. --no-limit / file_name_only
-        // on a big repo): with up to MAX_QUERY_CACHE_ENTRIES of them, each
-        // carrying preview/reason strings, this would bloat daemon memory.
-        if hits.len() > MAX_CACHEABLE_HITS {
+        // Check the payload before cloning it into the cache.
+        let mut cache = self.query_results.lock();
+        if hits.len() > MAX_CACHEABLE_HITS || !cache.results.fits(query_result_bytes(&key, hits)) {
             return;
         }
-        self.query_results.lock().insert(key, hits.to_vec());
+        cache.insert(key, hits.to_vec());
     }
 
     fn cached_neural_query(&self, query: &str) -> Option<Vec<f32>> {
@@ -2838,6 +2924,7 @@ fn create_daemon_state() -> DaemonState {
         ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
         search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
+        idle_search_context_bytes: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
         neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
         search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
@@ -2846,6 +2933,9 @@ fn create_daemon_state() -> DaemonState {
         full_index_run_starts: Arc::new(Mutex::new(HashMap::new())),
         query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
+        background_cpu_permits: Arc::new(tokio::sync::Semaphore::new(
+            (num_cpus::get() / 4).clamp(1, 2),
+        )),
         web_server: Arc::new(Mutex::new(None)),
         watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(DaemonActivity::default()),
@@ -3763,10 +3853,11 @@ async fn run_index_request(
             .map(|metadata| metadata.index_generation);
     };
     // Bound concurrent heavy index work (see #58).
-    let permit = state.cpu_permits.clone().acquire_owned().await.ok();
+    let permit = state.acquire_background_cpu_permit().await;
     let index_workspace_target = workspace.clone();
     let index_state = state.clone();
     let index_result = tokio::task::spawn_blocking(move || {
+        let _background = crate::indexer::background_indexing();
         let _permit = permit;
         let _mode_leases = mode_leases;
         index_workspace_target.ensure_dirs()?;
@@ -4888,8 +4979,14 @@ async fn handle_request_with_cancellation(
                 Ok(model) => {
                     let build_workspace = workspace.clone();
                     let build_query = query.clone();
+                    let build_state = state.clone();
                     tokio::task::spawn_blocking(move || {
-                        let bundle = crate::context::build_context_bundle_with_options(
+                        let search_context = build_state.cached_search_context(
+                            &build_workspace,
+                            Some(model.dimensions()),
+                            model.model_identity().is_some(),
+                        )?;
+                        let bundle = crate::context::build_context_bundle_with_search_context(
                             &build_workspace,
                             &build_query,
                             Some(model.as_ref()),
@@ -4898,6 +4995,7 @@ async fn handle_request_with_cancellation(
                             &crate::context::ContextBuildOptions {
                                 since: since.as_deref(),
                             },
+                            Some(&search_context),
                         )?;
                         Ok(serde_json::to_value(bundle)?)
                     })
@@ -5648,10 +5746,11 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 let result = match mode_leases {
                     Err(err) => Err(err),
                     Ok(mode_leases) => {
-                        let permit = state.cpu_permits.clone().acquire_owned().await.ok();
+                        let permit = state.acquire_background_cpu_permit().await;
                         let watcher_state = state.clone();
                         let index_control = control.clone();
                         tokio::task::spawn_blocking(move || {
+                            let _background = crate::indexer::background_indexing();
                             let _permit = permit;
                             let _mode_leases = mode_leases;
                             if !index_control.active.load(Ordering::Relaxed)
@@ -6851,6 +6950,7 @@ mod tests {
             ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
             search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
+            idle_search_context_bytes: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
             search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
@@ -6859,10 +6959,40 @@ mod tests {
             full_index_run_starts: Arc::new(Mutex::new(HashMap::new())),
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
+            background_cpu_permits: Arc::new(tokio::sync::Semaphore::new(
+                (num_cpus::get() / 4).clamp(1, 2),
+            )),
             web_server: Arc::new(Mutex::new(None)),
             watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(DaemonActivity::default()),
         }
+    }
+
+    #[tokio::test]
+    async fn background_queue_leaves_capacity_for_foreground_search() {
+        let mut state = test_state();
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(2));
+        state.background_cpu_permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let background = state.acquire_background_cpu_permit().await.unwrap();
+        let queued_state = state.clone();
+        let queued =
+            tokio::spawn(async move { queued_state.acquire_background_cpu_permit().await });
+        tokio::task::yield_now().await;
+        let foreground =
+            tokio::time::timeout(Duration::from_secs(2), state.acquire_search_permit(None))
+                .await
+                .expect("queued indexing must leave foreground capacity")
+                .unwrap();
+        assert!(!queued.is_finished());
+        drop(foreground);
+        drop(background);
+        drop(
+            tokio::time::timeout(Duration::from_secs(2), queued)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(state.cpu_permits.available_permits(), 2);
     }
 
     #[test]
@@ -10325,10 +10455,12 @@ mod tests {
             drop(leases);
         }
 
-        assert_eq!(
-            state.idle_search_context_count.load(Ordering::Relaxed),
-            MAX_IDLE_SEARCH_CONTEXTS,
-            "idle contexts retained across pools must remain globally bounded"
+        assert!(
+            state.idle_search_context_count.load(Ordering::Relaxed) <= MAX_IDLE_SEARCH_CONTEXTS
+        );
+        assert!(
+            state.idle_search_context_bytes.load(Ordering::Relaxed)
+                <= MAX_IDLE_SEARCH_CONTEXT_BYTES
         );
         state.search_contexts.lock().clear();
         assert_eq!(
@@ -10336,6 +10468,7 @@ mod tests {
             0,
             "evicted pools must release retained-context accounting"
         );
+        assert_eq!(state.idle_search_context_bytes.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -11848,8 +11981,17 @@ mod tests {
         index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
         let query = "fix refresh_session so expired tokens are rejected";
 
+        let state = test_state();
         let response =
-            handle_request(test_state(), context_pack_request_for(&workspace, query)).await;
+            handle_request(state.clone(), context_pack_request_for(&workspace, query)).await;
+        assert_eq!(state.idle_search_context_count.load(Ordering::Relaxed), 1);
+        let repeated =
+            handle_request(state.clone(), context_pack_request_for(&workspace, query)).await;
+        assert_eq!(
+            serde_json::to_value(&repeated).unwrap(),
+            serde_json::to_value(&response).unwrap()
+        );
+        assert_eq!(state.idle_search_context_count.load(Ordering::Relaxed), 1);
         // What a client embeds: the bundle after it crossed the socket.
         let wire = serde_json::to_string(&response).unwrap();
         let DaemonResponse::ContextPack { bundle } = serde_json::from_str(&wire).unwrap() else {

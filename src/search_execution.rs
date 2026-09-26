@@ -690,7 +690,7 @@ fn search_hits(
                 ctx,
                 options,
                 sources,
-                |source| {
+                |source, eligible| {
                     let (query, stores) = match source {
                         "hash" => (
                             hash_query_for_refill.as_deref(),
@@ -714,6 +714,7 @@ fn search_hits(
                         query.context("missing query vector for eligibility refill")?,
                         semantic_limit,
                         stores,
+                        (semantic_limit, eligible),
                     )?))
                 },
             )?;

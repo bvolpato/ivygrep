@@ -850,6 +850,69 @@ advanced skips the redundant rescan.
 indexes. Status distinguishes lexical readiness, hash coverage, neural coverage,
 active jobs, stalled work, watcher health, and compaction recommendations.
 
+## Memory budgets and performance diagnostics
+
+These limits describe the source implementation. Released-binary measurements are linked from the [resource report](benchmarks/resource-load.html).
+
+| Retained data | Byte budget | Additional limit |
+| --- | --- | --- |
+| Query results and cache keys | 64 MiB | 128 entries, at most 2,000 hits per entry |
+| Neural query vectors and query text | 4 MiB | 128 entries |
+| Idle search contexts | 256 MiB, estimated | 32 contexts, at most four per workspace and dimension |
+| Shared file previews and line offsets | 64 MiB | 256 files |
+| Parsed context input, including keys and chunk text | 32 MiB | 256 files |
+| Queued indexing payloads, including the consumer's batch | 32 MiB per index run, estimated | Two queued batches per run |
+
+Result caches evict the least recently used entries when either limit is reached.
+An oversized result remains available to the caller but does not enter the cache.
+Search contexts leave the cache when their estimated retention would exceed the global budget.
+The estimate includes vector mappings, reported USearch allocations, and 8 MiB per SQLite/Tantivy view.
+It counts shared mappings conservatively. Opaque reader allocations and allocator overhead can differ from this estimate.
+Exact path filters count toward the budget. Filters with compiled residual matchers are discarded between requests.
+If one context exceeds the budget, the next request must reopen its readers.
+Parsed context input is shared across requests by file path and SHA-256 content digest.
+Concurrent requests for the same input share one parse. Other inputs can parse independently.
+Each request still reads through the contained file API. Edits produce a new digest and new chunks.
+Completed parses enter the byte budget. Active reads and parses can temporarily exceed retained-cache budgets.
+
+Indexing groups at most 64 files and targets 4 MiB of source per parsing batch.
+Prepared batches target 8 MiB. A file above either target runs alone and can exceed the target.
+Byte reservations remain held until the consumer finishes each batch.
+One oversized payload can proceed only when no other reserved payload is held.
+The producer can also hold one parsed source batch while it waits to send.
+Parsing trees, active results, model weights, and file changes during discovery are outside these retention budgets.
+These limits do not cap total process RSS.
+
+To collect stage timings, use an unused app home and start a daemon with this log filter:
+
+```sh
+IVYGREP_HOME=/tmp/ivygrep-diagnostics RUST_LOG=ivygrep::performance=debug ig --daemon
+```
+
+Give clients the same `IVYGREP_HOME` so their requests reach that daemon.
+
+The debug records contain stage names, durations in milliseconds, and counts. They do not include query text or source paths.
+`foreground_cpu_wait` measures the wait for a search or context CPU permit.
+`background_cpu_wait` includes the background queue and the shared CPU queue.
+`context_prepare` covers leases, workspace preparation, and model readiness.
+`context_assembly` covers context input, retrieval, graph expansion, selection, and rendering.
+`context_input`, `context_seeds`, `context_retrieval`, `context_symbols`, `context_anchor_tests`, and `context_graph` report those stages separately.
+`context_budget` measures final selection and rendering. `context_reader_load` measures opening new readers.
+Cached context packs omit `context_reader_load` because they reuse an existing reader.
+
+If rejected ANN candidates leave too few visible results, semantic search retries ANN with a larger pool.
+The pool grows from the observed fraction of eligible candidates, with 50% headroom.
+Retries stop after three rounds, 16 times the requested limit, or 20,000 candidates.
+Requests above 20,000 retain their existing candidate limit.
+Each round applies the same path, language, scope, ignore, and worktree visibility rules.
+If retries still underfill, exact scoring streams all eligible SQLite keys in batches of 4,096.
+This fallback preserves recovery when stale or hidden ANN keys consume the candidate pool.
+It remains a possible scan of the eligible corpus.
+
+Each `semantic_refill` record reports `ann_rounds`, `ann_keys`, `exact_scan`, and `scanned_keys`.
+`scanned_keys` counts eligible SQLite rows visited for exact scoring, including work interrupted by cancellation.
+ANN retries can reduce scan frequency. They do not make ANN an exact nearest-neighbor search.
+
 ## Running ivygrep in many agent sessions
 
 Every Claude Code or Codex session that configures `ig --mcp` starts its own
@@ -858,13 +921,22 @@ call auto-spawns. Thirty-two sessions started at once with no daemon spawn
 several daemon processes, and the single-instance lock leaves exactly one
 within two seconds.
 
-**Shared, in the daemon:** indexes, watchers (one per indexed workspace), the
-query model, search contexts (32), query results (128), the preview cache
-(64 MiB), CPU permits (one per core) for searches, context packs, and index
-runs, and background enhancement workers, which are separate processes: at most
-two hash and two neural workers at once, however many workspaces were edited.
+The daemon shares indexes, watchers, the query model, and caches across sessions.
+Each indexed workspace has one watcher. Searches and context packs share CPU permits, with one permit per logical core.
+Index runs also need a place in a separate background queue.
+This queue permits one run per four logical cores, with a minimum of one and a maximum of two.
+On a single-core host, searches and indexing still compete for the same permit.
 
-**Per session:** one MCP process that frames JSON-RPC and forwards hybrid,
+Queued index requests and watcher updates use half the available physical cores for parsing, with a minimum of one thread.
+The default accounts for logical CPUs available through affinity or container limits.
+Standalone indexing keeps the physical-core default. `IVYGREP_INDEX_THREADS` overrides both defaults.
+Context packs reuse the daemon's cached search contexts.
+MCP index readiness polling starts at 20 ms and doubles to a maximum of 500 ms.
+This reduces the wait after a short index run without rapid polling throughout a long run.
+
+Hash and neural enhancement use separate processes. Each lane permits two workers by default, across all indexed workspaces.
+
+Each session has one MCP process that frames JSON-RPC and forwards hybrid,
 literal, and regex searches and context packs to the daemon. Symbol, reference,
 and caller lookups and `ig_status` run in the MCP process and open stores only
 for the call. A session holds no connection between calls: each call connects,
@@ -1144,7 +1216,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_INDEX_GC_GRACE_SECS` | How long a workspace root must stay missing before its index is removed. Default `604800` (seven days); `0` disables collection. Overlays of worktrees removed with `git worktree remove` wait at most ten minutes. |
 | `IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT` | Set to disable background hash and neural enhancement. `--wait-for-enhancement` fails. |
 | `IVYGREP_NO_AUTOSPAWN` | Set to prevent daemon auto-start. Also disables background enhancement, so `--wait-for-enhancement` fails. |
-| `IVYGREP_INDEX_THREADS` | Indexing worker threads. Default: physical cores, capped at logical cores. Background hash and neural enhancement insert vectors through at most four of these threads; `1`, or a store under 1,024 vectors, inserts serially. |
+| `IVYGREP_INDEX_THREADS` | Indexing worker threads. Standalone indexing defaults to physical cores. Daemon indexing defaults to half the physical cores. Both use at least one thread and are capped at logical cores. Background enhancement inserts vectors through at most four threads. |
 | `IVYGREP_NEURAL_THREADS` | Neural inference threads. Default: logical cores capped at 8 for foreground work; a quarter of logical cores (1 to 8) for background work. Maximum 32. |
 | `IVYGREP_NEURAL_BATCH_SIZE` | Chunks per background neural enhancement batch. Default depends on backend (static, CPU, Metal, or CUDA); maximum 4096. |
 | `IVYGREP_NEURAL_MEMORY_MB` | Memory budget that sizes transformer worker pools. Default: a quarter of available memory. |

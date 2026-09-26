@@ -69,6 +69,7 @@ use storage::{
     finalize_graph_indexes,
 };
 const TANTIVY_INDEX_RETRY_ATTEMPTS: u32 = 3;
+pub(crate) use resources::background_indexing;
 const TANTIVY_INDEX_RETRY_BASE_DELAY_MS: u64 = 250;
 const MIB: u64 = 1024 * 1024;
 const MAX_RUST_DOC_INCLUDES_PER_SOURCE: usize = 16;
@@ -82,6 +83,12 @@ const SYMBOL_INSERT_PREFIX: &str =
     "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key, name, owner) VALUES ";
 const SYMBOL_INSERT_ROW: &str = "(?, ?, ?, ?)";
 const INDEX_FILE_BATCH_SIZE: usize = 64;
+const INDEX_SOURCE_BATCH_BYTES: u64 = 4 * MIB;
+const INDEX_PREPARED_BATCH_BYTES: usize = 8 * MIB as usize;
+const INDEX_PENDING_BYTES: usize = 32 * MIB as usize;
+
+mod batch_budget;
+use batch_budget::{BatchBudget, Reservation};
 // Soft per-transaction target, checked after each file. One file's bounded
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
 const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
@@ -150,6 +157,7 @@ fn prepare_indexed_chunk(chunk: IndexedChunk, fields: &TantivyFields) -> Prepare
 
 struct IndexedFile {
     rel_path: PathBuf,
+    source_bytes: usize,
     chunks: Vec<PreparedIndexedChunk>,
     included_paths: Vec<PathBuf>,
     file_edges: Vec<crate::context_graph::FileEdge>,
@@ -158,21 +166,117 @@ struct IndexedFile {
     manifest_resolution_signature: Option<String>,
 }
 
-type IndexedFileBatch = Vec<IndexedFile>;
+struct IndexedFileBatch {
+    files: Vec<IndexedFile>,
+    _reservation: Reservation,
+}
+
+impl IndexedFile {
+    fn estimated_bytes(&self) -> usize {
+        // Include copied text in Tantivy documents and the whole-file trigram field.
+        let chunk_bytes = self
+            .chunks
+            .iter()
+            .map(|prepared| {
+                let chunk = &prepared.chunk;
+                std::mem::size_of::<PreparedIndexedChunk>()
+                    + prepared.compressed_text.capacity()
+                    + chunk.text.capacity() * 2
+                    + chunk.chunk_id.capacity() * 2
+                    + chunk.file_path.as_os_str().len() * 2
+                    + chunk.language.capacity() * 2
+                    + chunk.kind.capacity()
+                    + chunk.content_hash.capacity()
+                    + 1024
+                    + prepared.tantivy_doc.len() * 32
+                    + chunk.definitions.as_ref().map_or(0, |definitions| {
+                        definitions.capacity() * std::mem::size_of::<ChunkDefinition>()
+                            + definitions
+                                .iter()
+                                .map(|definition| {
+                                    definition.name.capacity()
+                                        + definition.owner.as_ref().map_or(0, String::capacity)
+                                })
+                                .sum::<usize>()
+                    })
+            })
+            .sum::<usize>();
+        let graph_bytes = self
+            .file_edges
+            .iter()
+            .map(|edge| {
+                std::mem::size_of_val(edge)
+                    + edge.source_path.as_os_str().len()
+                    + edge.target_path.as_os_str().len()
+            })
+            .sum::<usize>();
+        let dependency_bytes = self
+            .unresolved_dependencies
+            .iter()
+            .chain(self.resolved_dependencies.iter().map(|(spec, _)| spec))
+            .map(|spec| {
+                std::mem::size_of_val(spec)
+                    + spec.source_path.as_os_str().len()
+                    + spec.language.capacity()
+                    + spec.spec.capacity()
+                    + spec.lookup_key.capacity()
+            })
+            .sum::<usize>();
+        std::mem::size_of::<Self>()
+            + self.source_bytes
+            + chunk_bytes
+            + graph_bytes
+            + dependency_bytes
+            + self.rel_path.as_os_str().len()
+            + self
+                .included_paths
+                .iter()
+                .map(|path| std::mem::size_of::<PathBuf>() + path.as_os_str().len())
+                .sum::<usize>()
+            + self
+                .resolved_dependencies
+                .iter()
+                .map(|(_, path)| std::mem::size_of::<PathBuf>() + path.as_os_str().len())
+                .sum::<usize>()
+            + self
+                .manifest_resolution_signature
+                .as_ref()
+                .map_or(0, String::capacity)
+    }
+}
+
+fn source_batch_len(root: &Path, paths: &[(PathBuf, bool)]) -> usize {
+    let mut bytes = 0u64;
+    let mut count = 0;
+    for (path, _) in paths.iter().take(INDEX_FILE_BATCH_SIZE) {
+        let size = crate::workspace_file::open(root, path)
+            .and_then(|file| file.metadata())
+            .map_or(0, |metadata| metadata.len());
+        if count > 0 && size > INDEX_SOURCE_BATCH_BYTES.saturating_sub(bytes) {
+            break;
+        }
+        count += 1;
+        bytes = bytes.saturating_add(size);
+    }
+    count
+}
 
 struct IndexBatchProducer {
     receiver: Option<std::sync::mpsc::Receiver<Result<IndexedFileBatch>>>,
     handle: Option<std::thread::JoinHandle<()>>,
+    budget: Arc<BatchBudget>,
 }
 
 impl IndexBatchProducer {
     fn new(
         receiver: std::sync::mpsc::Receiver<Result<IndexedFileBatch>>,
         handle: std::thread::JoinHandle<()>,
+        budget: Arc<BatchBudget>,
     ) -> Self {
         Self {
             receiver: Some(receiver),
             handle: Some(handle),
+            budget,
         }
     }
 
@@ -181,6 +285,7 @@ impl IndexBatchProducer {
     }
 
     fn stop(&mut self) {
+        self.budget.stop();
         drop(self.receiver.take());
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -188,6 +293,7 @@ impl IndexBatchProducer {
     }
 
     fn finish(mut self) -> Result<()> {
+        self.budget.stop();
         drop(self.receiver.take());
         if let Some(handle) = self.handle.take() {
             handle
@@ -219,10 +325,18 @@ fn spawn_index_batch_producer(
     let progress_path = workspace.indexing_progress_path();
     let diff_paths = diff.added_or_modified.clone();
     let fields = fields.clone();
+    let budget = BatchBudget::new(INDEX_PENDING_BYTES);
+    let producer_budget = budget.clone();
+    let use_background_pool = resources::is_background_indexing();
 
     let _ = fs::write(&progress_path, format!("0/{total}"));
     let handle = std::thread::spawn(move || {
-        for batch_paths in diff_paths.chunks(INDEX_FILE_BATCH_SIZE) {
+        let _background = use_background_pool.then(background_indexing);
+        let mut remaining = diff_paths.as_slice();
+        while !remaining.is_empty() {
+            let count = source_batch_len(&root, remaining);
+            let (batch_paths, rest) = remaining.split_at(count);
+            remaining = rest;
             let file_chunks: Result<Vec<_>> = indexing_pool().install(|| {
                 batch_paths
                     .par_iter()
@@ -230,6 +344,7 @@ fn spawn_index_batch_producer(
                         let empty_incremental_file = |rel: &Path| {
                             (!is_fresh_index).then(|| IndexedFile {
                                 rel_path: rel.to_path_buf(),
+                                source_bytes: 0,
                                 chunks: Vec::new(),
                                 included_paths: Vec::new(),
                                 file_edges: Vec::new(),
@@ -319,6 +434,7 @@ fn spawn_index_batch_producer(
                         }
                         Ok(Some(IndexedFile {
                             rel_path: rel_path.clone(),
+                            source_bytes: content.capacity(),
                             chunks: indexed,
                             included_paths,
                             file_edges: file_graph.edges,
@@ -336,8 +452,33 @@ fn spawn_index_batch_producer(
 
             match file_chunks {
                 Ok(file_chunks) => {
-                    if !file_chunks.is_empty() && sender.send(Ok(file_chunks)).is_err() {
-                        break;
+                    let mut files = file_chunks.into_iter().peekable();
+                    while files.peek().is_some() {
+                        let mut batch = Vec::new();
+                        let mut bytes = 0usize;
+                        while let Some(file) = files.peek() {
+                            let cost = file.estimated_bytes();
+                            if !batch.is_empty()
+                                && cost > INDEX_PREPARED_BATCH_BYTES.saturating_sub(bytes)
+                            {
+                                break;
+                            }
+                            bytes = bytes.saturating_add(cost);
+                            batch.push(files.next().unwrap());
+                        }
+                        let Some(reservation) = producer_budget.acquire(bytes) else {
+                            return;
+                        };
+                        tracing::debug!(target: "ivygrep::performance", stage = "index_batch", estimated_bytes = bytes, files = batch.len(), "index batch prepared");
+                        if sender
+                            .send(Ok(IndexedFileBatch {
+                                files: batch,
+                                _reservation: reservation,
+                            }))
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
                 Err(err) => {
@@ -348,7 +489,7 @@ fn spawn_index_batch_producer(
         }
     });
 
-    IndexBatchProducer::new(receiver, handle)
+    IndexBatchProducer::new(receiver, handle, budget)
 }
 
 pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
@@ -1411,11 +1552,15 @@ fn index_workspace_inner(
 
     while let Some(file_chunks) = producer.recv() {
         let file_chunks = persist_or_stop!(file_chunks);
+        let IndexedFileBatch {
+            files,
+            _reservation,
+        } = file_chunks;
         // Persist lexical metadata first. Hash ANN construction is intentionally
         // deferred to background enhancement: on multi-million chunk repos the
         // provisional graph dominated first-index latency and delayed usable
         // BM25/literal results by minutes.
-        for indexed_file in file_chunks {
+        for indexed_file in files {
             let rel_path = indexed_file.rel_path;
             let indexed_chunks = indexed_file.chunks;
             let rel_path_string = index_path_string(&rel_path);
@@ -4798,12 +4943,40 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<IndexedFileBatch>>(0);
         let handle = std::thread::spawn(move || {
             assert!(
-                sender.send(Ok(Vec::new())).is_err(),
+                sender
+                    .send(Ok(IndexedFileBatch {
+                        files: Vec::new(),
+                        _reservation: BatchBudget::new(INDEX_PENDING_BYTES).acquire(0).unwrap(),
+                    }))
+                    .is_err(),
                 "receiver drop must cancel blocked producer send"
             );
         });
 
-        drop(IndexBatchProducer::new(receiver, handle));
+        drop(IndexBatchProducer::new(
+            receiver,
+            handle,
+            BatchBudget::new(INDEX_PENDING_BYTES),
+        ));
+    }
+
+    #[test]
+    fn source_batches_isolate_large_files_without_skipping_them() {
+        let root = tempdir().unwrap();
+        for (name, bytes) in [
+            ("small.rs", 1024),
+            ("large.rs", INDEX_SOURCE_BATCH_BYTES + 1),
+            ("last.rs", 1024),
+        ] {
+            fs::File::create(root.path().join(name))
+                .unwrap()
+                .set_len(bytes)
+                .unwrap();
+        }
+        let paths = ["small.rs", "large.rs", "last.rs"].map(|name| (PathBuf::from(name), false));
+        assert_eq!(source_batch_len(root.path(), &paths), 1);
+        assert_eq!(source_batch_len(root.path(), &paths[1..]), 1);
+        assert_eq!(source_batch_len(root.path(), &paths[2..]), 1);
     }
 
     #[test]
@@ -4811,7 +4984,7 @@ mod tests {
         let (_sender, receiver) = std::sync::mpsc::sync_channel::<Result<IndexedFileBatch>>(0);
         let handle = std::thread::spawn(|| panic!("test producer panic"));
 
-        let err = IndexBatchProducer::new(receiver, handle)
+        let err = IndexBatchProducer::new(receiver, handle, BatchBudget::new(INDEX_PENDING_BYTES))
             .finish()
             .unwrap_err();
         assert!(

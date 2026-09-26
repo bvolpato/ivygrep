@@ -228,6 +228,10 @@ def markdown(report: dict) -> str:
         "Generated from pinned public CoIR samples. No private corpus, local path, "
         "hostname, query text, or source text is retained.",
         "",
+        "Screening used one repetition. Peak RSS uses cumulative child-process "
+        "counters. The [released-binary resource report](resource-load.html) "
+        "measures enhancement children separately across three repetitions.",
+        "",
         f"- Commit: `{report['ivygrep_commit']}`",
         f"- Binary SHA-256: `{report['binary_sha256']}`",
         f"- Selected default: `{report['selection']}`",
@@ -336,6 +340,8 @@ def html(report: dict) -> str:
       <div class="report-eyebrow">Portable Model Evidence</div>
       <h1>Embedding model bake-off</h1>
       <p>Public screening evidence selected <code>{escape(report["selection"])}</code> for the full retrieval matrix.</p>
+      <p>This screening used one repetition. The <a href="resource-load.html">released-binary resource report</a> adds repeated latency and resource measurements.</p>
+      <p>Screening peak RSS uses cumulative child-process resource counters. It does not isolate enhancement RSS. The repeated report measures each enhancement child separately.</p>
     </section>
     <section class="report-card">
       <h2>Candidate results</h2>

@@ -4,6 +4,13 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Background indexing has a separate admission limit and uses fewer parser threads by default. MCP readiness polling starts at 20 ms and increases to 500 ms. Context packs reuse search readers and parsed input. Content digests prevent reuse after input changes.
+- Result caches, neural query caches, and idle search contexts now have byte budgets. Indexing batches use source-byte targets and estimated payload reservations. These limits control retained data, not total process RSS. One oversized indexing payload can proceed alone.
+- Semantic search retries ANN with bounded adaptive overfetch when rejected candidates leave too few visible results. Exact scoring remains available when retries underfill. Debug diagnostics record stage timings, recovery frequency, and scanned-key counts.
+- The documentation and website explain search, context packs, memory limits, and model behavior in simpler language. A new resource report includes repeated released-binary measurements and a separate source comparison. It reports regressions, shared-host limits, and differences from historical model screening.
+
 ## [1.3.0] - 2026-09-26
 
 ### Upgrade notes

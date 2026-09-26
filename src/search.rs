@@ -332,6 +332,49 @@ fn read_optional_profile(path: &Path) -> Result<Option<String>> {
 }
 
 impl SearchContext {
+    pub(crate) fn estimated_retained_bytes(&self) -> usize {
+        fn paths_bytes(paths: &HashSet<String>) -> usize {
+            paths.capacity() * (std::mem::size_of::<String>() + 1)
+                + paths.iter().map(String::capacity).sum::<usize>()
+        }
+        // Reserve 8 MiB per SQLite/Tantivy view for opaque reader caches.
+        // The preview cache is shared and has its own 64 MiB budget.
+        let mut bytes = std::mem::size_of::<Self>() + self.searchers.len() * 8 * 1024 * 1024;
+        bytes = bytes.saturating_add(paths_bytes(&self.tombstones));
+        bytes = bytes.saturating_add(paths_bytes(&self.overlay_files));
+        for store in [
+            &self.hash_vectors,
+            &self.base_hash_vectors,
+            &self.neural_vectors,
+            &self.base_neural_vectors,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes.saturating_add(store.estimated_retained_bytes());
+        }
+        // Compiled residual matchers have opaque allocations. Rebuild those,
+        // but keep byte-counted exact path filters for repeated scoped searches.
+        let mut filters = self.glob_path_filters.borrow_mut();
+        filters.retain(|_, filter| filter.residual_matcher.is_none());
+        for (key, filter) in filters.iter() {
+            let string_vectors = [&key.include_globs, &key.exclude_globs]
+                .into_iter()
+                .chain(filter.included_paths.as_ref())
+                .chain(filter.excluded_paths.as_ref());
+            let cost = std::mem::size_of::<(GlobPathFilterCacheKey, GlobPathQueryFilter)>()
+                + string_vectors
+                    .map(|strings| {
+                        strings.capacity() * std::mem::size_of::<String>()
+                            + strings.iter().map(String::capacity).sum::<usize>()
+                    })
+                    .sum::<usize>()
+                + key.type_filter.as_ref().map_or(0, String::capacity)
+                + key.scope_path.as_ref().map_or(0, String::capacity);
+            bytes = bytes.saturating_add(cost);
+        }
+        bytes
+    }
     pub fn load(
         workspace: &Workspace,
         emb_dim: Option<usize>,
@@ -4078,6 +4121,7 @@ fn collect_semantic_candidates(
 
     let matches =
         collect_semantic_vector_matches(query_vector, ann_limit, primary_store, base_store);
+    let mut last_ann_limit = ann_limit;
 
     // Batch-fetch all candidate chunks in one SQL round-trip.
     let keys: Vec<u64> = matches.iter().map(|m| m.key).collect();
@@ -4108,6 +4152,7 @@ fn collect_semantic_candidates(
             .max(ann_limit.saturating_mul(2))
             .min(20_000);
         if fallback_limit > ann_limit {
+            last_ann_limit = fallback_limit;
             let fallback_matches = collect_semantic_vector_matches(
                 query_vector,
                 fallback_limit,
@@ -4146,6 +4191,7 @@ fn collect_semantic_candidates(
             query_vector,
             candidate_limit,
             (primary_store, base_store),
+            (last_ann_limit, semantic_chunks.len()),
         )?;
         let keys = matches.iter().map(|hit| hit.key).collect::<Vec<_>>();
         let chunks = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
@@ -4257,6 +4303,7 @@ fn collect_semantic_vector_matches(
     primary_store: Option<&VectorStore>,
     base_store: Option<&VectorStore>,
 ) -> Vec<VectorMatch> {
+    let _timer = crate::performance::StageTimer::start("semantic_ann");
     let mut matches = Vec::new();
     if let Some(store) = primary_store {
         matches.extend(store.search(query_vector, candidate_limit));
@@ -4298,14 +4345,14 @@ fn collect_unfiltered_semantic_candidates(
     options: &SearchOptions,
     sources: Vec<(Vec<VectorMatch>, f32, &'static str)>,
 ) -> Result<SemanticCandidatesById> {
-    collect_unfiltered_semantic_candidates_with_refill(ctx, options, sources, |_| Ok(None))
+    collect_unfiltered_semantic_candidates_with_refill(ctx, options, sources, |_, _| Ok(None))
 }
 
 fn collect_unfiltered_semantic_candidates_with_refill(
     ctx: &SearchContext,
     options: &SearchOptions,
     mut sources: Vec<(Vec<VectorMatch>, f32, &'static str)>,
-    mut refill: impl FnMut(&str) -> Result<Option<Vec<VectorMatch>>>,
+    mut refill: impl FnMut(&str, usize) -> Result<Option<Vec<VectorMatch>>>,
 ) -> Result<SemanticCandidatesById> {
     debug_assert!(!has_semantic_filters(options));
 
@@ -4332,11 +4379,16 @@ fn collect_unfiltered_semantic_candidates_with_refill(
         if options.is_cancelled() {
             return Ok(HashMap::new());
         }
-        if matches.iter().any(|hit| {
-            chunks
-                .get(&hit.key)
-                .is_none_or(|chunk| !options.skip_gitignore && chunk.is_ignored)
-        }) && let Some(replacement) = refill(source)?
+        let eligible = matches
+            .iter()
+            .filter(|hit| {
+                chunks
+                    .get(&hit.key)
+                    .is_some_and(|chunk| options.skip_gitignore || !chunk.is_ignored)
+            })
+            .count();
+        if eligible < matches.len()
+            && let Some(replacement) = refill(source, eligible)?
         {
             *matches = replacement;
             refilled = true;
