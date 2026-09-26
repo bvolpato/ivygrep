@@ -2,16 +2,16 @@
   "evidence": [
     {
       "id": "current-head-relevance",
-      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/35a5f3e8663363a6affcd22670b803dee444c2a6/docs/benchmarks/current-head-relevance.json",
+      "immutable_url": null,
       "kind": "quality",
       "label": "Historical self-repository retrieval snapshot",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6",
-      "publication_status": "pinned",
-      "sha256": "790096a7f010185c62df8b9b78005d76ff292360a0b81f694381d25c1f62f38c",
-      "source_commit": "2f4208d79493ee7904d7c81e5b3cbca73f8c398b",
+      "publication_commit": null,
+      "publication_status": "not pinned to an immutable revision",
+      "sha256": "a0ff707e9c74f0c4217ba8b0ec7c37bffc90ea258f52ff2783c4f9accf33d374",
+      "source_commit": "12b87cc58074c7478e649961ff1ead801ae5b216",
       "summary": {
-        "binary_sha256": "c2748d4fd1fe7313fa9fe188bb38fe3bdb23afcbffa4891b2ff616cb60cbc910",
+        "binary_sha256": "9f751dc57b1bcbc13b4e52b18a200acbfde8ca2d61694b1ae4ec0b6ffc1b52f9",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "6b877037ff957ca5ee5093e0aa55472a5cd40163c50741f37664e1daabeb8654"
@@ -33,7 +33,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 5067.940489854664,
+            "elapsed_ms": 2175.90328771621,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -43,10 +43,10 @@
             "mean_candidate_recall": 0.98,
             "mean_hybrid_deep_recall": 0.98,
             "mean_mrr": 0.9257142857142857,
-            "mean_ndcg10": 0.9037574058184213,
+            "mean_ndcg10": 0.8982551864526611,
             "mean_p1": 0.88,
-            "mean_p5": 0.20800000000000002,
-            "mean_recall5": 0.92,
+            "mean_p5": 0.2,
+            "mean_recall5": 0.9,
             "mode": "foreground",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
@@ -68,7 +68,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 5496.413928922266,
+            "elapsed_ms": 2411.44663002342,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -78,10 +78,10 @@
             "mean_candidate_recall": 0.98,
             "mean_hybrid_deep_recall": 0.98,
             "mean_mrr": 0.9257142857142857,
-            "mean_ndcg10": 0.9037574058184213,
+            "mean_ndcg10": 0.8982551864526611,
             "mean_p1": 0.88,
-            "mean_p5": 0.20800000000000002,
-            "mean_recall5": 0.92,
+            "mean_p5": 0.2,
+            "mean_recall5": 0.9,
             "mode": "hash-enriched",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
@@ -98,21 +98,21 @@
               "candidate_budget": 0,
               "first_useful_low": 0,
               "no_primary_judgment": 0,
-              "not_audited": 3,
-              "satisfied": 22
+              "not_audited": 4,
+              "satisfied": 21
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 7752.7129631489515,
+            "elapsed_ms": 3302.7714900672436,
             "filter_misses": [],
             "low_rank_misses": [],
-            "mean_candidate_recall": 0.98,
+            "mean_candidate_recall": 0.96,
             "mean_hybrid_deep_recall": 0.0,
-            "mean_mrr": 0.9257142857142857,
-            "mean_ndcg10": 0.9037574058184213,
-            "mean_p1": 0.88,
-            "mean_p5": 0.20800000000000002,
-            "mean_recall5": 0.92,
+            "mean_mrr": 0.9057142857142857,
+            "mean_ndcg10": 0.8834923765955195,
+            "mean_p1": 0.84,
+            "mean_p5": 0.2,
+            "mean_recall5": 0.9,
             "mode": "neural",
             "neural_queries_executed": 25,
             "neural_queries_unobservable": 0,
@@ -120,16 +120,16 @@
             "no_hit_queries": 0,
             "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.88
+            "satisfaction_rate": 0.84
           }
         },
         "runtime": {
           "machine": "x86_64",
-          "release": "6.8.0-1061-aws",
+          "release": "6.17.0-1025-oem",
           "system": "Linux"
         },
         "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing and verified neural execution. This is not a public-code, million-chunk, or agent-task benchmark.",
-        "version": "ivygrep 1.2.16"
+        "version": "ivygrep 1.3.0"
       }
     },
     {
@@ -1355,7 +1355,7 @@
       "current-head-relevance": {
         "status": "historical",
         "versions": [
-          "1.2.16"
+          "1.3.0"
         ]
       },
       "million-scale-current": {
@@ -1371,7 +1371,7 @@
         ]
       },
       "public-retrieval-challenge-current": {
-        "status": "current",
+        "status": "historical",
         "versions": [
           "1.2.16"
         ]
@@ -1383,13 +1383,13 @@
         ]
       },
       "public-retrieval-current": {
-        "status": "current",
+        "status": "historical",
         "versions": [
           "1.2.16"
         ]
       }
     },
-    "package_version": "1.2.16"
+    "package_version": "1.3.0"
   },
   "histories": {
     "archive_size": [
