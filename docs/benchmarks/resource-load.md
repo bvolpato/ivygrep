@@ -73,6 +73,7 @@ The published runs pin their harness to commit `7906274fc219dc5e97afee8557c0e1a9
 For an exact harness match, create a separate checkout:
 
 ```sh
+git fetch origin 7906274fc219dc5e97afee8557c0e1a91f0fda96
 git worktree add --detach /instance_storage/ivygrep-resource-harness \
   7906274fc219dc5e97afee8557c0e1a91f0fda96
 ```
