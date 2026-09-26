@@ -143,9 +143,13 @@ def render(report: dict, raw_name: str, baseline: dict | None = None, candidate:
 <p><a href="{escape(diagnostics_name or 'resource-load-diagnostics.json')}">Diagnostic JSON</a> contains each stage sample and the binary identity.</p></section>'''
     if baseline is not None and candidate is not None:
         rows = comparison_rows(baseline, candidate)
+        source_revision = candidate.get("build", {}).get("source_revision")
+        source_identity = (f'<p>Candidate implementation: <a href="https://github.com/bvolpato/ivygrep/commit/{escape(source_revision)}"><code>{escape(source_revision)}</code></a>.</p>'
+                           if source_revision else "")
         comparison = f'''<section class="report-card"><h2>Local source comparison</h2>
 <p>Both builds use Linux x86_64 with glibc. The candidate includes the resource changes.</p>
 <p>The baseline starts at <code>89ae90d</code>. The candidate starts at release commit <code>0e1e393</code>. The intervening commit did not change <code>src</code>.</p>
+{source_identity}
 <p>These builds are separate from the released musl binary above. Values show the median and range across repetitions.</p>
 <p>Search changes include faster MCP index-readiness polling. Context changes reuse readers and parsed input across requests.</p>
 {table(["Profile", "Metric", "Unchanged source", "Candidate", "Change"], rows)}

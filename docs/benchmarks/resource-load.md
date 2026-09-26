@@ -102,6 +102,7 @@ Save their reports as `resource-load-baseline.json` and `resource-load-candidate
 The local comparison uses Linux x86_64 glibc binaries. It is separate from the released musl measurements.
 The baseline uses source revision `89ae90d58806dac145b6129bfc68ec450658a37e`.
 The candidate starts from release revision `0e1e39386d0c98caf3d44dbe618787350ecfe937`.
+Its implementation is pinned to commit `7906274fc219dc5e97afee8557c0e1a91f0fda96` in the candidate JSON.
 The intervening commit changed version metadata, reports, and one test. It did not change the implementation under `src`.
 
 Render all three reports:
@@ -144,4 +145,4 @@ The focused regression fixture places eight orphan vectors ahead of four visible
 Overfetch recovers all four without an exact scan. A request for five still scans the four eligible SQLite keys.
 
 The checked-in JSON adds model identities read from each run's persisted `neural_model.json`.
-It also records build targets and source revisions. Candidate source hashes describe the local source snapshot.
+It also records build targets and source revisions. Candidate source hashes identify the files at the pinned implementation commit.

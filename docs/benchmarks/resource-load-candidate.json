@@ -4,10 +4,11 @@
     "version": "ivygrep 1.3.0"
   },
   "build": {
+    "base_revision": "0e1e39386d0c98caf3d44dbe618787350ecfe937",
     "features": "default",
-    "source_revision": "0e1e39386d0c98caf3d44dbe618787350ecfe937",
+    "source_revision": "7906274fc219dc5e97afee8557c0e1a91f0fda96",
     "target": "x86_64-unknown-linux-gnu",
-    "uncommitted_source_sha256": {
+    "source_sha256": {
       "src/byte_cache.rs": "28eb15d23dfc5776af2d2ef75b131dc6f36360edb61e129ee957b2520c12a965",
       "src/context.rs": "fb2a6a5161b27d278f53963187e57b4e3e0497fdaaa36cee969885156b150f04",
       "src/daemon.rs": "e979e48f8c7dca8e5dad87b7ee699422027d6b9d161c2b4543590ed98c86ab4d",
