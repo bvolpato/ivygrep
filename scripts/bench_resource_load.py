@@ -41,6 +41,9 @@ PROFILES = ("static-retrieval-v1", "potion-code-16m-v2")
 
 
 def latency_summary(values: list[float]) -> dict:
+    if not values:
+        return {"samples": 0, "p50_ms": None, "p95_ms": None, "p99_ms": None,
+                "maximum_ms": None, "raw_ms": []}
     return {"samples": len(values), "p50_ms": percentile(values, 0.50),
             "p95_ms": percentile(values, 0.95), "p99_ms": percentile(values, 0.99),
             "maximum_ms": max(values), "raw_ms": values}
@@ -260,6 +263,8 @@ def main() -> None:
         parser.error("resource measurements require Linux /proc and wait4")
     if args.runs < 1 or args.clients < 1 or args.samples < args.clients or args.idle_seconds < 0:
         parser.error("use positive runs and clients, samples >= clients, and a nonnegative idle interval")
+    if args.samples % args.clients:
+        parser.error("samples must be divisible by clients")
     args.binary = args.binary.resolve()
     args.repo = args.repo.resolve()
     args.work_dir = args.work_dir.resolve()

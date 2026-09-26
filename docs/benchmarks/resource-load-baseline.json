@@ -20,6 +20,7 @@
     "sha256": "b4e6f6e9f4efda6e259ed0d23d8381a0661df4434167a882bd079604fcaddea8",
     "source_bytes": 3465965
   },
+  "harness_revision": "7906274fc219dc5e97afee8557c0e1a91f0fda96",
   "harness_sha256": {
     "bench_million_chunks.py": "77462b1ee58eaa6755d613d2c9951d99f770e8e950493f0a44d43c7343524c21",
     "bench_resource_load.py": "1e2b891e7710f37a73f2b6cc9b1ee9f5e3ee02b0e486d1c2cb958a3716af4074",

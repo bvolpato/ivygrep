@@ -4974,9 +4974,10 @@ mod tests {
                 .unwrap();
         }
         let paths = ["small.rs", "large.rs", "last.rs"].map(|name| (PathBuf::from(name), false));
-        assert_eq!(source_batch_len(root.path(), &paths), 1);
-        assert_eq!(source_batch_len(root.path(), &paths[1..]), 1);
-        assert_eq!(source_batch_len(root.path(), &paths[2..]), 1);
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        assert_eq!(source_batch_len(&root_path, &paths), 1);
+        assert_eq!(source_batch_len(&root_path, &paths[1..]), 1);
+        assert_eq!(source_batch_len(&root_path, &paths[2..]), 1);
     }
 
     #[test]

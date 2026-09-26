@@ -69,10 +69,18 @@ uv run scripts/cache_neural_model.py --profile static --cache ~/.cache/huggingfa
 uv run scripts/cache_neural_model.py --profile potion-code-v2 --cache ~/.cache/huggingface
 ```
 
-Run the benchmark while no builds or other benchmark jobs run on the host:
+The published runs pin their harness to commit `7906274fc219dc5e97afee8557c0e1a91f0fda96`.
+For an exact harness match, create a separate checkout:
 
 ```sh
-uv run scripts/bench_resource_load.py \
+git worktree add --detach /instance_storage/ivygrep-resource-harness \
+  7906274fc219dc5e97afee8557c0e1a91f0fda96
+```
+
+Run that harness while no builds or other benchmark jobs run on the host:
+
+```sh
+uv run /instance_storage/ivygrep-resource-harness/scripts/bench_resource_load.py \
   --binary /instance_storage/ivygrep-release/ivygrep-v1.3.0-linux-x86_64-musl/ig \
   --revision 89ae90d58806dac145b6129bfc68ec450658a37e \
   --runs 3 --samples 128 --clients 8 \
@@ -81,6 +89,9 @@ uv run scripts/bench_resource_load.py \
 ```
 
 The work directory must not exist before the run. Logs and indexes remain there for inspection.
+For source comparisons and diagnostics, use the same pinned harness.
+The current runner rejects sample counts that are not divisible by the client count.
+If no background index completes, it reports zero completions and null background latency percentiles.
 If you do not enable diagnostics, unset `RUST_LOG` before the run.
 The JSON contains raw latencies, per-phase resource measurements, corpus identity, binary identity, and harness hashes.
 `wait4` records RSS and CPU for each child separately. Earlier child processes do not inflate later peak RSS values.
@@ -126,7 +137,7 @@ The runner reports CPU-permit waits, context assembly, semantic ANN stages, reco
 See [memory budgets and diagnostics](../architecture.md#memory-budgets-and-performance-diagnostics) for the field definitions.
 
 ```sh
-uv run scripts/bench_resource_load.py \
+uv run /instance_storage/ivygrep-resource-harness/scripts/bench_resource_load.py \
   --binary /path/to/candidate/ig \
   --revision 89ae90d58806dac145b6129bfc68ec450658a37e \
   --profiles potion-code-16m-v2 --runs 1 --samples 16 --clients 8 \

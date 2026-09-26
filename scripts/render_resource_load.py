@@ -93,6 +93,9 @@ def comparison_rows(baseline: dict, candidate: dict) -> list[list[str]]:
         ):
             before = [extract(run) for run in left]
             after = [extract(run) for run in right]
+            if None in before or None in after:
+                rows.append([profile, label, "unavailable", "unavailable", "unavailable"])
+                continue
             base = statistics.median(before)
             change = f"{(statistics.median(after) / base - 1) * 100:+.1f}%" if base else "unavailable"
             rows.append([profile, label, median_range(before, unit), median_range(after, unit), change])
