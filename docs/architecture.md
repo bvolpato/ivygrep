@@ -716,6 +716,10 @@ Watchers coalesce bursts and cap continuous-event starvation. Successful changes
 invalidate only cache entries involving affected workspaces. No-op indexing
 preserves valid cache entries.
 
+Searches record the cache revision before reading index signatures.
+Cache invalidation changes that revision.
+The daemon rejects cache reads and writes from searches with an old revision.
+
 Cached Git workspace resolution checks filesystem identity and small Git metadata
 files without launching Git on unchanged searches. Non-Git paths repeat root
 discovery so a newly created ancestor repository is recognized. A changed cached

@@ -827,6 +827,7 @@ struct QueryCacheKey {
 
 struct QueryResultCache {
     results: crate::byte_cache::ByteCache<QueryCacheKey, Vec<crate::protocol::SearchHit>>,
+    revision: u64,
 }
 
 fn query_result_bytes(key: &QueryCacheKey, hits: &[SearchHit]) -> usize {
@@ -878,6 +879,7 @@ impl Default for QueryResultCache {
                 MAX_QUERY_CACHE_ENTRIES,
                 MAX_QUERY_CACHE_BYTES,
             ),
+            revision: 0,
         }
     }
 }
@@ -918,6 +920,7 @@ impl QueryResultCache {
     }
 
     fn remove_workspace(&mut self, workspace_id: &str) {
+        self.revision = self.revision.wrapping_add(1);
         let keys = self
             .results
             .keys()
@@ -2863,20 +2866,44 @@ impl DaemonState {
         Ok(())
     }
 
-    fn cached_query_results(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
+    fn query_cache_revision(&self) -> u64 {
+        if self.query_result_cache_enabled {
+            self.query_results.lock().revision
+        } else {
+            0
+        }
+    }
+
+    fn cached_query_results(
+        &self,
+        key: &QueryCacheKey,
+        revision: u64,
+    ) -> Option<Vec<crate::protocol::SearchHit>> {
         if !self.query_result_cache_enabled {
             return None;
         }
-        self.query_results.lock().get(key)
+        let mut cache = self.query_results.lock();
+        if cache.revision != revision {
+            return None;
+        }
+        cache.get(key)
     }
 
-    fn store_query_results(&self, key: QueryCacheKey, hits: &[crate::protocol::SearchHit]) {
+    fn store_query_results(
+        &self,
+        key: QueryCacheKey,
+        hits: &[crate::protocol::SearchHit],
+        revision: u64,
+    ) {
         if !self.query_result_cache_enabled {
             return;
         }
         // Check the payload before cloning it into the cache.
         let mut cache = self.query_results.lock();
-        if hits.len() > MAX_CACHEABLE_HITS || !cache.results.fits(query_result_bytes(&key, hits)) {
+        if cache.revision != revision
+            || hits.len() > MAX_CACHEABLE_HITS
+            || !cache.results.fits(query_result_bytes(&key, hits))
+        {
             return;
         }
         cache.insert(key, hits.to_vec());
@@ -4408,6 +4435,7 @@ async fn handle_request_with_cancellation(
                     return (Vec::new(), all_errors, 0, query, options, true);
                 }
                 let query_uses_neural = query_uses_neural(&query, options.force_neural);
+                let cache_revision = state_clone.query_cache_revision();
                 let workspace_signatures = workspaces
                     .iter()
                     .map(|workspace| {
@@ -4429,7 +4457,9 @@ async fn handle_request_with_cancellation(
                     model.model_identity().is_some(),
                     all_indices,
                 );
-                if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
+                if let Some(cached_hits) =
+                    state_clone.cached_query_results(&cache_key, cache_revision)
+                {
                     let cancelled = options.is_cancelled();
                     if !cancelled {
                         state_clone
@@ -4546,7 +4576,7 @@ async fn handle_request_with_cancellation(
                     state_clone.store_completed_neural_query(query, &completed, &options);
                 }
                 if !cancelled && all_errors.is_empty() {
-                    state_clone.store_query_results(cache_key, &all_hits);
+                    state_clone.store_query_results(cache_key, &all_hits, cache_revision);
                 }
                 // Background hash and neural enhancement runs off the response path.
                 if !cancelled {
@@ -7621,9 +7651,9 @@ mod tests {
             false,
             true,
         );
-        state.store_query_results(first_key.clone(), &[]);
-        state.store_query_results(second_key.clone(), &[]);
-        state.store_query_results(combined_key.clone(), &[]);
+        state.store_query_results(first_key.clone(), &[], state.query_cache_revision());
+        state.store_query_results(second_key.clone(), &[], state.query_cache_revision());
+        state.store_query_results(combined_key.clone(), &[], state.query_cache_revision());
 
         state.clear_workspace_contexts(&first);
 
@@ -8313,7 +8343,7 @@ mod tests {
             true,
             false,
         );
-        state.store_query_results(original_key, &[]);
+        state.store_query_results(original_key, &[], state.query_cache_revision());
 
         std::fs::remove_file(workspace.neural_model_path()).unwrap();
         let changed_signature = search_context_signature(&workspace, Some(256), true);
@@ -8331,7 +8361,11 @@ mod tests {
             true,
             false,
         );
-        assert!(state.cached_query_results(&changed_key).is_none());
+        assert!(
+            state
+                .cached_query_results(&changed_key, state.query_cache_revision())
+                .is_none()
+        );
 
         let changed_context = state
             .cached_search_context(&workspace, Some(256), true)
@@ -10906,9 +10940,46 @@ mod tests {
             force_neural: true,
             reranker: crate::reranker::cache_identity(),
         };
-        state.store_query_results(key.clone(), &[]);
-        assert!(state.cached_query_results(&key).is_none());
+        state.store_query_results(key.clone(), &[], state.query_cache_revision());
+        assert!(
+            state
+                .cached_query_results(&key, state.query_cache_revision())
+                .is_none()
+        );
         assert!(state.query_results.lock().results.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_query_cache_rejects_search_completion_after_invalidation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let state = test_state();
+        let key = query_cache_key(
+            std::slice::from_ref(&workspace),
+            vec![search_context_signature(&workspace, Some(256), false)],
+            "needle",
+            &SearchOptions::default(),
+            256,
+            false,
+            false,
+        );
+        let revision = state.query_cache_revision();
+        state.store_query_results(key.clone(), &[], revision);
+        state.clear_workspace_contexts(&workspace);
+        // Complete a search that started before the workspace was invalidated.
+        state.store_query_results(key.clone(), &[], revision);
+        let current_revision = state.query_cache_revision();
+        assert!(state.cached_query_results(&key, current_revision).is_none());
+        state.store_query_results(key.clone(), &[], current_revision);
+        assert!(
+            state
+                .cached_query_results(&key, current_revision)
+                .is_some_and(|hits| hits.is_empty())
+        );
+        assert!(state.cached_query_results(&key, revision).is_none());
     }
 
     #[tokio::test]
