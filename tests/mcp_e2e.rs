@@ -45,6 +45,23 @@ fn find_watcher_pid(home: &Path) -> Option<u32> {
     None
 }
 
+fn watcher_diagnostics(home: &Path) -> String {
+    let mut diagnostics = format!(
+        "daemon.log:\n{}",
+        fs::read_to_string(home.join("daemon.log"))
+            .unwrap_or_else(|error| format!("unavailable: {error}"))
+    );
+    if let Ok(entries) = fs::read_dir(home.join("indexes")) {
+        for entry in entries.flatten() {
+            let path = entry.path().join("job.json");
+            if let Ok(ledger) = fs::read_to_string(&path) {
+                diagnostics.push_str(&format!("\n{}:\n{ledger}", path.display()));
+            }
+        }
+    }
+    diagnostics
+}
+
 fn search_payload(response: &Value) -> Value {
     assert!(
         response["result"]["content"][0]["text"]
@@ -508,7 +525,10 @@ fn e2e_mcp_autospawn_watches_edits() {
     assert!(daemon.pid.is_some(), "MCP did not start the daemon watcher");
 
     fs::write(repo.join("test.rs"), "fn after_agent_edit() {}").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // This checks eventual publication, including on loaded Windows runners.
+    // The first-call test separately bounds MCP response latency.
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(60);
     let mut id = 2;
     let refreshed = loop {
         let response = call_search(&mut stdin, &mut reader, id, "after_agent_edit");
@@ -518,11 +538,16 @@ fn e2e_mcp_autospawn_watches_edits() {
         }
         assert!(
             Instant::now() < deadline,
-            "daemon watcher did not publish the edited file: {payload}"
+            "daemon watcher did not publish the edited file: {payload}\n{}",
+            watcher_diagnostics(&home)
         );
         id += 1;
         thread::sleep(Duration::from_millis(100));
     };
+    eprintln!(
+        "daemon watcher published the edited file after {:?}",
+        started.elapsed()
+    );
     assert!(search_payload(&refreshed)["result_count"].as_u64().unwrap() > 0);
 
     drop(stdin);
