@@ -480,10 +480,16 @@ impl Workspace {
     /// Records the current index format version. Call after a successful index
     /// commit so the index is marked as written with the current layout.
     pub fn write_index_format_version(&self) -> std::io::Result<()> {
-        std::fs::write(
-            self.index_format_version_path(),
-            INDEX_FORMAT_VERSION.to_string(),
-        )
+        let path = self.index_format_version_path();
+        let tmp = path.with_file_name(format!("index_format_version.tmp.{}", uuid::Uuid::new_v4()));
+        let result = (|| {
+            fs::write(&tmp, INDEX_FORMAT_VERSION.to_string())?;
+            fs::rename(&tmp, &path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
 
     // ── Overlay paths (worktree-only, thin per-worktree stores) ──────────
@@ -2531,6 +2537,69 @@ mod tests {
         assert_eq!(
             index_path_string(&PathBuf::from("src").join("search.rs")),
             "src/search.rs"
+        );
+    }
+
+    #[test]
+    fn index_format_version_is_never_observed_partially_during_writes() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            id: "format-marker-test".to_string(),
+            root: tmp.path().to_path_buf(),
+            index_dir: tmp.path().join("index"),
+            repo_id: None,
+            base_index_dir: None,
+        };
+        ws.ensure_dirs().unwrap();
+        ws.write_index_format_version().unwrap();
+
+        const READERS: usize = 2;
+        const WRITES: usize = 1_000;
+        let start = Barrier::new(READERS + 2);
+        let done = AtomicBool::new(false);
+        let invalid = AtomicBool::new(false);
+        let observations = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                start.wait();
+                let result = (0..WRITES).try_for_each(|_| {
+                    ws.write_index_format_version()?;
+                    std::thread::yield_now();
+                    Ok::<_, std::io::Error>(())
+                });
+                done.store(true, Ordering::Release);
+                result.unwrap();
+            });
+            let readers: Vec<_> = (0..READERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        while !done.load(Ordering::Acquire) {
+                            if ws.read_index_format_version() != INDEX_FORMAT_VERSION {
+                                invalid.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            observations.fetch_add(1, Ordering::Relaxed);
+                        }
+                    })
+                })
+                .collect();
+
+            start.wait();
+            writer.join().unwrap();
+            for reader in readers {
+                reader.join().unwrap();
+            }
+        });
+
+        assert!(observations.load(Ordering::Relaxed) > 0);
+        assert!(
+            !invalid.load(Ordering::Relaxed),
+            "a concurrent reader observed a missing or partial index format marker"
         );
     }
 
