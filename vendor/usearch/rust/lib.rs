@@ -443,6 +443,7 @@ pub mod ffi {
         pub fn view(self: &NativeIndex, path: &str) -> Result<()>;
         pub fn reset(self: &NativeIndex) -> Result<()>;
         pub fn memory_usage(self: &NativeIndex) -> usize;
+        pub unsafe fn owned_memory_usage(self: &NativeIndex) -> usize;
         pub fn hardware_acceleration(self: &NativeIndex) -> *const c_char;
 
         pub fn save_to_buffer(self: &NativeIndex, buffer: &mut [u8]) -> Result<()>;
@@ -1388,6 +1389,13 @@ impl Index {
     /// In practice, its error will be below 10%.
     pub fn memory_usage(self: &Index) -> usize {
         self.inner.memory_usage()
+    }
+
+    /// Owned native allocations, including retained search scratch, excluding file mappings.
+    /// Exclusive access prevents concurrent searches from resizing the scratch buffers.
+    pub fn owned_memory_usage(&mut self) -> usize {
+        // SAFETY: Index owns its native handle; exclusive access rules out in-flight operations.
+        unsafe { self.inner.owned_memory_usage() }
     }
 
     /// Saves the index to a specified file.

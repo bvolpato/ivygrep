@@ -70,6 +70,8 @@ CALL_WEIGHTS = (("hybrid_short", 30), ("hybrid_long", 15), ("literal", 15), ("re
 # `--calls` can also select this kind: hybrid searches scoped to a directory or a file of the workspace.
 SCOPES = ("src", "src/indexer", "docs", "tests", "src/daemon.rs", "README.md")
 CALL_KINDS = tuple(name for name, _ in CALL_WEIGHTS) + ("scoped",)
+LATENCY_SAMPLE_CAP = 200_000
+LATENCY_SAMPLE_SEED = 0
 PHASES = ("stampede", "lifecycle", "load", "churn", "idle", "storm")
 MODES = {
     "short": {"stampede": 8, "lifecycle_cycles": 12, "clients": 8, "workspaces": 3, "duration": 60.0,
@@ -247,6 +249,20 @@ def enhancement_progress(home: Path) -> dict[str, dict[str, Any]]:
             "queued": text(".enhancing.phase") == "queued",
         }
     return progress
+
+
+def storm_completion_gate(*, enhancement_enabled: bool, pending_workspaces: int, dirty_workspaces: int,
+                         enhanced_workspaces: int, fresh_worktree_enhanced: bool,
+                         enhancement_processes_left: int, failure_count: int) -> dict[str, Any]:
+    """Require enhancement convergence only when the storm enables background enhancement."""
+    checks = {"all_edits_visible": pending_workspaces == 0, "no_failures": failure_count == 0}
+    if enhancement_enabled:
+        checks.update({
+            "all_dirty_workspaces_enhanced": enhanced_workspaces == dirty_workspaces,
+            "fresh_worktree_enhanced": fresh_worktree_enhanced,
+            "no_enhancement_processes_left": enhancement_processes_left == 0,
+        })
+    return {"passed": all(checks.values()), "checks": checks}
 
 
 # --------------------------------------------------------------------------------------
@@ -533,19 +549,50 @@ def prepare_workspaces(source: Path, root: Path, count: int, corpus: str, *, ful
 class LoadStats:
     """Call counts, failures, and bounded latency samples shared by the session threads."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_latency_samples: int = LATENCY_SAMPLE_CAP) -> None:
+        if max_latency_samples < 1:
+            raise ValueError("max_latency_samples must be at least 1")
         self.calls: dict[str, int] = defaultdict(int)
         self.errors: list[str] = []
         self.error_count = 0
         self.latencies: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        self.max_latency_samples = max_latency_samples
+        self.latency_rng = random.Random(LATENCY_SAMPLE_SEED)
         self.lock = threading.Lock()
 
     def record(self, kind: str, elapsed: float, milliseconds: float) -> None:
         with self.lock:
             self.calls[kind] += 1
             bucket = self.latencies[kind]
-            if len(bucket) < 200_000:
+            if len(bucket) < self.max_latency_samples:
                 bucket.append((elapsed, milliseconds))
+                return
+            # Algorithm R: keep a uniform sample from the whole stream, not a prefix.
+            index = self.latency_rng.randrange(self.calls[kind])
+            if index < self.max_latency_samples:
+                bucket[index] = (elapsed, milliseconds)
+
+    def latency_sampling_metadata(self) -> dict[str, Any]:
+        """Describe how many latency observations were retained and their time coverage."""
+        with self.lock:
+            by_kind = {}
+            for kind, observed in self.calls.items():
+                retained = self.latencies[kind]
+                elapsed = [sample[0] for sample in retained]
+                by_kind[kind] = {
+                    "observed_samples": observed,
+                    "retained_samples": len(retained),
+                    "min_retained_elapsed_seconds": min(elapsed) if elapsed else None,
+                    "max_retained_elapsed_seconds": max(elapsed) if elapsed else None,
+                }
+            return {
+                "method": "uniform_reservoir",
+                "capacity_per_kind": self.max_latency_samples,
+                "seed": LATENCY_SAMPLE_SEED,
+                "observed_samples": sum(self.calls.values()),
+                "retained_samples": sum(len(values) for values in self.latencies.values()),
+                "by_kind": by_kind,
+            }
 
     def fail(self, message: str) -> None:
         with self.lock:
@@ -784,6 +831,7 @@ class Soak:
         return {"clients": clients, "workspaces": len(workspaces), "duration_seconds": duration, "daemon_pid": daemon_pid,
                 "calls": dict(stats.calls), "total_calls": total_calls, "failed_calls": stats.error_count,
                 "errors": stats.errors, "latency": {kind: latency_drift(values) for kind, values in stats.latencies.items()},
+                "latency_sampling": stats.latency_sampling_metadata(),
                 "daemon_gate": daemon_gate, "session_gate": session_gate, "settled_gate": settled_gate,
                 "slopes": slopes,
                 "session_exit_codes": sorted({-1 if code is None else code for code in exits}),
@@ -1000,9 +1048,16 @@ class Soak:
             peak["daemon_rss_anon_bytes"] = max(peak["daemon_rss_anon_bytes"], daemon["rss_anon_bytes"])
             peak["daemon_threads"] = max(peak["daemon_threads"], daemon["threads"])
             peak["load1"] = max(peak["load1"], os.getloadavg()[0])
-            finished = not self.args.enable_enhancement or (
-                len(enhanced_after) == len(workspaces) and fresh_times["hash_vectors_after_seconds"] is not None)
-            if not pending and finished and not enhancers:
+            completion = storm_completion_gate(
+                enhancement_enabled=self.args.enable_enhancement,
+                pending_workspaces=len(pending),
+                dirty_workspaces=len(workspaces),
+                enhanced_workspaces=len(enhanced_after),
+                fresh_worktree_enhanced=fresh_times["enhanced_after_seconds"] is not None,
+                enhancement_processes_left=len(enhancers),
+                failure_count=len(failures),
+            )
+            if completion["passed"]:
                 break
             time.sleep(0.2)
         stop.set()
@@ -1010,6 +1065,15 @@ class Soak:
             thread.join(timeout=240)
         session.close()
         leftover = classify_processes(owned_processes(self.home))["enhancement"]
+        completion = storm_completion_gate(
+            enhancement_enabled=self.args.enable_enhancement,
+            pending_workspaces=len(pending),
+            dirty_workspaces=len(workspaces),
+            enhanced_workspaces=len(enhanced_after),
+            fresh_worktree_enhanced=fresh_times["enhanced_after_seconds"] is not None,
+            enhancement_processes_left=len(leftover),
+            failure_count=len(failures),
+        )
         return {"dirty_workspaces": len(workspaces), "seconds": time.monotonic() - before,
                 "edits_visible_after_seconds": times["visible"],
                 "searched_workspace_hash_vectors_after_seconds": times["searched_hash"],
@@ -1024,8 +1088,9 @@ class Soak:
                 "cpu_count": os.cpu_count(), "background_enhancement": self.args.enable_enhancement,
                 "pause_reasons": sorted(pause_reasons), "workspaces_never_updated": sorted(pending),
                 "failures": failures,
-                # Paused workers wait for the host to calm down; they are reported, not failed.
-                "enhancement_processes_left": leftover, "passed": not pending and not failures}
+                # A paused worker records why it waits; enabled storms require it to drain before passing.
+                "enhancement_processes_left": leftover, "completion_gate": completion,
+                "passed": completion["passed"]}
 
     def edit_visible(self, session: McpClient, worktree: Path, needle: str, *, timeout: float = 60.0) -> bool:
         deadline = time.monotonic() + timeout

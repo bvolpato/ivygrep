@@ -746,6 +746,17 @@ class index_dense_gt {
             vectors_tape_allocator_.total_allocated();
     }
 
+    /** @brief Owned allocations, excluding file mappings. No operations may be in flight. */
+    std::size_t owned_memory_usage() const {
+        using slot_lookup_t = decltype(slot_lookup_);
+        return sizeof(*this) + sizeof(index_t) + typed_->owned_memory_usage() +
+               typed_->tape_allocator().total_wasted() + typed_->tape_allocator().total_reserved() +
+               vectors_tape_allocator_.total_allocated() + vectors_lookup_.size() * sizeof(byte_t*) +
+               slot_lookup_.capacity() / slot_lookup_t::slots_per_bucket() * slot_lookup_t::bytes_per_bucket() +
+               free_keys_.capacity() * sizeof(compressed_slot_t) +
+               available_threads_.capacity() * sizeof(std::size_t) + cast_buffer_.size();
+    }
+
     static constexpr std::size_t any_thread() { return std::numeric_limits<std::size_t>::max(); }
     static constexpr distance_t infinite_distance() { return std::numeric_limits<distance_t>::max(); }
 

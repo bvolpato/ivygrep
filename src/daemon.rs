@@ -741,7 +741,7 @@ impl SearchContextPool {
         context.map(|(context, _)| context)
     }
 
-    fn retain_idle(&self, context: SearchContext) {
+    fn retain_idle(&self, mut context: SearchContext) {
         let mut idle = self.idle.lock();
         if idle.len() >= MAX_IDLE_SEARCH_CONTEXTS_PER_KEY {
             return;
@@ -10426,6 +10426,48 @@ mod tests {
             !Arc::ptr_eq(&first_pool, &third.pool),
             "index generation change should replace the SearchContext pool"
         );
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(not(target_os = "windows"))]
+    fn cached_search_context_reuses_large_file_backed_view() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn pooled_mapping() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        // Keep the index valid and sparse while exceeding the idle owned-memory budget.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.vector_path())
+            .unwrap()
+            .set_len((MAX_IDLE_SEARCH_CONTEXT_BYTES as u64) * 2)
+            .unwrap();
+
+        let state = test_state();
+        for _ in 0..3 {
+            let lease = state
+                .cached_search_context(&workspace, Some(256), false)
+                .unwrap();
+            assert!(lease.hash_vectors.is_some());
+            assert!(lease.pool.idle.lock().is_empty());
+            assert_eq!(state.idle_search_context_count.load(Ordering::Relaxed), 0);
+            assert_eq!(state.idle_search_context_bytes.load(Ordering::Relaxed), 0);
+            drop(lease);
+            assert_eq!(
+                state.idle_search_context_count.load(Ordering::Relaxed),
+                1,
+                "the large mapped reader must remain reusable"
+            );
+            let retained = state.idle_search_context_bytes.load(Ordering::Relaxed);
+            assert!(retained > 0 && retained <= MAX_IDLE_SEARCH_CONTEXT_BYTES);
+        }
+        state.search_contexts.lock().clear();
+        assert_eq!(state.idle_search_context_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.idle_search_context_bytes.load(Ordering::Relaxed), 0);
     }
 
     #[test]

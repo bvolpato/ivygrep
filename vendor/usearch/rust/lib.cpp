@@ -180,6 +180,7 @@ void NativeIndex::view(rust::Str path) const {
 
 void NativeIndex::reset() const { index_->reset(); }
 size_t NativeIndex::memory_usage() const { return index_->memory_usage(); }
+size_t NativeIndex::owned_memory_usage() const { return index_->owned_memory_usage(); }
 char const* NativeIndex::hardware_acceleration() const { return index_->metric().isa_name(); }
 
 void NativeIndex::save_to_buffer(rust::Slice<uint8_t> buffer) const {
