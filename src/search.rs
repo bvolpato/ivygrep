@@ -332,7 +332,7 @@ fn read_optional_profile(path: &Path) -> Result<Option<String>> {
 }
 
 impl SearchContext {
-    pub(crate) fn estimated_retained_bytes(&self) -> usize {
+    pub(crate) fn estimated_retained_bytes(&mut self) -> usize {
         fn paths_bytes(paths: &HashSet<String>) -> usize {
             paths.capacity() * (std::mem::size_of::<String>() + 1)
                 + paths.iter().map(String::capacity).sum::<usize>()
@@ -343,10 +343,10 @@ impl SearchContext {
         bytes = bytes.saturating_add(paths_bytes(&self.tombstones));
         bytes = bytes.saturating_add(paths_bytes(&self.overlay_files));
         for store in [
-            &self.hash_vectors,
-            &self.base_hash_vectors,
-            &self.neural_vectors,
-            &self.base_neural_vectors,
+            &mut self.hash_vectors,
+            &mut self.base_hash_vectors,
+            &mut self.neural_vectors,
+            &mut self.base_neural_vectors,
         ]
         .into_iter()
         .flatten()

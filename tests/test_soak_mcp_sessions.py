@@ -109,6 +109,48 @@ class ProcSamplingTest(unittest.TestCase):
             self.assertEqual(progress["/repos/waiting"], {"hash": False, "neural": False, "queued": True})
 
 
+class StormCompletionGateTest(unittest.TestCase):
+    def gate(self, **updates):
+        values = {
+            "enhancement_enabled": True,
+            "pending_workspaces": 0,
+            "dirty_workspaces": 4,
+            "enhanced_workspaces": 4,
+            "fresh_worktree_enhanced": True,
+            "enhancement_processes_left": 0,
+            "failure_count": 0,
+        }
+        values.update(updates)
+        return soak.storm_completion_gate(**values)
+
+    def test_enabled_storm_fails_on_timeout_until_all_enhancement_work_finishes(self):
+        incomplete = (
+            {"pending_workspaces": 1},
+            {"enhanced_workspaces": 3},
+            {"fresh_worktree_enhanced": False},
+            {"enhancement_processes_left": 1},
+        )
+        for missing in incomplete:
+            with self.subTest(missing=missing):
+                gate = self.gate(**missing)
+                self.assertFalse(gate["passed"])
+        self.assertTrue(self.gate()["passed"])
+
+    def test_disabled_enhancement_does_not_require_vectors_or_drained_workers(self):
+        gate = soak.storm_completion_gate(
+            enhancement_enabled=False,
+            pending_workspaces=0,
+            dirty_workspaces=4,
+            enhanced_workspaces=0,
+            fresh_worktree_enhanced=False,
+            enhancement_processes_left=2,
+            failure_count=0,
+        )
+        self.assertTrue(gate["passed"])
+        self.assertEqual(set(gate["checks"]), {"all_edits_visible", "no_failures"})
+        self.assertFalse(self.gate(pending_workspaces=1)["passed"])
+
+
 class GateTest(unittest.TestCase):
     def test_slope_separates_a_steady_climb_from_noise(self):
         rng = random.Random(7)
@@ -182,6 +224,49 @@ class GateTest(unittest.TestCase):
         slowing = soak.latency_drift([(float(index), 5.0 + index / 10) for index in range(400)])
         self.assertGreater(slowing["p50_ratio"], 4)
         self.assertGreater(slowing["last_p95_ms"], slowing["first_p95_ms"])
+
+
+class LoadStatsTest(unittest.TestCase):
+    def test_latency_reservoir_spans_the_full_run_and_is_independent_of_workload_rng(self):
+        def collect(workload_seed):
+            workload_rng_state = random.getstate()
+            try:
+                random.seed(workload_seed)
+                stats = soak.LoadStats(max_latency_samples=40)
+                for index in range(1000):
+                    random.random()
+                    milliseconds = 5.0 if index < 500 else 50.0
+                    stats.record("search", float(index), milliseconds)
+                return stats
+            finally:
+                random.setstate(workload_rng_state)
+
+        stats = collect(1)
+        same_stream = collect(7)
+        retained = stats.latencies["search"]
+        self.assertEqual(retained, same_stream.latencies["search"])
+        self.assertEqual(len(retained), 40, "the reservoir must stay within its configured bound")
+        self.assertLess(min(elapsed for elapsed, _ in retained), 100)
+        self.assertGreater(max(elapsed for elapsed, _ in retained), 900)
+
+        drift = soak.latency_drift(retained)
+        self.assertIsNotNone(drift)
+        self.assertEqual((drift["first_p50_ms"], drift["last_p50_ms"]), (5.0, 50.0))
+        metadata = stats.latency_sampling_metadata()
+        self.assertEqual(metadata["method"], "uniform_reservoir")
+        self.assertEqual((metadata["observed_samples"], metadata["retained_samples"]), (1000, 40))
+        self.assertEqual(metadata["by_kind"]["search"]["observed_samples"], 1000)
+        self.assertEqual(metadata["by_kind"]["search"]["retained_samples"], 40)
+        self.assertGreater(metadata["by_kind"]["search"]["max_retained_elapsed_seconds"], 900)
+
+    def test_latency_reservoir_keeps_all_observations_below_capacity(self):
+        stats = soak.LoadStats(max_latency_samples=40)
+        expected = [(float(index), float(index + 1)) for index in range(39)]
+        for elapsed, milliseconds in expected:
+            stats.record("search", elapsed, milliseconds)
+        self.assertEqual(stats.latencies["search"], expected)
+        metadata = stats.latency_sampling_metadata()
+        self.assertEqual((metadata["observed_samples"], metadata["retained_samples"]), (39, 39))
 
 
 class WorkloadTest(unittest.TestCase):

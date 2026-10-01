@@ -140,9 +140,6 @@ pub struct VectorStore {
     path: PathBuf,
     index: Index,
     quantization: ScalarKind,
-    // Compute retention once at open time. Serializing to estimate a mapping
-    // would visit every graph node on each return to the context pool.
-    retained_bytes_at_open: usize,
     // USearch retains a pointer to the buffer passed to view_from_buffer().
     // Keep the index field first so it is dropped before its backing storage.
     #[cfg(target_os = "windows")]
@@ -282,23 +279,9 @@ impl VectorStore {
             path: path.to_path_buf(),
             index,
             quantization,
-            retained_bytes_at_open: 0,
             #[cfg(target_os = "windows")]
             _readonly_buffer: None,
         }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn new_readonly(path: &Path, index: Index, quantization: ScalarKind) -> Self {
-        let mapped_bytes = existing_index_path(path)
-            .and_then(|path| fs::metadata(path).ok())
-            .map_or(0, |metadata| {
-                usize::try_from(metadata.len()).unwrap_or(usize::MAX)
-            });
-        let retained_bytes_at_open = index.memory_usage().saturating_add(mapped_bytes);
-        let mut store = Self::new(path, index, quantization);
-        store.retained_bytes_at_open = retained_bytes_at_open;
-        store
     }
 
     /// Atomically replace an existing store with a freshly allocated empty index.
@@ -342,7 +325,6 @@ impl VectorStore {
             match view_result {
                 Ok(()) => Ok(Self {
                     path: path.to_path_buf(),
-                    retained_bytes_at_open: index.memory_usage().saturating_add(buffer.len()),
                     index,
                     quantization,
                     _readonly_buffer: Some(buffer),
@@ -356,9 +338,6 @@ impl VectorStore {
                     unsafe { fallback.view_from_buffer(&buffer) }?;
                     Ok(Self {
                         path: path.to_path_buf(),
-                        retained_bytes_at_open: fallback
-                            .memory_usage()
-                            .saturating_add(buffer.len()),
                         index: fallback,
                         quantization: ScalarKind::F32,
                         _readonly_buffer: Some(buffer),
@@ -380,10 +359,10 @@ impl VectorStore {
                     }
                     let fallback = create_index(dimensions, ScalarKind::F32, tier)?;
                     fallback.view(path_str)?;
-                    return Ok(Self::new_readonly(path, fallback, ScalarKind::F32));
+                    return Ok(Self::new(path, fallback, ScalarKind::F32));
                 }
             }
-            Ok(Self::new_readonly(path, index, quantization))
+            Ok(Self::new(path, index, quantization))
         }
     }
 
@@ -509,8 +488,17 @@ impl VectorStore {
         self.index.size()
     }
 
-    pub(crate) fn estimated_retained_bytes(&self) -> usize {
-        self.retained_bytes_at_open
+    pub(crate) fn estimated_retained_bytes(&mut self) -> usize {
+        // Query after use: searches can grow retained native scratch buffers.
+        // Unix views use reclaimable shared file mappings; Windows owns the bytes.
+        let bytes = self.index.owned_memory_usage();
+        #[cfg(target_os = "windows")]
+        let bytes = bytes.saturating_add(
+            self._readonly_buffer
+                .as_ref()
+                .map_or(0, |buffer| buffer.len()),
+        );
+        bytes
     }
 
     /// Dimensionality of the vectors stored in this index. Useful for asserting
@@ -1235,6 +1223,109 @@ mod tests {
         assert_eq!(ro.size(), 2);
         assert!(ro.contains(1));
         assert!(ro.contains(2));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn readonly_retained_bytes_excludes_large_file_mapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        {
+            let mut store =
+                VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+            store.upsert(7, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+            store.save().unwrap();
+        }
+        // Sparse trailing space makes a large valid mapping without a large test corpus.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+
+        let mut store =
+            VectorStore::open_readonly(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+        for _ in 0..3 {
+            assert_eq!(store.search(&[1.0, 0.0, 0.0, 0.0], 1)[0].key, 7);
+            let retained = store.estimated_retained_bytes();
+            assert!(retained > 0);
+            assert!(
+                retained < 16 * 1024 * 1024,
+                "mapping was charged as owned: {retained}"
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_retained_bytes_tracks_search_scratch_growth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        {
+            let mut store =
+                VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+            for key in 0..256 {
+                store
+                    .upsert(key, vec![1.0, key as f32 / 256.0, 0.0, 0.0])
+                    .unwrap();
+            }
+            store.save().unwrap();
+        }
+        let mut store =
+            VectorStore::open_readonly(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+        let before = store.estimated_retained_bytes();
+        assert_eq!(store.search(&[1.0, 0.0, 0.0, 0.0], 256).len(), 256);
+        let after = store.estimated_retained_bytes();
+        assert!(
+            after > before,
+            "retained search scratch must be counted: {before} -> {after}"
+        );
+        assert_eq!(store.estimated_retained_bytes(), after);
+    }
+
+    #[test]
+    fn readonly_owned_memory_counts_lookup_arrays_and_tombstones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        {
+            let mut store =
+                VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+            for key in 0..128 {
+                store
+                    .upsert(key, vec![1.0, key as f32 / 128.0, 0.0, 0.0])
+                    .unwrap();
+            }
+            for key in 0..64 {
+                store.index.remove(key).unwrap();
+            }
+            store.save().unwrap();
+        }
+        let mut store =
+            VectorStore::open_readonly(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+        assert_eq!(store.size(), 64);
+        assert_eq!(store.index.capacity(), 128);
+        let legacy = store.index.memory_usage();
+        // Every physical slot has a vector pointer, each live key has a key/slot
+        // entry, and each deleted slot remains in the free-slot ring.
+        let omitted_minimum = 128 * std::mem::size_of::<usize>() + 64 * (8 + 4) + 64 * 4;
+        assert!(store.index.owned_memory_usage() >= legacy + omitted_minimum);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn readonly_retained_bytes_includes_owned_serialized_buffer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+        store.upsert(7, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.save().unwrap();
+        let mut readonly =
+            VectorStore::open_readonly(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
+        let native = readonly.index.owned_memory_usage();
+        assert_eq!(
+            readonly.estimated_retained_bytes(),
+            native + fs::metadata(&path).unwrap().len() as usize
+        );
     }
 
     #[test]

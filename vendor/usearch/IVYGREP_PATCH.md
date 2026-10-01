@@ -20,6 +20,15 @@ This metadata path does not validate full vector or node payload integrity.
 Search and deep health checks still open the native store. The serialized
 USearch format is unchanged.
 
+The Rust/CXX bridge exposes `owned_memory_usage` with exclusive Rust access.
+It counts native lookup arrays, hash-table capacity, tombstone slots, conversion
+buffers, and retained per-thread search scratch. File mappings are excluded;
+ivygrep charges its owned Windows backing buffer separately. Idle search-reader
+pooling uses this count after each lease, keeping its existing byte budget while
+allowing large Unix file-backed views to remain open. Exclusive access prevents
+accounting from racing a search that resizes scratch buffers. The existing
+`memory_usage` API is unchanged.
+
 On AArch64 GCC/Clang builds, half-to-single conversion uses the compiler's
 `__fp16` conversion instead of the software bit-manipulation path. This does not
 enable optional FP16 arithmetic or change the stored representation. ivygrep's

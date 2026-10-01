@@ -513,6 +513,7 @@ template <typename allocator_at = std::allocator<byte_t>> class bitset_gt {
     ~bitset_gt() noexcept { reset(); }
 
     explicit operator bool() const noexcept { return slots_; }
+    std::size_t allocated_bytes() const noexcept { return count_ * sizeof(compressed_slot_t); }
     void clear() noexcept {
         if (slots_)
             std::memset(slots_, 0, count_ * sizeof(compressed_slot_t));
@@ -1106,6 +1107,7 @@ class growing_hash_set_gt {
 
     explicit operator bool() const noexcept { return slots_; }
     std::size_t size() const noexcept { return count_; }
+    std::size_t allocated_bytes() const noexcept { return capacity_ * sizeof(element_t); }
 
     void clear() noexcept {
         if (slots_)
@@ -3253,6 +3255,18 @@ class index_gt {
     }
 
     std::size_t memory_usage_per_node(level_t level) const noexcept { return node_bytes_(level); }
+
+    /** @brief Owned allocations, including retained search scratch. No operations may be in flight. */
+    std::size_t owned_memory_usage() const noexcept {
+        std::size_t total = memory_usage(0) + nodes_mutexes_.allocated_bytes();
+        for (std::size_t i = 0; i != contexts_.size(); ++i) {
+            context_t const& context = contexts_[i];
+            total += (context.top_candidates.capacity() + context.top_for_refine.capacity() +
+                      context.next_candidates.capacity()) * sizeof(candidate_t);
+            total += context.visits.allocated_bytes();
+        }
+        return total;
+    }
 
     double inverse_log_connectivity() const { return pre_.inverse_log_connectivity; }
 
