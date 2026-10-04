@@ -11,8 +11,8 @@
     "@playwright/test": "1.63.0",
     "@types/markdown-it": "^14.2.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.0",
-    "vitest": "^5.0.1"
+    "vite": "^8.3.1",
+    "vitest": "^5.0.3"
   },
   "dependencies": {
     "highlight.js": "^11.12.0",
