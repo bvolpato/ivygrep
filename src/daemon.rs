@@ -731,6 +731,22 @@ struct SearchContextPool {
     idle_context_bytes: Arc<AtomicUsize>,
 }
 
+fn update_atomic_usize<F>(counter: &AtomicUsize, mut update: F) -> Result<usize, usize>
+where
+    F: FnMut(usize) -> Option<usize>,
+{
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = update(current) else {
+            return Err(current);
+        };
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(previous) => return Ok(previous),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 impl SearchContextPool {
     fn take_idle(&self) -> Option<SearchContext> {
         let context = self.idle.lock().pop();
@@ -747,23 +763,19 @@ impl SearchContextPool {
             return;
         }
         let bytes = context.estimated_retained_bytes();
-        if self
-            .idle_context_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |retained| {
-                retained
-                    .checked_add(bytes)
-                    .filter(|total| *total <= MAX_IDLE_SEARCH_CONTEXT_BYTES)
-            })
-            .is_err()
+        if update_atomic_usize(&self.idle_context_bytes, |retained| {
+            retained
+                .checked_add(bytes)
+                .filter(|total| *total <= MAX_IDLE_SEARCH_CONTEXT_BYTES)
+        })
+        .is_err()
         {
             return;
         }
-        if self
-            .idle_context_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                (count < MAX_IDLE_SEARCH_CONTEXTS).then_some(count + 1)
-            })
-            .is_ok()
+        if update_atomic_usize(&self.idle_context_count, |count| {
+            (count < MAX_IDLE_SEARCH_CONTEXTS).then_some(count + 1)
+        })
+        .is_ok()
         {
             idle.push((context, bytes));
         } else {
