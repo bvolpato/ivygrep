@@ -10,7 +10,10 @@ use tracing_subscriber::EnvFilter;
 use crate::config;
 use crate::daemon;
 use crate::embedding::create_model;
-use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
+use crate::indexer::{
+    index_workspace, remove_workspace_index, workspace_index_matches_skip_gitignore,
+    workspace_is_indexed,
+};
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
 use crate::path_glob::parse_glob_csv;
@@ -127,6 +130,10 @@ pub struct Cli {
     /// Rebuild workspace index from scratch when used with --add.
     #[arg(short, long)]
     pub force: bool,
+
+    /// Index a home directory or filesystem root without asking first.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 
     /// Launch the interactive terminal UI.
     #[arg(long = "interactive", visible_alias = "ui")]
@@ -311,6 +318,10 @@ pub struct ContextArgs {
     /// Use lightweight hash-based embeddings.
     #[arg(long, conflicts_with = "lexical_only")]
     pub hash: bool,
+
+    /// Index a home directory or filesystem root without asking first.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -343,6 +354,7 @@ fn apply_context_args(cli: &mut Cli, args: &ContextArgs) {
     cli.verbose |= args.verbose;
     cli.skip_gitignore |= args.skip_gitignore;
     cli.hash |= args.hash;
+    cli.yes |= args.yes;
 }
 
 fn normalize_glob_args(cli: &mut Cli) {
@@ -556,6 +568,7 @@ pub async fn run() -> Result<()> {
     }
 
     if let Some(path) = &cli.add_path {
+        confirm_broad_add(path, cli.force, cli.skip_gitignore, cli.yes)?;
         return run_add(
             path,
             !cli.no_watch,
@@ -1484,6 +1497,15 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
     } else {
         cli.limit
     };
+
+    if matches!(
+        initial_index_state,
+        Some(WorkspaceIndexState::NotIndexed | WorkspaceIndexState::Unhealthy)
+    ) || (!cli.all_indices && adds_ignored_files(&workspace, cli.skip_gitignore))
+    {
+        // This query is about to build an index.
+        confirm_broad_index(&workspace.root, cli.yes)?;
+    }
 
     if !cli.all_indices {
         let first_run = matches!(initial_index_state, Some(WorkspaceIndexState::NotIndexed));
@@ -2677,6 +2699,109 @@ fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A workspace root that covers much more than one project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BroadRoot {
+    FilesystemRoot,
+    HomeDirectory,
+    ContainsHomeDirectory,
+}
+
+impl BroadRoot {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::FilesystemRoot => "the filesystem root",
+            Self::HomeDirectory => "your home directory",
+            Self::ContainsHomeDirectory => "a directory that contains your home directory",
+        }
+    }
+}
+
+fn broad_root(root: &Path, home: Option<&Path>) -> Option<BroadRoot> {
+    if root.parent().is_none() {
+        return Some(BroadRoot::FilesystemRoot);
+    }
+    let home = home?;
+    if root == home {
+        Some(BroadRoot::HomeDirectory)
+    } else if home.starts_with(root) {
+        Some(BroadRoot::ContainsHomeDirectory)
+    } else {
+        None
+    }
+}
+
+fn current_broad_root(root: &Path) -> Option<BroadRoot> {
+    // Workspace roots are canonical, so compare with the canonical home.
+    let home = dirs::home_dir().map(|home| config::canonicalize_lossy(&home).unwrap_or(home));
+    broad_root(root, home.as_deref())
+}
+
+fn is_affirmative(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// An index of a home directory or of the filesystem root is rarely intended,
+/// and it can take hours and many gigabytes. Ask before building one. When no
+/// terminal can answer, build it only with `--yes`.
+pub(crate) fn confirm_broad_index(root: &Path, assume_yes: bool) -> Result<()> {
+    let Some(broad) = current_broad_root(root) else {
+        return Ok(());
+    };
+    if assume_yes {
+        return Ok(());
+    }
+    let advice = "Run ig in a project directory, or pass a project PATH";
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        bail!(
+            "did not index {}: it is {}. {advice}. Pass --yes to index it.",
+            root.display(),
+            broad.describe()
+        );
+    }
+
+    eprintln!(
+        "{} {} is {}. An index of it can take a long time and much disk space.",
+        "⟐".bold(),
+        root.display().to_string().bold(),
+        broad.describe()
+    );
+    eprint!("  Index it anyway? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !is_affirmative(&answer) {
+        bail!("did not index {}. {advice}.", root.display());
+    }
+    Ok(())
+}
+
+/// Whether `--skip-gitignore` makes this command index the ignored files of a
+/// workspace whose index does not have them yet.
+fn adds_ignored_files(workspace: &Workspace, skip_gitignore: bool) -> bool {
+    skip_gitignore && !workspace_index_matches_skip_gitignore(workspace, true)
+}
+
+/// `--add` builds an index unless a current one exists. `--force` always
+/// rebuilds it, and `--skip-gitignore` can add the ignored files to it.
+fn confirm_broad_add(
+    path: &Path,
+    force: bool,
+    skip_gitignore: bool,
+    assume_yes: bool,
+) -> Result<()> {
+    let root = crate::workspace::detect_workspace_root(path)?;
+    if current_broad_root(&root).is_none() {
+        return Ok(());
+    }
+    let workspace = Workspace::resolve(&root)?;
+    if !force && workspace_is_indexed(&workspace) && !adds_ignored_files(&workspace, skip_gitignore)
+    {
+        return Ok(());
+    }
+    confirm_broad_index(&root, assume_yes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2687,6 +2812,36 @@ mod tests {
     use crate::embedding::create_hash_model;
     use crate::indexer::index_workspace;
     use crate::workspace::{WorkspaceMetadata, WorkspaceScope};
+
+    #[test]
+    fn broad_root_is_the_filesystem_root_the_home_directory_or_an_ancestor_of_it() {
+        let home = Some(Path::new("/home/user"));
+        let broad = |root: &str| broad_root(Path::new(root), home);
+
+        assert_eq!(broad("/"), Some(BroadRoot::FilesystemRoot));
+        assert_eq!(broad("/home/user"), Some(BroadRoot::HomeDirectory));
+        assert_eq!(broad("/home"), Some(BroadRoot::ContainsHomeDirectory));
+        // A project below the home directory, or outside it, is not broad.
+        assert_eq!(broad("/home/user/project"), None);
+        assert_eq!(broad("/home/other"), None);
+        assert_eq!(broad("/srv/code"), None);
+        // The filesystem root needs no known home directory.
+        assert_eq!(
+            broad_root(Path::new("/"), None),
+            Some(BroadRoot::FilesystemRoot)
+        );
+        assert_eq!(broad_root(Path::new("/home/user"), None), None);
+    }
+
+    #[test]
+    fn only_y_or_yes_confirms() {
+        for answer in ["y\n", "Y", " yes \r\n", "YES"] {
+            assert!(is_affirmative(answer), "{answer:?}");
+        }
+        for answer in ["", "\n", "n", "no", "yep", "y es"] {
+            assert!(!is_affirmative(answer), "{answer:?}");
+        }
+    }
 
     #[test]
     fn context_inherits_parent_lexical_only_flag() {
