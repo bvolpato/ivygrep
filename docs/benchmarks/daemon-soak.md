@@ -5,8 +5,9 @@ python3 scripts/soak_daemon.py --binary target/release/ig --repo . \
   --duration 1800 --restarts 2 --output benchmark-results/daemon-soak.json
 ```
 
-This Linux-only check copies the corpus into a temporary repository, prepares hash
-vectors, and issues concurrent requests over the real daemon protocol. There is
+This check runs on Linux and macOS. It copies the corpus into a temporary
+repository, prepares hash vectors, and issues concurrent requests over the real
+daemon protocol. There is
 no CLI search fallback. It verifies exact indexed probe revisions, deletion and
 recreation, then repeats after offline changes and process restarts. A stable
 probe query also exercises result-cache invalidation.
@@ -47,8 +48,8 @@ The daemon soak above drives one workspace over raw daemon RPC. Coding agents
 use ivygrep differently: every Claude Code or Codex session starts its own
 `ig --mcp` process, all of them share one auto-spawned daemon, and agent
 worktrees under `<repo>/.claude/worktrees/` come and go all day. This
-Linux-only harness starts real `ig --mcp` processes in an isolated
-`IVYGREP_HOME` and runs up to six phases:
+harness runs on Linux and macOS. It starts real `ig --mcp` processes in an
+isolated `IVYGREP_HOME` and runs up to six phases:
 
 - **stampede**: N sessions start at once with no daemon. Every session must get
   search results, exactly one daemon may remain, and `daemon.pid` must name it.
@@ -59,8 +60,8 @@ Linux-only harness starts real `ig --mcp` processes in an isolated
 - **load**: N concurrent sessions issue hybrid searches with short and long
   queries, literal, regex, and symbol searches, context packs, and `ig_status`
   against several workspaces. One query in three is unique, so the 128-entry
-  query cache keeps evicting. The daemon and every session are sampled from
-  `/proc/<pid>/smaps_rollup`, `status`, `fd`, and `fdinfo`. The daemon soak's
+  query cache keeps evicting. On Linux the daemon and every session are sampled
+  from `/proc/<pid>/smaps_rollup`, `status`, `fd`, and `fdinfo`. The daemon soak's
   gate (first and last quarter medians after 20% warmup) applies to the daemon
   with the same budgets, plus one descriptor and one thread per client (at most
   16 threads: the blocking pool follows the requests in flight) and 16 inotify
@@ -287,8 +288,9 @@ What this says:
   above. One arena per core costs about 10% of the calls at unchanged median
   latency, lowers memory under load by about a fifth, and halves the growth of
   the idle daemon; two or four arenas cost far more (above).
-- The macOS allocator was not measured: the harness reads `/proc`, and no macOS
-  host was available. Nothing here says how a macOS daemon behaves.
+- The macOS allocator was not measured: when these runs were made the harness
+  read only `/proc`, and no macOS host was available. Nothing here says how a
+  macOS daemon behaves.
 
 An explicit allocator is the obvious next question, so one was tried, outside
 this series: the same tree with mimalloc as the global allocator, against the
@@ -466,6 +468,33 @@ host above 2.0 load per core.
 These runs bound what was observed. Two or three hours do not prove a week: the
 supported claim is the slope and interval above at that load, not the absence
 of slower growth.
+
+## Sampling on macOS
+
+On macOS both harnesses read process counters through libproc
+(`scripts/macos_process.py`) instead of `/proc`. The workload, gates, and
+budgets are the same. Some quantities differ:
+
+- Anonymous RSS is the physical footprint (`ri_phys_footprint`). It counts dirty
+  and compressed memory. Linux reports resident anonymous pages only.
+- Total RSS is `ri_resident_size`. Samples have no file-backed RSS and no PSS.
+- Threads and descriptors come from `proc_pidinfo`.
+- File watchers use FSEvents, which holds no descriptors. Samples have no
+  watcher counts, and the load and churn gates skip the inotify budgets. The
+  idle phase cannot confirm that every workspace is watched and reports
+  `watchers_verified: false`.
+- Idle wakeups are the wakeup counters of the whole process, not the voluntary
+  context switches of each thread.
+- `MALLOC_ARENA_MAX` is a glibc setting. On macOS the MCP session soak always
+  runs as `--malloc-arenas default`: the load phase reports the daemon's memory
+  and does not gate it. The load phase still applies the 16 MiB budget to the
+  largest session. The lifecycle and churn phases and the daemon soak still
+  apply the anonymous-memory budget to the footprint. Whether these budgets
+  suit the macOS allocator is not established.
+
+Each macOS report has a `resource_sampling` entry that states these
+derivations, and its `cpu_affinity` is `null`. Every measured run in this
+document is a Linux run.
 
 ## Linux ARM64 acceptance run
 

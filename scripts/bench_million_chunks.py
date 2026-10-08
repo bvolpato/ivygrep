@@ -18,9 +18,13 @@ import signal
 import socket
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+
+if sys.platform == "darwin":
+    import macos_process
 
 
 SCHEMA_VERSION = 1
@@ -84,6 +88,7 @@ def runtime_metadata() -> dict:
         ),
         "python": platform.python_version(),
         "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+        **({"resource_sampling": macos_process.METRICS} if sys.platform == "darwin" else {}),
     }
 
 
@@ -185,7 +190,9 @@ def timed(
     env: dict[str, str],
     monitor_path: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict]:
-    """Time child completion independently of sampled Linux resource estimates.
+    """Time child completion independently of sampled resource estimates.
+
+    Samples come from Linux `/proc` or macOS libproc. Other systems record none.
 
     A zero resource_samples count means the child exited before a complete
     sample was available, not that it consumed no CPU or memory.
@@ -218,25 +225,32 @@ def timed(
             try:
                 while not finished.is_set():
                     try:
-                        status = Path(f"/proc/{process.pid}/status").read_text()
-                        for line in status.splitlines():
-                            if line.startswith("VmRSS:"):
-                                peak_rss_bytes = max(
-                                    peak_rss_bytes, int(line.split()[1]) * 1024
-                                )
-                                break
-                        io = Path(f"/proc/{process.pid}/io").read_text()
-                        counters = {
-                            line.split(":", 1)[0]: int(line.split(":", 1)[1])
-                            for line in io.splitlines()
-                        }
-                        read_bytes = max(read_bytes, counters.get("read_bytes", 0))
-                        write_bytes = max(write_bytes, counters.get("write_bytes", 0))
-                        # comm may contain spaces or closing parentheses.
-                        stat = Path(f"/proc/{process.pid}/stat").read_text().rpartition(")")[2].split()
-                        cpu_seconds = max(
-                            cpu_seconds, (int(stat[11]) + int(stat[12])) / clock_ticks
-                        )
+                        if sys.platform == "darwin":
+                            info = macos_process.usage(process.pid)
+                            peak_rss_bytes = max(peak_rss_bytes, info.ri_resident_size)
+                            read_bytes = max(read_bytes, info.ri_diskio_bytesread)
+                            write_bytes = max(write_bytes, info.ri_diskio_byteswritten)
+                            cpu_seconds = max(cpu_seconds, macos_process.cpu_seconds(info))
+                        else:
+                            status = Path(f"/proc/{process.pid}/status").read_text()
+                            for line in status.splitlines():
+                                if line.startswith("VmRSS:"):
+                                    peak_rss_bytes = max(
+                                        peak_rss_bytes, int(line.split()[1]) * 1024
+                                    )
+                                    break
+                            io = Path(f"/proc/{process.pid}/io").read_text()
+                            counters = {
+                                line.split(":", 1)[0]: int(line.split(":", 1)[1])
+                                for line in io.splitlines()
+                            }
+                            read_bytes = max(read_bytes, counters.get("read_bytes", 0))
+                            write_bytes = max(write_bytes, counters.get("write_bytes", 0))
+                            # comm may contain spaces or closing parentheses.
+                            stat = Path(f"/proc/{process.pid}/stat").read_text().rpartition(")")[2].split()
+                            cpu_seconds = max(
+                                cpu_seconds, (int(stat[11]) + int(stat[12])) / clock_ticks
+                            )
                         resource_samples += 1
                     except (FileNotFoundError, ProcessLookupError):
                         pass  # The child may exit between individual /proc reads.

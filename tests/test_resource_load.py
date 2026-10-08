@@ -19,7 +19,7 @@ import bench_resource_load as benchmark
 import render_resource_load as renderer
 
 
-@unittest.skipUnless(sys.platform == "linux", "wait4 resource units require Linux")
+@unittest.skipUnless(sys.platform in ("linux", "darwin"), "wait4 resource units require Linux or macOS")
 class ChildResourceTests(unittest.TestCase):
     def test_empty_background_series_reports_zero_completions(self):
         summary = benchmark.latency_summary([])

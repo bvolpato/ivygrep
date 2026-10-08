@@ -20,12 +20,16 @@ import shutil
 import signal
 import statistics
 import subprocess
+import sys
 import tarfile
 import threading
 import time
 
 from bench_million_chunks import DaemonClient, binary_identity, directory_size, percentile, sha256_file, start_daemon, stop_daemon
 from soak_mcp_sessions import McpClient
+
+if sys.platform == "darwin":
+    import macos_process
 
 QUERIES = (
     "how are workspace index updates published",
@@ -50,6 +54,10 @@ def latency_summary(values: list[float]) -> dict:
 
 
 def proc_sample(pid: int) -> dict:
+    if sys.platform == "darwin":
+        info = macos_process.usage(pid)
+        return {"rss_bytes": info.ri_resident_size, "cpu_ms": macos_process.cpu_seconds(info) * 1000,
+                "write_bytes": info.ri_diskio_byteswritten, "threads": macos_process.threads(pid)}
     proc = Path("/proc") / str(pid)
     status = dict(line.split(":", 1) for line in (proc / "status").read_text().splitlines() if ":" in line)
     stat = (proc / "stat").read_text().rsplit(")", 1)[1].split()
@@ -66,7 +74,15 @@ def measured_command(command: list[str], cwd: Path, env: dict, log: Path) -> dic
         try:
             # wait4 reports this child only. RUSAGE_CHILDREN accumulates earlier runs.
             deadline = time.monotonic() + 600
+            written = 0
             while True:
+                if sys.platform == "darwin":
+                    # wait4 reports no block writes on APFS. The kernel keeps the I/O counters of an
+                    # exited child until wait4 reaps it, so the last reading is normally the final total.
+                    try:
+                        written = macos_process.usage(process.pid).ri_diskio_byteswritten
+                    except ProcessLookupError:
+                        pass
                 pid, status, usage = os.wait4(process.pid, os.WNOHANG)
                 if pid:
                     process.returncode = os.waitstatus_to_exitcode(status)
@@ -77,9 +93,10 @@ def measured_command(command: list[str], cwd: Path, env: dict, log: Path) -> dic
             if process.returncode != 0:
                 raise RuntimeError(f"benchmark command exited with {process.returncode}. See {log.name}.")
             return {"elapsed_ms": (time.perf_counter() - started) * 1000,
-                    "peak_rss_bytes": usage.ru_maxrss * 1024,
+                    # ru_maxrss is in bytes on macOS and in KiB on Linux.
+                    "peak_rss_bytes": usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024),
                     "cpu_ms": (usage.ru_utime + usage.ru_stime) * 1000,
-                    "filesystem_write_bytes": usage.ru_oublock * 512}
+                    "filesystem_write_bytes": written if sys.platform == "darwin" else usage.ru_oublock * 512}
         finally:
             if process.returncode is None:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -259,8 +276,8 @@ def main() -> None:
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if platform.system() != "Linux":
-        parser.error("resource measurements require Linux /proc and wait4")
+    if sys.platform not in ("linux", "darwin"):
+        parser.error("resource measurements require Linux /proc or macOS libproc, and wait4")
     if args.runs < 1 or args.clients < 1 or args.samples < args.clients or args.idle_seconds < 0:
         parser.error("use positive runs and clients, samples >= clients, and a nonnegative idle interval")
     if args.samples % args.clients:
@@ -286,6 +303,8 @@ def main() -> None:
                                          "Concurrent MCP calls include one background indexing loop.",
                                          "Load RSS is sampled. Phase peak RSS uses per-child wait4.",
                                          "This corpus has no relevance labels."]}, "runs": []}
+    if sys.platform == "darwin":
+        report["resource_sampling"] = macos_process.METRICS
     profiles = args.profiles.split(",")
     if any(profile not in PROFILES for profile in profiles):
         parser.error("profiles must be static-retrieval-v1 or potion-code-16m-v2")

@@ -43,7 +43,10 @@ import threading
 import time
 from typing import Any, Callable
 
-from soak_daemon import copy_repo, percentile, resource_budgets, resource_gate, run, sha256_file
+from soak_daemon import copy_repo, cpu_affinity, percentile, resource_budgets, resource_gate, run, sha256_file
+
+if sys.platform == "darwin":
+    import macos_process
 
 
 MIB = 1024 * 1024
@@ -89,7 +92,7 @@ MODES = {
 
 
 # --------------------------------------------------------------------------------------
-# /proc sampling
+# /proc sampling. On macOS the same functions read libproc. See `macos_process.METRICS`.
 
 
 def parse_smaps_rollup(text: str) -> dict[str, int]:
@@ -109,7 +112,15 @@ def inotify_watch_count(fdinfo: str) -> int:
 
 
 def process_sample(pid: int) -> dict[str, int]:
-    """One resource sample. A missing process raises; it never reads as zero."""
+    """One resource sample. A missing process raises; it never reads as zero.
+
+    A macOS sample has no PSS and no watcher counts, and the gates skip them.
+    """
+    if sys.platform == "darwin":
+        sample = macos_process.memory_sample(pid)
+        if min(sample["rss_bytes"], sample["threads"], sample["fds"]) <= 0:
+            raise RuntimeError(f"invalid process sample: {sample}")
+        return sample
     proc = Path("/proc") / str(pid)
     sample = parse_smaps_rollup((proc / "smaps_rollup").read_text())
     status = dict(line.split(":", 1) for line in (proc / "status").read_text().splitlines() if ":" in line)
@@ -131,13 +142,19 @@ def process_sample(pid: int) -> dict[str, int]:
 
 def cpu_ticks(pid: int) -> int:
     """User plus system CPU ticks a process has used, from `/proc/<pid>/stat`."""
+    if sys.platform == "darwin":
+        return int(macos_process.cpu_seconds(macos_process.usage(pid)) * os.sysconf("SC_CLK_TCK"))
     fields = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
     return int(fields[11]) + int(fields[12])
 
 
 def context_switches(pid: int) -> dict[int, int]:
     """Voluntary context switches of every thread of a process, by thread id: how often a thread
-    woke up and went back to sleep. Involuntary switches are preemptions by a busy host, not wakeups."""
+    woke up and went back to sleep. Involuntary switches are preemptions by a busy host, not wakeups.
+    macOS reports one wakeup count for the whole process, under thread id 0."""
+    if sys.platform == "darwin":
+        info = macos_process.usage(pid)
+        return {0: info.ri_pkg_idle_wkups + info.ri_interrupt_wkups}
     switches = {}
     for task in (Path("/proc") / str(pid) / "task").iterdir():
         try:
@@ -158,6 +175,8 @@ def wakeups(before: dict[int, int], after: dict[int, int]) -> int:
 def owned_processes(home: Path) -> list[dict[str, Any]]:
     """Processes whose environment names this soak's `IVYGREP_HOME`. Nothing else is ever signalled."""
     needle = f"IVYGREP_HOME={home}".encode()
+    if sys.platform == "darwin":
+        return macos_process.processes_with_environment(needle)
     found = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -309,6 +328,8 @@ def summarize_sessions(samples: list[dict[str, int]]) -> dict[str, int]:
         raise RuntimeError("no MCP session could be sampled")
     summary = {"sessions": len(samples)}
     for resource in ("rss_bytes", "pss_bytes", "rss_anon_bytes", "fds", "threads"):
+        if resource not in samples[0]:
+            continue  # macOS has no PSS
         values = [sample[resource] for sample in samples]
         summary[f"total_{resource}"] = sum(values)
         summary[resource] = max(values)
@@ -812,7 +833,8 @@ class Soak:
                                    fd_growth=self.args.fd_growth + clients,
                                    # The blocking pool grows and shrinks with the requests in flight.
                                    thread_growth=self.args.thread_growth + min(clients, 16))
-        budgets["inotify_watches"] = self.args.inotify_watch_growth
+        if "inotify_watches" in samples[0]:
+            budgets["inotify_watches"] = self.args.inotify_watch_growth
         session_limits = session_budgets(rss_growth_mib=self.args.session_rss_growth_mib, fd_growth=4, thread_growth=2)
         daemon_gate, session_gate = resource_gate(samples, budgets), resource_gate(session_samples, session_limits)
         if self.args.malloc_arenas == "default" or (settled_gate and self.args.settle_every):
@@ -888,11 +910,13 @@ class Soak:
         session.close()
         time.sleep(self.args.churn_settle)
         settled = self.daemon_sample(sizes=True)
-        gate = churn_gate(baseline, settled, {
+        budgets = {
             "rss_anon_bytes": int(self.args.rss_growth_mib * MIB), "fds": self.args.fd_growth,
             "threads": self.args.thread_growth, "inotify_watches": self.args.inotify_watch_growth,
             "inotify_instances": 0, "index_dirs": self.args.index_dir_growth,
-            "orphan_index_dirs": self.args.index_dir_growth})
+            "orphan_index_dirs": self.args.index_dir_growth}
+        # A macOS sample has no watcher counts. Threads and descriptors still show a watcher that stays.
+        gate = churn_gate(baseline, settled, {name: budget for name, budget in budgets.items() if name in settled})
         return {"worktrees": count, "warmup_worktrees": warmup, "seconds": time.monotonic() - started,
                 "checkpoints": records, "settled": settled, "stale_edits": stale[:10],
                 "base_results_from_nested_worktrees": duplicates, "gate": gate,
@@ -915,11 +939,13 @@ class Soak:
         cpu_percent = (cpu_ticks(pid) - ticks) / os.sysconf("SC_CLK_TCK") / elapsed * 100
         switches_per_second = wakeups(switches, context_switches(pid)) / elapsed
         sample = self.daemon_sample(sizes=True)
+        # Without watcher counts (macOS) the phase cannot confirm that every workspace is watched.
+        watchers = sample.get("inotify_instances")
         return {"watched_workspaces": len(workspaces), "seconds": elapsed, "cpu_percent_of_one_core": cpu_percent,
                 "wakeups_per_second": switches_per_second, "daemon": sample,
-                "cpu_budget_percent": self.args.idle_cpu_percent,
+                "cpu_budget_percent": self.args.idle_cpu_percent, "watchers_verified": watchers is not None,
                 "passed": cpu_percent <= self.args.idle_cpu_percent
-                and sample["inotify_instances"] >= len(workspaces)}
+                and (watchers is None or watchers >= len(workspaces))}
 
     # -- background work storm ---------------------------------------------------------
 
@@ -1210,7 +1236,8 @@ def main() -> None:
                              "per-thread arenas: 64 sessions drifted 38 MiB in two hours with no leak, which no "
                              "growth budget can tell from one. With two arenas anonymous RSS follows the memory "
                              "in use, so the same budgets catch a real leak. It costs throughput, so production "
-                             "numbers need `default`.")
+                             "numbers need `default`. macOS has no such setting: there the value is always "
+                             "`default`.")
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
                         help="variable for every session and, through the session that spawns it, the daemon; "
                              "the caller's own IVYGREP_* variables never reach them")
@@ -1224,8 +1251,12 @@ def main() -> None:
     for name, value in MODES[args.mode].items():
         if getattr(args, name) is None:
             setattr(args, name, value)
-    if not Path("/proc/self/smaps_rollup").is_file():
-        parser.error("the MCP session soak requires Linux /proc")
+    if sys.platform == "darwin":
+        # MALLOC_ARENA_MAX is a glibc setting. Without it the load phase reports the daemon's memory and does
+        # not gate it. The memory budget of the largest session still applies.
+        args.malloc_arenas = "default"
+    elif not Path("/proc/self/smaps_rollup").is_file():
+        parser.error("the MCP session soak requires Linux /proc or macOS libproc")
     phases = [phase for phase in args.phases.split(",") if phase]
     if unknown := set(phases) - set(PHASES):
         parser.error(f"unknown phases: {sorted(unknown)}")
@@ -1259,7 +1290,7 @@ def main() -> None:
         env[key] = value
     report: dict[str, Any] = {
         "schema_version": 1, "generated_at": datetime.now(timezone.utc).isoformat(), "mode": args.mode,
-        "platform": platform.platform(), "machine": platform.machine(), "cpu_affinity": sorted(os.sched_getaffinity(0)),
+        "platform": platform.platform(), "machine": platform.machine(), "cpu_affinity": cpu_affinity(),
         "binary_sha256": sha256_file(args.binary),
         "binary_version": run([str(args.binary), "--version"], source, env).strip(),
         "source_commit": run(["git", "rev-parse", "HEAD"], source, env).strip(),
@@ -1272,6 +1303,8 @@ def main() -> None:
                                                           "load_settle", "settle_every", "calls")},
         "passed": False,
     }
+    if sys.platform == "darwin":
+        report["resource_sampling"] = macos_process.METRICS
     args.output.parent.mkdir(parents=True, exist_ok=True)
     failure: BaseException | None = None
     started = time.monotonic()
