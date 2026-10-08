@@ -872,6 +872,65 @@ async fn cli_gc_is_made_by_the_running_daemon() {
     assert!(logged, "the daemon must have made the pass");
 }
 
+/// A first search asks the running daemon to build the index. The CLI must
+/// refuse a directory that contains an indexed workspace before it sends that
+/// request, as it does without a daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn cli_first_search_through_the_daemon_refuses_a_parent_of_an_indexed_workspace() {
+    let home = tempdir().unwrap();
+    isolate_home(home.path());
+    if bind_for_test().await.is_none() {
+        return;
+    }
+    ivygrep::ipc::cleanup_socket();
+    let tmp = tempdir().unwrap();
+    let parent = ivygrep::config::canonicalize_lossy(tmp.path())
+        .unwrap()
+        .join("parent");
+    let sub = parent.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("a.rs"), "pub fn greeting() {}\n").unwrap();
+    fs::write(parent.join("b.rs"), "pub fn greeting_parent() {}\n").unwrap();
+
+    let _daemon = spawn_real_daemon(home.path()).await;
+    let indexed = roundtrip(&DaemonRequest::Index {
+        path: sub.clone(),
+        watch: false,
+        skip_gitignore: false,
+    })
+    .await;
+    assert!(matches!(indexed, DaemonResponse::Ack { .. }), "{indexed:?}");
+
+    let (cli_home, cli_parent) = (home.path().to_path_buf(), parent.clone());
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_ig"))
+            .args(["--hash", "--no-watch", "greeting"])
+            .arg(cli_parent)
+            .env("IVYGREP_HOME", cli_home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the search must fail: {stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "Cannot index '{}' because it contains already indexed sub-workspaces:\n  - {}",
+            parent.display(),
+            sub.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(
+        ivygrep::workspace::list_workspace_roots().unwrap(),
+        vec![sub],
+        "the parent must not be registered"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn cli_gc_stops_a_daemon_that_predates_the_request_and_collects_in_process() {
