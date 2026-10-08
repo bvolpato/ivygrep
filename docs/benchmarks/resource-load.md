@@ -97,6 +97,9 @@ If you do not enable diagnostics, unset `RUST_LOG` before the run.
 The JSON contains raw latencies, per-phase resource measurements, corpus identity, binary identity, and harness hashes.
 `wait4` records RSS and CPU for each child separately. Earlier child processes do not inflate later peak RSS values.
 On Linux, filesystem-write counters measure block I/O. Writes to a memory-backed filesystem can report zero block I/O.
+The runner also works on macOS, where it reads live processes through libproc (`scripts/macos_process.py`).
+On macOS, `wait4` reports no block writes on APFS. The runner reads the disk-write counter of each child immediately before `wait4` reaps it.
+A macOS report has a `resource_sampling` entry that states each derivation. The published reports are Linux runs.
 Load RSS is sampled every 20 ms. Idle RSS is the median during a three-second pause after the clients exit.
 Load resource totals describe the daemon and exclude MCP client processes.
 Enhancement resource totals describe the invoked CLI process.

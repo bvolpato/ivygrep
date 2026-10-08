@@ -208,6 +208,17 @@ jobs:
           CARGO_FLAGS: ${{ matrix.cargo_flags }}
           RUSTFLAGS: ${{ matrix.rust_flags }}
 
+      - name: Install Python for macOS harness tests
+        if: matrix.name == 'macOS ARM (Hash-only)'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # The soak and benchmark harnesses sample processes through libproc on macOS.
+      - name: Test Python harnesses on macOS
+        if: matrix.name == 'macOS ARM (Hash-only)'
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
   build:
     name: Build release (${{ matrix.name }})
     runs-on: ${{ matrix.os }}

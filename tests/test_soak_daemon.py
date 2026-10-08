@@ -1,6 +1,9 @@
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -70,15 +73,35 @@ class DaemonSoakTest(unittest.TestCase):
         self.assertEqual(gate["metrics"]["rss_bytes"]["peak"], 1000)
 
     def test_missing_process_or_rpc_failure_cannot_pass_as_zero_activity(self):
+        child = subprocess.Popen([sys.executable, "-c", ""])
+        child.wait()
+        # Linux fails on the /proc read. macOS asks libproc about a process that no longer exists.
         with mock.patch.object(Path, "read_text", side_effect=FileNotFoundError):
-            with self.assertRaises(FileNotFoundError):
-                soak.process_sample(123)
+            with self.assertRaises((FileNotFoundError, ProcessLookupError)):
+                soak.process_sample(child.pid)
         with mock.patch.object(soak, "daemon_request", side_effect=ConnectionRefusedError):
             with self.assertRaises(ConnectionRefusedError):
                 soak.search(Path("home"), Path("repo"), "query")
         with mock.patch.object(soak, "daemon_request", return_value={"type": "status"}):
             with self.assertRaisesRegex(RuntimeError, "unexpected daemon search"):
                 soak.search(Path("home"), Path("repo"), "query")
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS libproc sampler")
+    def test_macos_sample_follows_descriptors_and_threads_of_a_live_process(self):
+        before = soak.process_sample(os.getpid())
+        self.assertEqual(set(before), {"rss_bytes", "rss_anon_bytes", "fds", "threads"})
+        release = threading.Event()
+        thread = threading.Thread(target=release.wait)
+        thread.start()
+        try:
+            with open(os.devnull, "rb"):
+                during = soak.process_sample(os.getpid())
+        finally:
+            release.set()
+            thread.join()
+        self.assertEqual(during["fds"], before["fds"] + 1)
+        self.assertEqual(during["threads"], before["threads"] + 1)
+        self.assertGreater(min(before["rss_bytes"], before["rss_anon_bytes"]), 1024 * 1024)
 
 
 if __name__ == "__main__":

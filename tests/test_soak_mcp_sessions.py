@@ -1,8 +1,10 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -50,9 +52,49 @@ class ProcSamplingTest(unittest.TestCase):
         self.assertEqual(soak.wakeups(before, before), 0)
 
     def test_missing_process_cannot_pass_as_a_zero_sample(self):
+        child = subprocess.Popen([sys.executable, "-c", ""])
+        child.wait()
+        # Linux fails on the /proc read. macOS asks libproc about a process that no longer exists.
         with mock.patch.object(Path, "read_text", side_effect=FileNotFoundError):
-            with self.assertRaises(FileNotFoundError):
-                soak.process_sample(123)
+            with self.assertRaises((FileNotFoundError, ProcessLookupError)):
+                soak.process_sample(child.pid)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS libproc sampler")
+    def test_macos_finds_only_live_processes_that_name_this_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            env = {**os.environ, "IVYGREP_HOME": str(home)}
+            child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()", "--mcp"],
+                                     env=env, stdin=subprocess.PIPE)
+            other = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()", "--mcp"],
+                                     env={**env, "IVYGREP_HOME": f"{home}-other"}, stdin=subprocess.PIPE)
+            try:
+                owned = soak.owned_processes(home)
+                self.assertEqual([process["pid"] for process in owned], [child.pid])
+                self.assertEqual(owned[0]["ppid"], os.getpid())
+                self.assertEqual(soak.classify_processes(owned)["mcp"], [child.pid])
+                self.assertGreater(soak.process_sample(child.pid)["rss_anon_bytes"], 0)
+                self.assertNotIn("pss_bytes", soak.process_sample(child.pid))
+            finally:
+                for process in (child, other):
+                    process.stdin.close()
+            # An exited process that nobody has reaped yet must not count as a live session.
+            deadline = soak.time.monotonic() + 10
+            while child.poll() is None and soak.time.monotonic() < deadline:
+                soak.time.sleep(0.05)
+            other.wait(timeout=10)
+            self.assertEqual(soak.owned_processes(home), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS libproc sampler")
+    def test_macos_cpu_ticks_and_wakeups_advance_with_work(self):
+        ticks, switches = soak.cpu_ticks(os.getpid()), soak.context_switches(os.getpid())
+        deadline = soak.time.process_time() + 0.3
+        while soak.time.process_time() < deadline:
+            pass
+        spent = (soak.cpu_ticks(os.getpid()) - ticks) / os.sysconf("SC_CLK_TCK")
+        self.assertGreater(spent, 0.2)
+        self.assertLess(spent, 2.0)
+        self.assertGreaterEqual(soak.wakeups(switches, soak.context_switches(os.getpid())), 0)
 
     def test_processes_are_classified_by_role_so_orphans_and_extra_daemons_show(self):
         kinds = soak.classify_processes([
@@ -183,6 +225,11 @@ class GateTest(unittest.TestCase):
         self.assertEqual((summary["rss_anon_bytes"], summary["threads"]), (74 * MIB, 44))
         with self.assertRaisesRegex(RuntimeError, "no MCP session"):
             soak.summarize_sessions([])
+        # A macOS sample has no PSS. The other resources are still summed and maxed.
+        without_pss = [{name: value for name, value in sample.items() if name != "pss_bytes"} for sample in (small, fat)]
+        summary = soak.summarize_sessions(without_pss)
+        self.assertEqual((summary["total_fds"], summary["rss_bytes"]), (18, 95 * MIB))
+        self.assertNotIn("pss_bytes", summary)
 
     def test_one_session_growing_fails_the_session_gate_even_when_the_rest_are_flat(self):
         budgets = soak.session_budgets(rss_growth_mib=16, fd_growth=4, thread_growth=2)

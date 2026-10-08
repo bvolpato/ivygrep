@@ -19,7 +19,9 @@ def load_script(name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    # Scripts import their siblings by name, as they do when run directly.
+    with mock.patch.object(sys, "path", [str(path.parent), *sys.path]):
+        spec.loader.exec_module(module)
     return module
 
 
@@ -175,7 +177,19 @@ class MillionBenchmarkTest(unittest.TestCase):
             _, metrics = benchmark.timed(["child"], ROOT, {})
         self.assertAlmostEqual(metrics["wall_ms"], 12.0)
 
-    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    @unittest.skipUnless(sys.platform == "darwin", "macOS resource sampler")
+    def test_macos_sampler_reports_memory_cpu_and_writes_of_a_real_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            child = ("import os, time; data = bytearray(64 * 1024 * 1024); "
+                     "f = open('data', 'wb'); f.write(b'x' * 1048576); f.flush(); os.fsync(f.fileno()); "
+                     "deadline = time.process_time() + 0.4\nwhile time.process_time() < deadline: pass")
+            _, metrics = benchmark.timed([sys.executable, "-c", child], Path(directory), {})
+        self.assertGreaterEqual(metrics["resource_samples"], 1)
+        self.assertGreater(metrics["peak_rss_bytes"], 64 * 1024 * 1024)
+        self.assertGreater(metrics["filesystem_write_bytes"], 0)
+        self.assertGreater(metrics["cpu_ms"], 100)
+
+    @unittest.skipUnless(sys.platform in ("linux", "darwin"), "resource sampler")
     def test_timing_preserves_child_failure_and_output(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:
             benchmark.timed(

@@ -20,12 +20,16 @@ from pathlib import Path
 import shutil
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from typing import Any
 
 from check_daemon_equivalence import daemon_request, start_daemon
+
+if sys.platform == "darwin":
+    import macos_process
 
 
 QUERIES = (
@@ -55,8 +59,19 @@ def percentile(values: list[float], percentile_value: int) -> float:
     return ordered[max(0, min(index, len(ordered) - 1))]
 
 
+def cpu_affinity() -> list[int] | None:
+    """CPUs this process may run on. macOS has no affinity sets."""
+    return sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
+
+
 def process_sample(pid: int) -> dict[str, int]:
     # Missing/inaccessible processes are failures, never reassuring zero samples.
+    if sys.platform == "darwin":
+        # No file-backed RSS here: the footprint counts compressed pages, so it can exceed the resident size.
+        sample = macos_process.memory_sample(pid)
+        if min(sample.values()) <= 0:
+            raise RuntimeError(f"invalid process sample: {sample}")
+        return sample
     proc = Path("/proc") / str(pid)
     status = (proc / "status").read_text()
     fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
@@ -160,8 +175,8 @@ def main() -> None:
     parser.add_argument("--thread-growth", type=int, default=4)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if not Path("/proc/self/status").is_file() or not hasattr(os, "killpg"):
-        parser.error("daemon soak requires Linux /proc and process groups")
+    if not (sys.platform == "darwin" or Path("/proc/self/status").is_file()) or not hasattr(os, "killpg"):
+        parser.error("daemon soak requires Linux /proc or macOS libproc, and process groups")
     numeric = (args.duration, args.mutation_interval, args.check_interval, args.cooldown, args.warmup,
                args.rss_growth_mib, args.total_rss_growth_mib)
     if not all(math.isfinite(value) for value in numeric):
@@ -177,7 +192,7 @@ def main() -> None:
     report: dict[str, Any] = {
         "schema_version": 3, "generated_at": datetime.now(timezone.utc).isoformat(),
         "platform": platform.platform(), "machine": platform.machine(),
-        "cpu_affinity": sorted(os.sched_getaffinity(0)),
+        "cpu_affinity": cpu_affinity(),
         "binary_sha256": sha256_file(binary), "binary_version": run([str(binary), "--version"], source, env).strip(),
         "source_commit": run(["git", "rev-parse", "HEAD"], source, env).strip(),
         "source_dirty": bool(run(["git", "status", "--porcelain"], source, env).strip()),
@@ -188,6 +203,8 @@ def main() -> None:
         "transport": "direct-daemon-rpc-no-cli-fallback", "resource_budgets": budgets,
         "epochs": [], "passed": False,
     }
+    if sys.platform == "darwin":
+        report["resource_sampling"] = macos_process.METRICS
     args.output.parent.mkdir(parents=True, exist_ok=True)
     failure = None
     started = time.monotonic()
@@ -196,6 +213,8 @@ def main() -> None:
         repo, home = root / "repo", root / "home"
         env.update(IVYGREP_HOME=str(home), IVYGREP_NO_AUTOSPAWN="1",
                    IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT="1")
+        # The explicit hash enhancement below must not wait for a quiet host.
+        env.setdefault("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0")
         daemon = None
         try:
             copy_repo(source, repo)
