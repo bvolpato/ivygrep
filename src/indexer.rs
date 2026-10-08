@@ -49,8 +49,8 @@ pub(crate) use enhancement::{
     admit_worker, free_worker_slots, readmit_for_neural_pass,
 };
 use git_state::{
-    clean_git_checkout_state, files_have_same_contents, indexed_git_state_path,
-    record_indexed_git_state, refresh_clean_base_metadata,
+    CleanGitCheckout, files_have_same_contents, indexed_git_state_path, record_indexed_git_state,
+    refresh_clean_base_metadata,
 };
 use resources::{
     EnhancementTier, NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index,
@@ -711,10 +711,10 @@ fn index_workspace_with_options(
     }
     let tracks_reusable_base_state =
         workspace.repo_id.is_some() && workspace.base_index_dir.is_none();
-    let clean_git_state_before = tracks_reusable_base_state
-        .then(|| clean_git_checkout_state(&workspace.root))
+    let clean_git_checkout = tracks_reusable_base_state
+        .then(|| CleanGitCheckout::capture(&workspace.root))
         .flatten();
-    let reusable_index_is_current = clean_git_state_before.as_deref().is_some_and(|state| {
+    let reusable_index_is_current = clean_git_checkout.as_ref().is_some_and(|checkout| {
         index_health.is_queryable()
             && !rebuild_main
             && !reset_worktree_overlay
@@ -723,11 +723,11 @@ fn index_workspace_with_options(
             && fs::read_to_string(indexed_git_state_path(workspace))
                 .ok()
                 .as_deref()
-                == Some(state)
+                == Some(checkout.state())
+            // The state must not have changed while it was read.
+            && checkout.is_unchanged(&workspace.root)
     });
-    if reusable_index_is_current
-        && clean_git_checkout_state(&workspace.root) == clean_git_state_before
-    {
+    if reusable_index_is_current {
         return Ok(IndexingSummary {
             workspace_id: workspace.id.clone(),
             indexed_files: 0,
@@ -809,7 +809,7 @@ fn index_workspace_with_options(
         Ok(summary)
     });
     if result.is_ok() && tracks_reusable_base_state {
-        record_indexed_git_state(workspace, clean_git_state_before.as_deref());
+        record_indexed_git_state(workspace, clean_git_checkout.as_ref());
     }
 
     // Run a checkpoint to reclaim WAL space after bulk writes, then

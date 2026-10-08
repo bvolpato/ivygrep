@@ -121,6 +121,101 @@ fn git_reuse_retains_clean_checkout_shortcut_beside_ignored_directories() {
     assert_found(&workspace, "dependency_marker", false);
 }
 
+/// Puts a `git` first in `PATH` that records each call and then runs Git.
+#[cfg(unix)]
+struct RecordedGit {
+    path: Option<std::ffi::OsString>,
+    log: std::path::PathBuf,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl RecordedGit {
+    fn install() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::var_os("PATH");
+        let git = std::env::split_paths(path.as_deref().unwrap_or_default())
+            .map(|directory| directory.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("git is in PATH");
+        let directory = tempdir().unwrap();
+        let log = directory.path().join("calls");
+        let shim = directory.path().join("git");
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+                log.display(),
+                git.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut directories = vec![directory.path().to_path_buf()];
+        directories.extend(std::env::split_paths(path.as_deref().unwrap_or_default()));
+        unsafe { std::env::set_var("PATH", std::env::join_paths(directories).unwrap()) };
+        Self {
+            path,
+            log,
+            _directory: directory,
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RecordedGit {
+    fn drop(&mut self) {
+        match &self.path {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn git_reuse_starts_six_git_processes_for_an_unchanged_checkout() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join("lib.rs"), "pub fn unchanged_marker() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+
+    // Five processes read the state. One checks that it did not change.
+    let recorded = RecordedGit::install();
+    let stats = index_workspace_for_watcher(&workspace, &model).unwrap();
+    let calls = recorded.calls();
+    drop(recorded);
+    assert_eq!(stats.indexed_files, 0);
+    assert_eq!(calls.len(), 6, "{calls:#?}");
+
+    // A changed file needs the same six, around the index update.
+    fs::write(root.path().join("lib.rs"), "pub fn changed_marker() {}\n").unwrap();
+    git(root.path(), &["commit", "-am", "change"]);
+    let recorded = RecordedGit::install();
+    let stats = index_workspace_for_watcher(&workspace, &model).unwrap();
+    let calls = recorded.calls();
+    drop(recorded);
+    assert_eq!(stats.indexed_files, 1);
+    assert_eq!(calls.len(), 6, "{calls:#?}");
+    assert_found(&workspace, "changed_marker", true);
+}
+
 #[test]
 #[serial]
 fn git_reuse_observes_ancestor_ignore_changes() {
