@@ -705,13 +705,18 @@ impl SearchContext {
         Ok(result)
     }
 
-    fn read_file_content(&self, path: &Path) -> Option<CachedFileContent> {
-        FileContentCache::read(
-            &self.file_contents,
-            &self.workspace_root,
-            path,
-            self.file_contents_epoch,
-        )
+    /// Root handle for the file reads of one request. Do not store it in the
+    /// context: the next request must validate the root again.
+    fn workspace_files(&self) -> crate::workspace_file::RootHandle {
+        crate::workspace_file::RootHandle::new(&self.workspace_root)
+    }
+
+    fn read_file_content(
+        &self,
+        files: &crate::workspace_file::RootHandle,
+        path: &Path,
+    ) -> Option<CachedFileContent> {
+        FileContentCache::read(&self.file_contents, files, path, self.file_contents_epoch)
     }
 }
 
@@ -1033,11 +1038,13 @@ fn literal_search_paths(
         left.truncate(max_hits);
         left
     };
+    // The first read walks the root. Every other candidate file reuses that walk.
+    let files = crate::workspace_file::RootHandle::new(root);
     let per_file = paths.par_iter().map(|(rel_path, path)| {
         if options.is_cancelled() {
             return Vec::new();
         }
-        let Ok(content) = crate::workspace_file::read_to_string(root, path) else {
+        let Ok(content) = files.read_to_string(path) else {
             return Vec::new();
         };
         // Lossy decoding keeps text with stray invalid bytes. Like indexing, a NUL
@@ -8465,17 +8472,23 @@ mod tests {
         index_workspace(&workspace, &model).unwrap();
         let context = SearchContext::load(&workspace, None, false).unwrap();
 
-        let first = context.read_file_content(&path).unwrap();
+        let first = context
+            .read_file_content(&context.workspace_files(), &path)
+            .unwrap();
         assert_eq!(&*first.content, "fn first() {}\n");
         assert_eq!(first.lines.len(), 1);
         assert_eq!(line_at(&first.content, &first.lines, 1), "fn first() {}");
         let another_context = SearchContext::load(&workspace, None, false).unwrap();
-        let shared = another_context.read_file_content(&path).unwrap();
+        let shared = another_context
+            .read_file_content(&another_context.workspace_files(), &path)
+            .unwrap();
         assert!(Arc::ptr_eq(&first.content, &shared.content));
         assert!(Arc::ptr_eq(&first.lines, &shared.lines));
 
         std::fs::write(&path, "fn second_version() {}\n").unwrap();
-        let second = context.read_file_content(&path).unwrap();
+        let second = context
+            .read_file_content(&context.workspace_files(), &path)
+            .unwrap();
         assert_eq!(&*second.content, "fn second_version() {}\n");
         assert_eq!(
             line_at(&second.content, &second.lines, 1),
@@ -8483,7 +8496,11 @@ mod tests {
         );
 
         std::fs::remove_file(&path).unwrap();
-        assert!(context.read_file_content(&path).is_none());
+        assert!(
+            context
+                .read_file_content(&context.workspace_files(), &path)
+                .is_none()
+        );
     }
 
     #[test]

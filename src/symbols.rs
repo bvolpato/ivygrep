@@ -814,6 +814,7 @@ fn search_call_sites_with_references(
     let mut seen_references = HashSet::new();
     let mut seen_chunks = HashSet::new();
     let mut file_matches = HashMap::new();
+    let files = crate::workspace_file::RootHandle::new(&workspace.root);
     loop {
         // Search the identifier, not `name(`: values, whitespace, comments,
         // and generic arguments are distinguished during source verification.
@@ -837,7 +838,8 @@ fn search_call_sites_with_references(
         }
         for (file_path, mut chunks) in chunks_by_file {
             let matches = file_matches.entry(file_path.clone()).or_insert_with(|| {
-                crate::workspace_file::read_to_string(&workspace.root, &file_path)
+                files
+                    .read_to_string(&file_path)
                     .map(|text| {
                         matching_symbol_lines_with_go_generics(
                             &file_path,

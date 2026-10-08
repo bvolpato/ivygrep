@@ -126,11 +126,11 @@ impl FileContentCache {
 
     pub(super) fn read(
         cache: &Mutex<Self>,
-        root: &Path,
+        files: &crate::workspace_file::RootHandle,
         path: &Path,
         index_epoch: u64,
     ) -> Option<CachedFileContent> {
-        let mut file = match crate::workspace_file::open(root, path) {
+        let mut file = match files.open(path) {
             Ok(file) => file,
             Err(_) => {
                 cache.lock().remove(path);
@@ -169,6 +169,7 @@ impl FileContentCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_file::RootHandle;
 
     #[cfg(unix)]
     #[test]
@@ -186,7 +187,7 @@ mod tests {
             fs::write(outside.join("source.rs"), "outside").unwrap();
             let cache = Mutex::new(FileContentCache::new(NonZeroUsize::new(2).unwrap(), 1024));
             assert_eq!(
-                &*FileContentCache::read(&cache, &root, &path, 0)
+                &*FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0)
                     .unwrap()
                     .content,
                 "inside"
@@ -198,7 +199,7 @@ mod tests {
                 fs::rename(&path, root.join("original.rs")).unwrap();
                 symlink(outside.join("source.rs"), &path).unwrap();
             }
-            assert!(FileContentCache::read(&cache, &root, &path, 0).is_none());
+            assert!(FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0).is_none());
             assert!(!cache.lock().entries.contains(&path));
             assert_eq!(cache.lock().bytes, 0);
         }
@@ -220,7 +221,7 @@ mod tests {
         let context = crate::search::SearchContext::load(&workspace, None, false).unwrap();
         assert!(
             context
-                .read_file_content(&path)
+                .read_file_content(&context.workspace_files(), &path)
                 .unwrap()
                 .content
                 .contains("{ 1 }")
@@ -250,7 +251,7 @@ mod tests {
         let context = crate::search::SearchContext::load(&workspace, None, false).unwrap();
         assert!(
             context
-                .read_file_content(&path)
+                .read_file_content(&context.workspace_files(), &path)
                 .unwrap()
                 .content
                 .contains("{ 2 }")
@@ -271,14 +272,14 @@ mod tests {
         let a = root.join("a");
         let b = root.join("b");
         let c = root.join("c");
-        let first = FileContentCache::read(&cache, &root, &a, 0).unwrap();
+        let first = FileContentCache::read(&cache, &RootHandle::new(&root), &a, 0).unwrap();
         let entry_bytes = first.bytes(&a);
         assert!(entry_bytes > first.content.len());
         cache.lock().max_bytes = entry_bytes * 2;
-        FileContentCache::read(&cache, &root, &b, 0).unwrap();
-        let hit = FileContentCache::read(&cache, &root, &a, 0).unwrap();
+        FileContentCache::read(&cache, &RootHandle::new(&root), &b, 0).unwrap();
+        let hit = FileContentCache::read(&cache, &RootHandle::new(&root), &a, 0).unwrap();
         assert!(Arc::ptr_eq(&first.content, &hit.content));
-        FileContentCache::read(&cache, &root, &c, 0).unwrap();
+        FileContentCache::read(&cache, &RootHandle::new(&root), &c, 0).unwrap();
         let cache = cache.lock();
         assert!(cache.entries.contains(&a));
         assert!(!cache.entries.contains(&b));
@@ -293,9 +294,9 @@ mod tests {
         let path = root.join("source.rs");
         fs::write(&path, "fn original() {}\n").unwrap();
         let cache = Mutex::new(FileContentCache::new(NonZeroUsize::new(2).unwrap(), 1024));
-        FileContentCache::read(&cache, &root, &path, 0).unwrap();
+        FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0).unwrap();
         fs::write(&path, "large\n".repeat(1024)).unwrap();
-        let updated = FileContentCache::read(&cache, &root, &path, 0).unwrap();
+        let updated = FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0).unwrap();
         assert_eq!(updated.lines.len(), 1024);
         assert!(cache.lock().entries.is_empty());
         assert_eq!(cache.lock().bytes, 0);
@@ -309,7 +310,7 @@ mod tests {
         let path = root.join("source.rs");
         fs::write(&path, "old\n").unwrap();
         let cache = Mutex::new(FileContentCache::new(NonZeroUsize::new(2).unwrap(), 1024));
-        FileContentCache::read(&cache, &root, &path, 0).unwrap();
+        FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0).unwrap();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         let replacement = root.join("replacement");
         fs::write(&replacement, "new\n").unwrap();
@@ -319,7 +320,7 @@ mod tests {
             .unwrap();
         fs::rename(replacement, &path).unwrap();
         assert_eq!(
-            &*FileContentCache::read(&cache, &root, &path, 0)
+            &*FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0)
                 .unwrap()
                 .content,
             "new\n"

@@ -245,11 +245,12 @@ impl IndexedFile {
     }
 }
 
-fn source_batch_len(root: &Path, paths: &[(PathBuf, bool)]) -> usize {
+fn source_batch_len(files: &crate::workspace_file::RootHandle, paths: &[(PathBuf, bool)]) -> usize {
     let mut bytes = 0u64;
     let mut count = 0;
     for (path, _) in paths.iter().take(INDEX_FILE_BATCH_SIZE) {
-        let size = crate::workspace_file::open(root, path)
+        let size = files
+            .open(path)
             .and_then(|file| file.metadata())
             .map_or(0, |metadata| metadata.len());
         if count > 0 && size > INDEX_SOURCE_BATCH_BYTES.saturating_sub(bytes) {
@@ -334,7 +335,10 @@ fn spawn_index_batch_producer(
         let _background = use_background_pool.then(background_indexing);
         let mut remaining = diff_paths.as_slice();
         while !remaining.is_empty() {
-            let count = source_batch_len(&root, remaining);
+            // Each batch validates the root again. Its size probes and file
+            // reads share that walk.
+            let files = crate::workspace_file::RootHandle::new(&root);
+            let count = source_batch_len(&files, remaining);
             let (batch_paths, rest) = remaining.split_at(count);
             remaining = rest;
             let file_chunks: Result<Vec<_>> = indexing_pool().install(|| {
@@ -355,10 +359,9 @@ fn spawn_index_batch_producer(
                         };
 
                         let abs_path = root.join(rel_path);
-                        let content_bytes = crate::workspace_file::read(&root, rel_path)
-                            .with_context(|| {
-                                format!("failed reading source file {}", abs_path.display())
-                            })?;
+                        let content_bytes = files.read(rel_path).with_context(|| {
+                            format!("failed reading source file {}", abs_path.display())
+                        })?;
                         if !is_indexable_file(rel_path, &content_bytes) {
                             progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Ok(empty_incremental_file(rel_path));
@@ -4975,9 +4978,10 @@ mod tests {
         }
         let paths = ["small.rs", "large.rs", "last.rs"].map(|name| (PathBuf::from(name), false));
         let root_path = fs::canonicalize(root.path()).unwrap();
-        assert_eq!(source_batch_len(&root_path, &paths), 1);
-        assert_eq!(source_batch_len(&root_path, &paths[1..]), 1);
-        assert_eq!(source_batch_len(&root_path, &paths[2..]), 1);
+        let files = crate::workspace_file::RootHandle::new(&root_path);
+        assert_eq!(source_batch_len(&files, &paths), 1);
+        assert_eq!(source_batch_len(&files, &paths[1..]), 1);
+        assert_eq!(source_batch_len(&files, &paths[2..]), 1);
     }
 
     #[test]
