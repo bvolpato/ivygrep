@@ -1498,6 +1498,12 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         cli.limit
     };
 
+    if matches!(initial_index_state, Some(WorkspaceIndexState::NotIndexed)) {
+        // A first index must not hold a second copy of a workspace below it,
+        // whether the daemon or this process builds it.
+        ensure_no_nested_workspaces(&workspace.root)?;
+    }
+
     if matches!(
         initial_index_state,
         Some(WorkspaceIndexState::NotIndexed | WorkspaceIndexState::Unhealthy)
@@ -1741,7 +1747,12 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 workspace.root.display().to_string().dimmed()
             );
 
-            ensure_no_nested_workspaces(&workspace.root)?;
+            if needs_repair {
+                // A first run made this check before it tried the daemon. A
+                // repair makes it only here: the daemon rebuilds an unhealthy
+                // index without it.
+                ensure_no_nested_workspaces(&workspace.root)?;
+            }
 
             let _ = workspace.ensure_dirs();
             let mut meta = workspace
@@ -2671,14 +2682,29 @@ fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
         && crate::ipc::socket_exists()
 }
 
+/// The workspaces among `workspace_roots` whose files an index of
+/// `target_root` would hold a second time.
+///
+/// The walker does not enter a separate checkout below a Git workspace, so a
+/// workspace at or below a linked worktree or a nested clone is not a
+/// conflict. A target that is not a Git checkout keeps everything below it.
+fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut below = workspace_roots
+        .into_iter()
+        .filter(|root| root != target_root && root.starts_with(target_root))
+        .peekable();
+    if below.peek().is_none() {
+        return Vec::new();
+    }
+    let nested_checkouts = crate::workspace::NestedCheckouts::new(target_root);
+    below
+        .filter(|root| !nested_checkouts.contains(target_root, root))
+        .collect()
+}
+
 fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
     if let Ok(workspace_roots) = list_workspace_roots() {
-        let mut conflicts = Vec::new();
-        for root in workspace_roots {
-            if root != target_root && root.starts_with(target_root) {
-                conflicts.push(root);
-            }
-        }
+        let conflicts = nested_workspace_conflicts(target_root, workspace_roots);
         if !conflicts.is_empty() {
             let conflict_msgs: Vec<String> = conflicts
                 .iter()
@@ -2689,7 +2715,7 @@ fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
                 .map(|p| format!("  - {}", p.display()))
                 .collect();
             bail!(
-                "Cannot index '{}' because it contains already indexed sub-workspaces:\n{}\n\nYou must remove them first:\n  {}",
+                "Cannot index '{}' because it contains already indexed sub-workspaces:\n{}\n\nYou must remove them first:\n  {}\n\nTo keep them, run the search in a sub-workspace.",
                 target_root.display(),
                 paths_list.join("\n"),
                 conflict_msgs.join("\n  ")
@@ -2812,6 +2838,37 @@ mod tests {
     use crate::embedding::create_hash_model;
     use crate::indexer::index_workspace;
     use crate::workspace::{WorkspaceMetadata, WorkspaceScope};
+
+    #[test]
+    fn nested_workspace_conflicts_are_the_workspaces_that_the_walker_enters() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        for checkout in ["", "clone", "vendor/lib"] {
+            let git_dir = root.join(checkout).join(".git");
+            std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+            std::fs::create_dir_all(git_dir.join("refs")).unwrap();
+            std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
+        std::fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = vendor/lib\n",
+        )
+        .unwrap();
+        let below = ["clone", "clone/deep", "docs", "vendor/lib"].map(|rel| root.join(rel));
+        let mut registered = below.to_vec();
+        registered.extend([root.clone(), tmp.path().join("sibling")]);
+
+        // The walker stops at the nested clone, so it reaches nothing below
+        // it. It enters a plain directory and a submodule.
+        assert_eq!(
+            nested_workspace_conflicts(&root, registered.clone()),
+            [root.join("docs"), root.join("vendor/lib")]
+        );
+
+        // A root that is not a Git checkout keeps everything below it.
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        assert_eq!(nested_workspace_conflicts(&root, registered), below);
+    }
 
     #[test]
     fn broad_root_is_the_filesystem_root_the_home_directory_or_an_ancestor_of_it() {

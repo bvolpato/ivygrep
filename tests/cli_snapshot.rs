@@ -2915,6 +2915,64 @@ fn cli_prevent_nested_indexing() {
     )));
 }
 
+/// The walker keeps a linked worktree out of the index of the repository
+/// above it, so an indexed worktree must not block `ig --add` of that
+/// repository. A plain directory keeps everything below it and is refused.
+#[test]
+#[serial]
+fn cli_add_accepts_repository_with_indexed_nested_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plain = tmp.path().join("plain");
+    let root = plain.join("repo");
+    let worktree = root.join(".claude/worktrees/agent");
+    let home = tmp.path().join("ivygrep_home");
+
+    init_git_repo(&root);
+    std::fs::write(root.join("a.rs"), "pub fn greeting() {}\n").unwrap();
+    git_checked(&root, &["config", "user.email", "test@example.com"]);
+    git_checked(&root, &["config", "user.name", "Test"]);
+    git_checked(&root, &["add", "."]);
+    git_checked(&root, &["commit", "-qm", "base"]);
+    git_checked(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/agent",
+            "-b",
+            "agent",
+        ],
+    );
+
+    let add = |path: &Path| {
+        Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .arg("--add")
+            .arg(path)
+            .args(["--no-watch", "--hash"])
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .assert()
+    };
+
+    add(&worktree).success();
+    add(&root).success();
+
+    let output = add(&plain).failure().get_output().stderr.clone();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        text.contains("because it contains already indexed sub-workspaces"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "ig --rm {}",
+            worktree.canonicalize().unwrap().display()
+        )),
+        "{text}"
+    );
+}
+
 /// Regression: `ig --literal gquota` must find the term inside a top-level
 /// `const` declaration in TypeScript, not just inside functions/classes.
 #[test]
