@@ -6,6 +6,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Changed
 
+- On macOS, a lexical index commit waits for fewer drive cache flushes. Tantivy ended every segment file and metadata write with `F_FULLFSYNC`. Those writes now end with `F_BARRIERFSYNC`, which keeps their order on the drive. The full flush before `meta.json` names a new segment remains. On an Apple M5 Max, a one-file update of a 200-file workspace issued 28 full flushes and now issues 1 full flush and 29 barriers. The time in durability calls fell from 119 ms to 40 ms on a loaded host. Other platforms do not change.
 - The daemon rejects cache writes from searches that started before cache invalidation.
 - Background indexing has a separate admission limit and uses fewer parser threads by default. MCP readiness polling starts at 20 ms and increases to 500 ms. Context packs reuse search readers and parsed input. Content digests prevent reuse after input changes.
 - Result caches, neural query caches, and idle search contexts now have byte budgets. Indexing batches use source-byte targets and estimated payload reservations. These limits control retained data, not total process RSS. One oversized indexing payload can proceed alone.

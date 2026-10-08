@@ -136,6 +136,180 @@ where
     unreachable!("retry loop always returns on its final attempt")
 }
 
+#[cfg(not(target_os = "macos"))]
+type IndexDirectory = MmapDirectory;
+#[cfg(target_os = "macos")]
+type IndexDirectory = BarrierSyncDirectory;
+
+#[cfg(not(target_os = "macos"))]
+fn open_index_directory(path: &Path) -> Result<IndexDirectory> {
+    Ok(MmapDirectory::open(path)?)
+}
+
+#[cfg(target_os = "macos")]
+fn open_index_directory(path: &Path) -> Result<IndexDirectory> {
+    BarrierSyncDirectory::open(path)
+}
+
+/// Tantivy ends every segment file and every atomic write with
+/// `File::sync_data`. On macOS that call is `F_FULLFSYNC`, which waits until
+/// the drive has emptied its cache. One commit issued about 30 of them.
+///
+/// This directory writes the same files in the same order, but ends each
+/// write with `F_BARRIERFSYNC`. A barrier keeps the order of writes on the
+/// drive and does not wait for the cache. `sync_directory` stays a full flush.
+/// Tantivy calls it before it publishes `meta.json`, so the segments that a
+/// published `meta.json` names reached stable storage first.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+struct BarrierSyncDirectory {
+    inner: MmapDirectory,
+    root: PathBuf,
+    #[cfg(test)]
+    syncs: std::sync::Arc<SyncCounts>,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[derive(Debug, Default)]
+struct SyncCounts {
+    barrier: std::sync::atomic::AtomicUsize,
+    full: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(target_os = "macos")]
+impl BarrierSyncDirectory {
+    fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            inner: MmapDirectory::open(path)?,
+            // MmapDirectory resolves relative names against the canonical path.
+            root: path.canonicalize()?,
+            #[cfg(test)]
+            syncs: Default::default(),
+        })
+    }
+
+    /// Write the file's data to the drive and order it before later writes.
+    fn barrier_sync(&self, file: &fs::File) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        #[cfg(test)]
+        self.syncs
+            .barrier
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: the descriptor stays open for the call, and this command
+        // takes no argument.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == 0 {
+            return Ok(());
+        }
+        // Some file systems have no barrier. Use the full flush that Tantivy
+        // issues itself.
+        file.sync_data()
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct BarrierFileWriter {
+    file: fs::File,
+    directory: BarrierSyncDirectory,
+}
+
+#[cfg(target_os = "macos")]
+impl std::io::Write for BarrierFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl tantivy::directory::TerminatingWrite for BarrierFileWriter {
+    fn terminate_ref(&mut self, _: tantivy::directory::AntiCallToken) -> std::io::Result<()> {
+        self.directory.barrier_sync(&self.file)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Directory for BarrierSyncDirectory {
+    fn get_file_handle(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<std::sync::Arc<dyn FileHandle>, OpenReadError> {
+        self.inner.get_file_handle(path)
+    }
+
+    fn delete(&self, path: &Path) -> std::result::Result<(), DeleteError> {
+        self.inner.delete(path)
+    }
+
+    fn exists(&self, path: &Path) -> std::result::Result<bool, OpenReadError> {
+        self.inner.exists(path)
+    }
+
+    fn open_write(&self, path: &Path) -> std::result::Result<WritePtr, OpenWriteError> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.root.join(path))
+            .map_err(|io_error| {
+                if io_error.kind() == std::io::ErrorKind::AlreadyExists {
+                    OpenWriteError::FileAlreadyExists(path.to_path_buf())
+                } else {
+                    OpenWriteError::wrap_io_error(io_error, path.to_path_buf())
+                }
+            })?;
+        Ok(std::io::BufWriter::new(Box::new(BarrierFileWriter {
+            file,
+            directory: self.clone(),
+        })))
+    }
+
+    fn atomic_read(&self, path: &Path) -> std::result::Result<Vec<u8>, OpenReadError> {
+        self.inner.atomic_read(path)
+    }
+
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+
+        // Names that start with a dot are not managed by Tantivy, as its own
+        // temporary files are not.
+        let temporary = self
+            .root
+            .join(format!(".tmp-{}", uuid::Uuid::new_v4().simple()));
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .and_then(|mut file| {
+                file.write_all(data)?;
+                self.barrier_sync(&file)
+            })
+            .and_then(|()| fs::rename(&temporary, self.root.join(path)));
+        if written.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        written
+    }
+
+    fn sync_directory(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        self.syncs
+            .full
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.sync_directory()
+    }
+
+    fn acquire_lock(&self, lock: &Lock) -> std::result::Result<DirectoryLock, LockError> {
+        self.inner.acquire_lock(lock)
+    }
+
+    fn watch(&self, watch_callback: WatchCallback) -> tantivy::Result<WatchHandle> {
+        self.inner.watch(watch_callback)
+    }
+}
+
 pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Result<StorageHandles> {
     open_storage_with_options(workspace, embedding_dimensions, true)
 }
@@ -449,7 +623,7 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
     fs::create_dir_all(path)?;
 
     let schema = build_schema();
-    let directory = RetryingDirectory::new(MmapDirectory::open(path)?);
+    let directory = RetryingDirectory::new(open_index_directory(path)?);
     #[cfg(test)]
     let directory = RetryingDirectory {
         commit_failure: test_support::commit_failure(path),
@@ -574,6 +748,71 @@ mod tests {
 
         assert!(matches!(result, Err(OpenWriteError::FileAlreadyExists(_))));
         assert_eq!(attempts.get(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn barrier_directory_keeps_tantivy_write_contracts() {
+        use std::io::Write;
+
+        let temp = tempdir().unwrap();
+        let directory = BarrierSyncDirectory::open(temp.path()).unwrap();
+        let segment = Path::new("segment.term");
+
+        let mut writer = directory.open_write(segment).unwrap();
+        writer.write_all(b"postings").unwrap();
+        writer.terminate().unwrap();
+        assert_eq!(directory.atomic_read(segment).unwrap(), b"postings");
+        assert!(matches!(
+            directory.open_write(segment),
+            Err(OpenWriteError::FileAlreadyExists(_))
+        ));
+
+        let meta = Path::new("meta.json");
+        directory.atomic_write(meta, b"first").unwrap();
+        directory.atomic_write(meta, b"second").unwrap();
+        assert_eq!(directory.atomic_read(meta).unwrap(), b"second");
+
+        let mut names = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["meta.json", "segment.term"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn commit_orders_segment_writes_and_flushes_once_before_publication() {
+        use std::sync::atomic::Ordering;
+
+        let temp = tempdir().unwrap();
+        let directory = BarrierSyncDirectory::open(temp.path()).unwrap();
+        let mut schema = Schema::builder();
+        let text = schema.add_text_field("text", tantivy::schema::TEXT);
+        let index =
+            TantivyIndex::open_or_create(RetryingDirectory::new(directory.clone()), schema.build())
+                .unwrap();
+        let mut writer = index
+            .writer_with_num_threads::<tantivy::TantivyDocument>(1, 20_000_000)
+            .unwrap();
+        writer.add_document(tantivy::doc!(text => "first")).unwrap();
+        writer.commit().unwrap();
+
+        let barriers = directory.syncs.barrier.load(Ordering::SeqCst);
+        let full = directory.syncs.full.load(Ordering::SeqCst);
+        writer
+            .add_document(tantivy::doc!(text => "second"))
+            .unwrap();
+        writer.commit().unwrap();
+
+        // One full flush makes the new segment durable before `meta.json`
+        // names it. Every segment file and atomic write ends with a barrier.
+        assert_eq!(directory.syncs.full.load(Ordering::SeqCst) - full, 1);
+        assert!(directory.syncs.barrier.load(Ordering::SeqCst) - barriers >= 5);
+
+        let reader = index.reader().unwrap();
+        assert_eq!(reader.searcher().num_docs(), 2);
     }
 
     #[test]

@@ -224,6 +224,17 @@ graph to bound background build cost, and the neural tier keeps USearch quality
 defaults. Vector shape cannot select the tier because the default neural
 profile shares the hash store's 256-dimensional F16 layout.
 
+On macOS, `File::sync_data` is `F_FULLFSYNC`, which waits until the drive has
+emptied its cache. Tantivy calls it for every segment file and every atomic
+write, about 30 times per commit. ivygrep's Tantivy directory ends those writes
+with `F_BARRIERFSYNC` instead. A barrier keeps the order of writes on the drive
+and does not wait for the cache. The directory keeps the full flush that Tantivy
+requests before it publishes `meta.json`, so a published `meta.json` names only
+segments that reached stable storage. A file system without barriers gets the
+full flush for every write. Other platforms use Tantivy's directory unchanged.
+After a power loss, the newest commit can be absent. This was already possible
+for the SQLite store, which does not request a full flush for each commit.
+
 Neural metadata is optional for literal and hash retrieval. Unreadable identity
 or profile metadata is reported but does not prevent those modes from loading
 healthy primary stores. Neural requests still require readable, compatible
