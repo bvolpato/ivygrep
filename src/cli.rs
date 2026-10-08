@@ -10,7 +10,10 @@ use tracing_subscriber::EnvFilter;
 use crate::config;
 use crate::daemon;
 use crate::embedding::create_model;
-use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
+use crate::indexer::{
+    index_workspace, remove_workspace_index, workspace_index_matches_skip_gitignore,
+    workspace_is_indexed,
+};
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
 use crate::path_glob::parse_glob_csv;
@@ -565,7 +568,7 @@ pub async fn run() -> Result<()> {
     }
 
     if let Some(path) = &cli.add_path {
-        confirm_broad_add(path, cli.force, cli.yes)?;
+        confirm_broad_add(path, cli.force, cli.skip_gitignore, cli.yes)?;
         return run_add(
             path,
             !cli.no_watch,
@@ -1498,7 +1501,8 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
     if matches!(
         initial_index_state,
         Some(WorkspaceIndexState::NotIndexed | WorkspaceIndexState::Unhealthy)
-    ) {
+    ) || (!cli.all_indices && adds_ignored_files(&workspace, cli.skip_gitignore))
+    {
         // This query is about to build an index.
         confirm_broad_index(&workspace.root, cli.yes)?;
     }
@@ -2772,14 +2776,27 @@ pub(crate) fn confirm_broad_index(root: &Path, assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// `--add` builds an index unless a current one exists, and `--force` always
-/// rebuilds it.
-fn confirm_broad_add(path: &Path, force: bool, assume_yes: bool) -> Result<()> {
+/// Whether `--skip-gitignore` makes this command index the ignored files of a
+/// workspace whose index does not have them yet.
+fn adds_ignored_files(workspace: &Workspace, skip_gitignore: bool) -> bool {
+    skip_gitignore && !workspace_index_matches_skip_gitignore(workspace, true)
+}
+
+/// `--add` builds an index unless a current one exists. `--force` always
+/// rebuilds it, and `--skip-gitignore` can add the ignored files to it.
+fn confirm_broad_add(
+    path: &Path,
+    force: bool,
+    skip_gitignore: bool,
+    assume_yes: bool,
+) -> Result<()> {
     let root = crate::workspace::detect_workspace_root(path)?;
     if current_broad_root(&root).is_none() {
         return Ok(());
     }
-    if !force && workspace_is_indexed(&Workspace::resolve(&root)?) {
+    let workspace = Workspace::resolve(&root)?;
+    if !force && workspace_is_indexed(&workspace) && !adds_ignored_files(&workspace, skip_gitignore)
+    {
         return Ok(());
     }
     confirm_broad_index(&root, assume_yes)

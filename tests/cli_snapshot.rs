@@ -229,10 +229,23 @@ fn cli_does_not_index_the_home_directory_without_confirmation() {
     // An existing index of the home directory needs no confirmation.
     ig(&["greeting"]).assert().success().stdout(found);
     ig(&["--add"]).assert().success();
+    // These rebuild the index, or add the ignored files to it.
     ig(&["--add", "--force"])
         .assert()
         .failure()
         .stderr(refused());
+    ig(&["--skip-gitignore", "greeting"])
+        .assert()
+        .failure()
+        .stderr(refused());
+    ig(&["--add", "--skip-gitignore"])
+        .assert()
+        .failure()
+        .stderr(refused());
+    ig(&["--yes", "--skip-gitignore", "greeting"])
+        .assert()
+        .success();
+    ig(&["--skip-gitignore", "greeting"]).assert().success();
 }
 
 #[test]
