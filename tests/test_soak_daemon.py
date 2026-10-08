@@ -1,8 +1,11 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -37,6 +40,45 @@ class DaemonSoakTest(unittest.TestCase):
         with mock.patch.object(soak, "search", return_value=stale), mock.patch.object(soak.time, "monotonic", side_effect=[0, 21]):
             with self.assertRaisesRegex(AssertionError, "stale probe"):
                 soak.watcher_observed_probe(Path("home"), Path("repo"), expected)
+
+    def test_stale_probe_evidence_records_what_each_layer_holds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home, repo = Path(temporary) / "home", Path(temporary) / "repo"
+            index = home / "indexes" / "workspace"
+            index.mkdir(parents=True)
+            (repo / "src").mkdir(parents=True)
+            current = "pub fn soak_revision() -> u64 { 42 }"
+            stale = current.replace("42", "41")
+            (repo / soak.PROBE).write_text(current + "\n")
+            connection = sqlite3.connect(index / "metadata.sqlite3")
+            connection.execute("CREATE TABLE chunks (file_path TEXT NOT NULL, text TEXT NOT NULL)")
+            connection.execute("INSERT INTO chunks VALUES (?, ?)", (soak.PROBE, stale))
+            connection.execute("INSERT INTO chunks VALUES (?, ?)", ("src/lib.rs", "pub fn other() {}"))
+            connection.commit()
+            connection.close()
+            (index / "merkle_snapshot.json").write_text(json.dumps({"files": {soak.PROBE: "1-0"}}))
+            # The store holds the previous revision, and the daemon answers with it.
+            hit = [{"file_path": soak.PROBE, "preview": stale, "reason": "lexical"}]
+            with mock.patch.object(soak, "search", return_value=hit), \
+                    mock.patch.object(soak, "run", return_value="?? src/soak_probe.rs\n") as run:
+                evidence = soak.stale_probe_evidence(home, repo, {})
+            self.assertEqual(run.call_args.args[0][0], "git")
+            self.assertEqual(evidence, {
+                "probe_file_text": current + "\n",
+                "git_worktree_clean": False,
+                "index_stores": [{"sqlite_probe_texts": [stale], "snapshot_lists_probe": True,
+                                  "clean_checkout_state_recorded": False}],
+                "daemon_uncached_query_hits": [{"preview": stale, "reason": "lexical"}],
+            })
+            # A fact that cannot be read does not hide the other facts.
+            (index / "merkle_snapshot.json").unlink()
+            (repo / soak.PROBE).unlink()
+            with mock.patch.object(soak, "search", return_value=[]), mock.patch.object(soak, "run", return_value=""):
+                evidence = soak.stale_probe_evidence(home, repo, {})
+            self.assertIsNone(evidence["probe_file_text"])
+            self.assertTrue(evidence["git_worktree_clean"])
+            self.assertTrue(evidence["index_stores"].startswith("unavailable: "))
+            self.assertEqual(evidence["daemon_uncached_query_hits"], [])
 
     def test_resource_gates_reject_rss_fd_and_thread_growth(self):
         budgets = soak.resource_budgets(rss_growth_mib=32, total_rss_growth_mib=96, fd_growth=8, thread_growth=4)

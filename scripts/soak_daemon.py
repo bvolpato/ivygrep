@@ -18,6 +18,7 @@ import os
 import platform
 from pathlib import Path
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -151,8 +152,72 @@ def watcher_observed_probe(home: Path, repo: Path, expected: str | None) -> None
         if probe_matches(hits, expected):
             return
         if time.monotonic() >= deadline:
-            raise AssertionError(f"watcher returned stale probe: expected={expected!r}, hits={hits}")
+            raise StaleProbeError(f"watcher returned stale probe: expected={expected!r}, hits={hits}")
         time.sleep(0.1)
+
+
+class StaleProbeError(AssertionError):
+    pass
+
+
+def stored_chunk_text(value: str | bytes) -> str:
+    """SQLite holds a chunk as text or as a zstd frame. Python has zstd from version 3.14."""
+    if isinstance(value, str):
+        return value
+    try:
+        from compression import zstd
+        return zstd.decompress(value).decode(errors="replace")
+    except Exception:
+        return f"<{len(value)} compressed bytes>"
+
+
+def stale_probe_evidence(home: Path, repo: Path, env: dict[str, str]) -> dict[str, Any]:
+    """What the source tree, the index stores, and the daemon each hold for the probe.
+
+    Call it while the daemon still runs. It only reads: a local `ig` search could
+    repair a store and replace the state under inspection. Each fact is read
+    independently, and a fact that cannot be read is reported as its error text.
+    """
+    def read(fact: Any) -> Any:
+        try:
+            return fact()
+        except Exception as error:
+            return f"unavailable: {error}"
+
+    def probe_file_text() -> str | None:
+        probe = repo / PROBE
+        return probe.read_text() if probe.exists() else None
+
+    def git_clean() -> bool:
+        return not run(["git", "status", "--porcelain"], repo, env).strip()
+
+    def stores() -> list[dict[str, Any]]:
+        found = []
+        for index in sorted((home / "indexes").iterdir()):
+            if not (index / "metadata.sqlite3").is_file():
+                continue
+            connection = sqlite3.connect(f"file:{index / 'metadata.sqlite3'}?mode=ro", uri=True)
+            try:
+                rows = connection.execute("SELECT text FROM chunks WHERE file_path = ?", (PROBE,)).fetchall()
+            finally:
+                connection.close()
+            texts = [stored_chunk_text(text) for (text,) in rows]
+            found.append({"sqlite_probe_texts": texts,
+                          "snapshot_lists_probe": f'"{PROBE}"' in (index / "merkle_snapshot.json").read_text(),
+                          "clean_checkout_state_recorded": (index / "indexed_git_state").is_file()})
+        return found
+
+    def daemon_uncached_hits() -> list[dict[str, Any]]:
+        # The daemon cannot have cached this query.
+        hits = search(home, repo, f"soak revision value {time.monotonic_ns()}", probe_only=True)
+        return [{"preview": hit.get("preview"), "reason": hit.get("reason")} for hit in hits]
+
+    return {
+        "probe_file_text": read(probe_file_text),
+        "git_worktree_clean": read(git_clean),
+        "index_stores": read(stores),
+        "daemon_uncached_query_hits": read(daemon_uncached_hits),
+    }
 
 
 def main() -> None:
@@ -313,6 +378,8 @@ def main() -> None:
         except Exception as error:
             failure = error
             report["failure"] = str(error)
+            if isinstance(error, StaleProbeError):
+                report["stale_probe_evidence"] = stale_probe_evidence(home, repo, env)
         finally:
             if daemon is not None:
                 daemon.stop()
