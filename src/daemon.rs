@@ -7286,6 +7286,28 @@ mod tests {
         false
     }
 
+    /// Like `wait_for_literal_visibility`, but reads the index only when the
+    /// watcher is not running an update. A search during an update can combine
+    /// the new tombstones with the previous snapshot, and then it returns a
+    /// file that this update hides. The test runtime has one thread, so an
+    /// update cannot start between the check and the read.
+    async fn wait_for_settled_literal_visibility(
+        control: &WatchControl,
+        workspace: &Workspace,
+        needle: &str,
+        expected: bool,
+    ) -> bool {
+        for _ in 0..60 {
+            if !control.indexing.load(Ordering::Relaxed)
+                && indexed_literal_visible(workspace, needle) == Some(expected)
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
     fn test_hit(path: &str, score: f32) -> SearchHit {
         test_hit_at(path, score, 1, path)
     }
@@ -13337,13 +13359,25 @@ mod tests {
                 .and_then(|registration| registration.external_git_watch.as_deref()),
             Some(common_dir.as_path())
         );
+        let control = state
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .unwrap()
+            .control
+            .clone();
 
         std::fs::create_dir(&info).unwrap();
         let exclude = info.join("exclude");
         std::fs::write(&exclude, "shared.rs\n").unwrap();
         assert!(
-            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
-                .await,
+            wait_for_settled_literal_visibility(
+                &control,
+                &workspace,
+                "missing_external_git_info_marker",
+                false
+            )
+            .await,
             "creating external info/exclude did not remove linked-worktree result"
         );
         assert_eq!(
@@ -13357,7 +13391,13 @@ mod tests {
 
         std::fs::remove_dir_all(&info).unwrap();
         assert!(
-            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true).await,
+            wait_for_settled_literal_visibility(
+                &control,
+                &workspace,
+                "missing_external_git_info_marker",
+                true
+            )
+            .await,
             "removing external info directory did not restore linked-worktree result"
         );
         assert_eq!(
@@ -13372,8 +13412,13 @@ mod tests {
         std::fs::create_dir(&info).unwrap();
         std::fs::write(&exclude, "shared.rs\n").unwrap();
         assert!(
-            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
-                .await,
+            wait_for_settled_literal_visibility(
+                &control,
+                &workspace,
+                "missing_external_git_info_marker",
+                false
+            )
+            .await,
             "recreating external info/exclude did not remove linked-worktree result"
         );
         assert_eq!(
@@ -13386,7 +13431,13 @@ mod tests {
         );
         std::fs::write(&exclude, "").unwrap();
         assert!(
-            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true).await,
+            wait_for_settled_literal_visibility(
+                &control,
+                &workspace,
+                "missing_external_git_info_marker",
+                true
+            )
+            .await,
             "toggling recreated external info/exclude did not restore linked-worktree result"
         );
 
@@ -13407,8 +13458,13 @@ mod tests {
             std::fs::create_dir(&info).unwrap();
             std::fs::write(&exclude, "shared.rs\n").unwrap();
             assert!(
-                wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
-                    .await,
+                wait_for_settled_literal_visibility(
+                    &control,
+                    &workspace,
+                    "missing_external_git_info_marker",
+                    false
+                )
+                .await,
                 "replacement cycle {cycle} did not apply external exclude"
             );
             #[cfg(unix)]
@@ -13423,8 +13479,13 @@ mod tests {
             );
             std::fs::write(&exclude, "").unwrap();
             assert!(
-                wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true)
-                    .await,
+                wait_for_settled_literal_visibility(
+                    &control,
+                    &workspace,
+                    "missing_external_git_info_marker",
+                    true
+                )
+                .await,
                 "replacement cycle {cycle} lost the external exclude watch"
             );
         }
