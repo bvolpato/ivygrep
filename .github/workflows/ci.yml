@@ -215,9 +215,15 @@ jobs:
           python-version: "3.13"
 
       # The soak and benchmark harnesses sample processes through libproc on macOS.
-      - name: Test Python harnesses on macOS
+      - name: Test process sampling harnesses on macOS
         if: matrix.name == 'macOS ARM (Hash-only)'
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+        run: |
+          python3 -m unittest \
+            tests.test_soak_daemon \
+            tests.test_soak_mcp_sessions \
+            tests.test_resource_load \
+            tests.test_million_benchmark \
+            -v
 
   build:
     name: Build release (${{ matrix.name }})
