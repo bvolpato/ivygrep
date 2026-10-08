@@ -264,14 +264,15 @@ fn source_batch_len(files: &crate::workspace_file::RootHandle, paths: &[(PathBuf
 
 struct IndexBatchProducer {
     receiver: Option<std::sync::mpsc::Receiver<Result<IndexedFileBatch>>>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    // The thread returns the files that vanished before it read them.
+    handle: Option<std::thread::JoinHandle<Vec<PathBuf>>>,
     budget: Arc<BatchBudget>,
 }
 
 impl IndexBatchProducer {
     fn new(
         receiver: std::sync::mpsc::Receiver<Result<IndexedFileBatch>>,
-        handle: std::thread::JoinHandle<()>,
+        handle: std::thread::JoinHandle<Vec<PathBuf>>,
         budget: Arc<BatchBudget>,
     ) -> Self {
         Self {
@@ -293,15 +294,16 @@ impl IndexBatchProducer {
         }
     }
 
-    fn finish(mut self) -> Result<()> {
+    /// Returns the files that vanished after the scan listed them.
+    fn finish(mut self) -> Result<Vec<PathBuf>> {
         self.budget.stop();
         drop(self.receiver.take());
-        if let Some(handle) = self.handle.take() {
-            handle
+        match self.handle.take() {
+            Some(handle) => handle
                 .join()
-                .map_err(|_| anyhow::anyhow!("index batch producer thread panicked"))?;
+                .map_err(|_| anyhow::anyhow!("index batch producer thread panicked")),
+            None => Ok(Vec::new()),
         }
-        Ok(())
     }
 }
 
@@ -333,8 +335,9 @@ fn spawn_index_batch_producer(
     let _ = fs::write(&progress_path, format!("0/{total}"));
     let handle = std::thread::spawn(move || {
         let _background = use_background_pool.then(background_indexing);
+        let vanished = std::sync::Mutex::new(Vec::new());
         let mut remaining = diff_paths.as_slice();
-        while !remaining.is_empty() {
+        'batches: while !remaining.is_empty() {
             // Each batch validates the root again. Its size probes and file
             // reads share that walk.
             let files = crate::workspace_file::RootHandle::new(&root);
@@ -359,9 +362,33 @@ fn spawn_index_batch_producer(
                         };
 
                         let abs_path = root.join(rel_path);
-                        let content_bytes = files.read(rel_path).with_context(|| {
-                            format!("failed reading source file {}", abs_path.display())
-                        })?;
+                        let read = files.read(rel_path);
+                        #[cfg(test)]
+                        let read = crate::merkle::test_support::check(
+                            crate::merkle::test_support::Stage::Index,
+                            &abs_path,
+                        )
+                        .and(read);
+                        let content_bytes = match read {
+                            Ok(bytes) => bytes,
+                            // A file deleted after the scan listed it is an
+                            // ordinary deletion. A missing root is not: the
+                            // state of its files is unknown.
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::NotFound
+                                    && crate::workspace_file::validate_root(&root).is_ok() =>
+                            {
+                                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                vanished.lock().unwrap().push(rel_path.clone());
+                                return Ok(empty_incremental_file(rel_path));
+                            }
+                            Err(error) => {
+                                return Err(anyhow::Error::new(error).context(format!(
+                                    "failed reading source file {}",
+                                    abs_path.display()
+                                )));
+                            }
+                        };
                         if !is_indexable_file(rel_path, &content_bytes) {
                             progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Ok(empty_incremental_file(rel_path));
@@ -470,7 +497,7 @@ fn spawn_index_batch_producer(
                             batch.push(files.next().unwrap());
                         }
                         let Some(reservation) = producer_budget.acquire(bytes) else {
-                            return;
+                            break 'batches;
                         };
                         tracing::debug!(target: "ivygrep::performance", stage = "index_batch", estimated_bytes = bytes, files = batch.len(), "index batch prepared");
                         if sender
@@ -480,7 +507,7 @@ fn spawn_index_batch_producer(
                             }))
                             .is_err()
                         {
-                            return;
+                            break 'batches;
                         }
                     }
                 }
@@ -490,6 +517,7 @@ fn spawn_index_batch_producer(
                 }
             }
         }
+        vanished.into_inner().unwrap()
     });
 
     IndexBatchProducer::new(receiver, handle, budget)
@@ -784,6 +812,7 @@ fn index_workspace_with_options(
         }
     });
 
+    let mut source_vanished = false;
     let result = retry_transient_tantivy_writes(|| {
         // SQLite may have committed before Tantivy or the snapshot failed.
         // If inputs change before a retry, replaying their old Merkle diff can
@@ -797,6 +826,7 @@ fn index_workspace_with_options(
             skip_gitignore,
             reset_worktree_overlay || (incomplete && workspace.is_worktree()),
             rebuild_main || (incomplete && !workspace.is_worktree()),
+            &mut source_vanished,
         )
     });
     let result = result.and_then(|summary| {
@@ -809,7 +839,12 @@ fn index_workspace_with_options(
         Ok(summary)
     });
     if result.is_ok() && tracks_reusable_base_state {
-        record_indexed_git_state(workspace, clean_git_checkout.as_ref());
+        // The index holds no chunks for a file that vanished during the run,
+        // even if the checkout is clean again. Do not record it as current.
+        record_indexed_git_state(
+            workspace,
+            clean_git_checkout.as_ref().filter(|_| !source_vanished),
+        );
     }
 
     // Run a checkpoint to reclaim WAL space after bulk writes, then
@@ -923,6 +958,7 @@ fn validate_existing_index_storage(workspace: &Workspace) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_workspace_inner(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
@@ -931,6 +967,8 @@ fn index_workspace_inner(
     skip_gitignore: bool,
     reset_worktree_overlay: bool,
     rebuild_main: bool,
+    // Set if a source file vanished after the scan listed it.
+    source_vanished: &mut bool,
 ) -> Result<IndexingSummary> {
     let index_started = std::time::Instant::now();
 
@@ -1530,7 +1568,7 @@ fn index_workspace_inner(
     let mut producer = spawn_index_batch_producer(
         workspace,
         &diff,
-        current_snapshot.clone(),
+        current_snapshot,
         &fields,
         is_fresh_index,
         show_progress,
@@ -1661,7 +1699,16 @@ fn index_workspace_inner(
         }
     }
 
-    producer.finish()?;
+    let vanished_files = producer.finish()?;
+    // The stores hold no chunks for a file that vanished after the scan. Its
+    // snapshot hash must not claim that the file is indexed.
+    *source_vanished = !vanished_files.is_empty();
+    let pending_snapshot = pending_snapshot.map(|mut snapshot| {
+        if *source_vanished {
+            Arc::make_mut(&mut snapshot).mark_vanished(&vanished_files);
+        }
+        snapshot
+    });
 
     let t1 = std::time::Instant::now();
     let persist_ms = persist_started.elapsed().as_secs_f64() * 1_000.0;
@@ -4954,6 +5001,7 @@ mod tests {
                     .is_err(),
                 "receiver drop must cancel blocked producer send"
             );
+            Vec::new()
         });
 
         drop(IndexBatchProducer::new(
@@ -5001,6 +5049,43 @@ mod tests {
     #[test]
     #[serial]
     fn index_batch_producer_reports_source_read_failure() {
+        // Neither a directory at a listed path nor a missing root is a
+        // deleted file. The update must fail.
+        for remove_root in [false, true] {
+            let root = tempdir().unwrap();
+            let home = tempdir().unwrap();
+            unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+            let workspace = Workspace::resolve(root.path()).unwrap();
+            workspace.ensure_dirs().unwrap();
+            let (_index, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+            if remove_root {
+                fs::remove_dir_all(&workspace.root).unwrap();
+            } else {
+                fs::create_dir(workspace.root.join("listed.rs")).unwrap();
+            }
+            let diff = MerkleDiff {
+                added_or_modified: vec![(PathBuf::from("listed.rs"), false)],
+                deleted: Vec::new(),
+            };
+            let producer =
+                spawn_index_batch_producer(&workspace, &diff, None, &fields, false, false);
+
+            let error = match producer.recv().unwrap() {
+                Ok(_) => panic!("unreadable source should fail the producer"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("listed.rs"),
+                "unexpected producer error: {error:#}"
+            );
+            assert!(producer.finish().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn index_batch_producer_treats_a_deleted_source_as_removed() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -5008,21 +5093,25 @@ mod tests {
         let workspace = Workspace::resolve(root.path()).unwrap();
         workspace.ensure_dirs().unwrap();
         let (_index, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        // The diff lists a deleted file and a file in a deleted directory.
+        let deleted = vec![
+            PathBuf::from("deleted.rs"),
+            PathBuf::from("gone/deleted.rs"),
+        ];
         let diff = MerkleDiff {
-            added_or_modified: vec![(PathBuf::from("disappeared.rs"), false)],
+            added_or_modified: deleted.iter().map(|path| (path.clone(), false)).collect(),
             deleted: Vec::new(),
         };
         let producer = spawn_index_batch_producer(&workspace, &diff, None, &fields, false, false);
 
-        let error = match producer.recv().unwrap() {
-            Ok(_) => panic!("missing source should fail the producer"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("disappeared.rs"),
-            "unexpected producer error: {error:#}"
-        );
-        producer.finish().unwrap();
+        // An incremental run replaces the old chunks of each file with none.
+        let batch = producer.recv().unwrap().unwrap();
+        assert_eq!(batch.files.len(), 2);
+        assert!(batch.files.iter().all(|file| file.chunks.is_empty()));
+        drop(batch);
+        let mut vanished = producer.finish().unwrap();
+        vanished.sort();
+        assert_eq!(vanished, deleted);
     }
 
     #[test]

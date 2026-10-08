@@ -15,6 +15,9 @@ use crate::workspace::index_path_string;
 use std::io::IsTerminal;
 
 const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// Replaces the metadata hash of a file that vanished before it was indexed.
+/// A metadata hash is hexadecimal, so no file on disk has this hash.
+const VANISHED_FILE_HASH: &str = "vanished";
 
 pub(crate) fn normalized_indexable_content<'a>(path: &Path, bytes: &'a [u8]) -> Cow<'a, [u8]> {
     if !is_indexable_file(path, bytes) || !bytes.windows(2).any(|window| window == b"\r\n") {
@@ -209,6 +212,8 @@ impl MerkleSnapshot {
         validate_workspace_root(root)?;
         // An incomplete walk cannot establish which old paths were deleted.
         // Keep the first error without adding contention to successful entries.
+        // A path that no longer exists is deleted, so the walk skips it. The
+        // result is the snapshot of a walk that started a moment later.
         let mut scan_error = OnceLock::new();
         // If skip_gitignore is true, do a fast standard walk first to record which files WOULD have been included properly.
         let unignored_paths = Arc::new(if skip_gitignore {
@@ -222,7 +227,9 @@ impl MerkleSnapshot {
                 Box::new(move |entry| {
                     let entry = match entry {
                         Ok(entry) => entry,
-                        Err(error) if is_ignore_pattern_warning(&error) => {
+                        Err(error)
+                            if is_ignore_pattern_warning(&error) || is_vanished_path(&error) =>
+                        {
                             return ignore::WalkState::Continue;
                         }
                         Err(error) => {
@@ -291,19 +298,20 @@ impl MerkleSnapshot {
                     let _ = error_ref.set(error);
                     ignore::WalkState::Quit
                 };
-                let entry =
-                    match entry {
-                        Ok(e) => e,
-                        Err(error) if is_ignore_pattern_warning(&error) => {
-                            return ignore::WalkState::Continue;
-                        }
-                        Err(error) => {
-                            return fail(anyhow::Error::new(error).context(format!(
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(error) if is_ignore_pattern_warning(&error) || is_vanished_path(&error) => {
+                        return ignore::WalkState::Continue;
+                    }
+                    Err(error) => {
+                        return fail(
+                            anyhow::Error::new(error).context(format!(
                                 "failed walking workspace {}",
                                 root_ref.display()
-                            )));
-                        }
-                    };
+                            )),
+                        );
+                    }
+                };
                 if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                     return ignore::WalkState::Continue;
                 }
@@ -320,8 +328,15 @@ impl MerkleSnapshot {
                     return ignore::WalkState::Continue;
                 }
 
-                let metadata = match fs::metadata(path) {
+                let metadata = fs::metadata(path);
+                #[cfg(test)]
+                let metadata = test_support::check(test_support::Stage::Scan, path).and(metadata);
+                let metadata = match metadata {
                     Ok(m) => m,
+                    // The file was deleted after the walker listed it.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return ignore::WalkState::Continue;
+                    }
                     Err(error) => {
                         return fail(
                             anyhow::Error::new(error)
@@ -341,6 +356,9 @@ impl MerkleSnapshot {
                 let file_hash = if content_based {
                     let content = match fs::read(path) {
                         Ok(c) => c,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return ignore::WalkState::Continue;
+                        }
                         Err(error) => {
                             return fail(anyhow::Error::new(error).context(format!(
                                 "failed reading source file {}",
@@ -377,6 +395,9 @@ impl MerkleSnapshot {
         if let Some(error) = scan_error.into_inner() {
             return Err(error);
         }
+        // The walk skips each path that vanished. A root that vanished is not
+        // evidence that the files in it were deleted.
+        validate_workspace_root(root)?;
 
         let files: BTreeMap<String, String> = all_pairs.into_inner().unwrap().into_iter().collect();
         let root_hash = root_hash(&files);
@@ -563,6 +584,29 @@ impl MerkleSnapshot {
         }
         Ok(Some(diff))
     }
+
+    /// Records that `rel_paths` vanished after this snapshot listed them, so
+    /// the index holds no chunks for them.
+    ///
+    /// Each entry stays: if the path is still missing, the next run handles
+    /// it as an ordinary deletion. The new hash matches no file: if the file
+    /// returned with the same metadata, the next run indexes it again.
+    pub(crate) fn mark_vanished(&mut self, rel_paths: &[PathBuf]) {
+        for rel_path in rel_paths {
+            if let Some(hash) = self.files.get_mut(&index_path_string(rel_path)) {
+                *hash = format!("{VANISHED_FILE_HASH}-{}", u8::from(hash.ends_with("-1")));
+            }
+        }
+        self.root_hash = root_hash(&self.files);
+    }
+}
+
+/// True if the walker failed because a path no longer exists, such as a
+/// directory removed after its parent listed it.
+fn is_vanished_path(error: &ignore::Error) -> bool {
+    error
+        .io_error()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn validate_workspace_root(root: &Path) -> Result<()> {
@@ -610,6 +654,50 @@ fn root_hash(files: &BTreeMap<String, String>) -> String {
         hasher.update(hash.as_bytes());
     }
     hex::encode(hasher.digest128().to_le_bytes())
+}
+
+/// Reports chosen source files as deleted at one stage of an index run. A
+/// concurrent `git checkout` has the same effect on a file already listed.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Clone, Copy, Eq, Hash, PartialEq)]
+    pub(crate) enum Stage {
+        /// The snapshot walk reads the metadata of a listed file.
+        Scan,
+        /// The indexer reads the content of a file that the snapshot lists.
+        Index,
+    }
+
+    static VANISHED: LazyLock<Mutex<HashSet<(Stage, PathBuf)>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    pub(crate) struct VanishedFile(Stage, PathBuf);
+
+    impl Drop for VanishedFile {
+        fn drop(&mut self) {
+            VANISHED.lock().unwrap().remove(&(self.0, self.1.clone()));
+        }
+    }
+
+    pub(crate) fn vanish(stage: Stage, path: &Path) -> VanishedFile {
+        assert!(VANISHED.lock().unwrap().insert((stage, path.to_path_buf())));
+        VanishedFile(stage, path.to_path_buf())
+    }
+
+    pub(crate) fn check(stage: Stage, path: &Path) -> std::io::Result<()> {
+        if VANISHED
+            .lock()
+            .unwrap()
+            .contains(&(stage, path.to_path_buf()))
+        {
+            return Err(std::io::ErrorKind::NotFound.into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -756,6 +844,43 @@ mod tests {
             assert!(!snapshot.files.contains_key("locked/kept.rs"));
             assert!(MerkleSnapshot::build_inner(dir.path(), content_based, true).is_err());
         }
+    }
+
+    #[test]
+    fn file_that_vanishes_after_listing_is_skipped() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("kept.rs"), "fn retained() {}\n").unwrap();
+        fs::write(dir.path().join("gone.rs"), "fn removed() {}\n").unwrap();
+        let _vanished =
+            test_support::vanish(test_support::Stage::Scan, &dir.path().join("gone.rs"));
+        for content_based in [false, true] {
+            for skip_gitignore in [false, true] {
+                let snapshot =
+                    MerkleSnapshot::build_inner(dir.path(), content_based, skip_gitignore).unwrap();
+                assert_eq!(snapshot.files.keys().collect::<Vec<_>>(), ["kept.rs"]);
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_missing_path_is_a_skippable_walker_error() {
+        let walker_error = |kind: std::io::ErrorKind| ignore::Error::WithDepth {
+            depth: 1,
+            err: Box::new(ignore::Error::WithPath {
+                path: PathBuf::from("removed"),
+                err: Box::new(ignore::Error::Io(kind.into())),
+            }),
+        };
+        assert!(is_vanished_path(&walker_error(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(!is_vanished_path(&walker_error(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(!is_vanished_path(&ignore::Error::Partial(vec![
+            walker_error(std::io::ErrorKind::NotFound),
+            walker_error(std::io::ErrorKind::PermissionDenied),
+        ])));
     }
 
     #[cfg(unix)]
