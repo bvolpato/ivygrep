@@ -479,7 +479,19 @@ impl Workspace {
 
     /// Records the current index format version. Call after a successful index
     /// commit so the index is marked as written with the current layout.
+    ///
+    /// A marker that already holds the current version stays in place. Every
+    /// commit calls this function, and Windows can refuse to open a file while
+    /// it is replaced. A concurrent reader would then report version 0 for a
+    /// healthy index.
     pub fn write_index_format_version(&self) -> std::io::Result<()> {
+        if self.read_index_format_version() == INDEX_FORMAT_VERSION {
+            return Ok(());
+        }
+        self.replace_index_format_version()
+    }
+
+    fn replace_index_format_version(&self) -> std::io::Result<()> {
         let path = self.index_format_version_path();
         let tmp = path.with_file_name(format!("index_format_version.tmp.{}", uuid::Uuid::new_v4()));
         let result = (|| {
@@ -2541,6 +2553,34 @@ mod tests {
     }
 
     #[test]
+    fn current_index_format_marker_is_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace {
+            id: "format-marker-kept".to_string(),
+            root: tmp.path().to_path_buf(),
+            index_dir: tmp.path().join("index"),
+            repo_id: None,
+            base_index_dir: None,
+        };
+        ws.ensure_dirs().unwrap();
+        let marker = ws.index_format_version_path();
+
+        // A trailing newline parses as the same version and shows a rewrite.
+        let current = format!("{INDEX_FORMAT_VERSION}\n");
+        std::fs::write(&marker, &current).unwrap();
+        ws.write_index_format_version().unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), current);
+
+        std::fs::write(&marker, (INDEX_FORMAT_VERSION - 1).to_string()).unwrap();
+        ws.write_index_format_version().unwrap();
+        assert_eq!(ws.read_index_format_version(), INDEX_FORMAT_VERSION);
+
+        std::fs::remove_file(&marker).unwrap();
+        ws.write_index_format_version().unwrap();
+        assert_eq!(ws.read_index_format_version(), INDEX_FORMAT_VERSION);
+    }
+
+    #[test]
     fn index_format_version_is_never_observed_partially_during_writes() {
         use std::sync::Barrier;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -2567,6 +2607,12 @@ mod tests {
             let writer = scope.spawn(|| {
                 start.wait();
                 let result = (0..WRITES).try_for_each(|_| {
+                    // Replace the marker on every round, to cover the rename.
+                    // Windows can refuse to open a file during its
+                    // replacement, so cover what a commit does there.
+                    #[cfg(not(windows))]
+                    ws.replace_index_format_version()?;
+                    #[cfg(windows)]
                     ws.write_index_format_version()?;
                     std::thread::yield_now();
                     Ok::<_, std::io::Error>(())
