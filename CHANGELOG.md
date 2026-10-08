@@ -17,6 +17,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- A repository keeps the clean-checkout shortcut when an ignored directory contains a nested Git repository, such as a dependency checkout or an agent worktree. Git listed that directory in the search for ignored ignore files, ivygrep could not read it as a file, and every no-change index run then did the full reconciliation. That search also no longer enters ignored directories such as `target/` or `node_modules/`. The walker does not enter them, so their ignore files are not inputs.
 - `./build.sh`, `./test.sh`, `./bench.sh`, and `scripts/stress_large_repo.sh` run under Bash 3.2, the system Bash on macOS. They stopped with `unbound variable` when an optional argument list was empty, for example `./build.sh` without extra arguments.
 - On Windows, a commit no longer makes a concurrent reader report an incompatible index format. Every commit replaced the format marker, and Windows can refuse to open a file while it is replaced. The reader then got version 0 for a healthy index. A marker that already holds the current version now stays in place.
 
