@@ -81,6 +81,48 @@ fn git_reuse_retains_clean_checkout_shortcut_with_exclusion_only_rules() {
 
 #[test]
 #[serial]
+fn git_reuse_retains_clean_checkout_shortcut_beside_ignored_directories() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join("lib.rs"), "pub fn unchanged_marker() {}\n").unwrap();
+    fs::write(root.path().join(".gitignore"), "deps/\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+    // An ignored directory with its own ignore file and a nested repository,
+    // as a dependency checkout or an agent worktree leaves behind.
+    let nested = root.path().join("deps/library");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(root.path().join("deps/.gitignore"), "*.o\n").unwrap();
+    git(&nested, &["init", "-b", "main"]);
+    fs::write(nested.join("source.rs"), "pub fn dependency_marker() {}\n").unwrap();
+    assert_clean(root.path());
+
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    let state = fs::read(workspace.index_dir.join("indexed_git_state")).unwrap();
+    let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
+
+    // The walker does not enter `deps/`, so its ignore file is not an input.
+    fs::write(root.path().join("deps/.gitignore"), "*.obj\n").unwrap();
+    let stats = index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(stats.indexed_files, 0);
+    assert_eq!(
+        fs::read(workspace.index_dir.join("indexed_git_state")).unwrap(),
+        state
+    );
+    assert_eq!(
+        workspace.read_metadata().unwrap().unwrap().index_generation,
+        generation
+    );
+    assert_found(&workspace, "unchanged_marker", true);
+    assert_found(&workspace, "dependency_marker", false);
+}
+
+#[test]
+#[serial]
 fn git_reuse_observes_ancestor_ignore_changes() {
     let home = tempdir().unwrap();
     unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };

@@ -203,6 +203,8 @@ fn git_ignore_state(root: &Path) -> Option<String> {
         controls.insert(directory.join(".gitignore"), directory != root);
     }
 
+    // `--directory` keeps Git out of ignored directories. The walker does not
+    // enter them either, so their ignore files cannot change what is indexed.
     let ignored_controls = std::process::Command::new("git")
         .args([
             "ls-files",
@@ -210,6 +212,7 @@ fn git_ignore_state(root: &Path) -> Option<String> {
             "--others",
             "--ignored",
             "--exclude-standard",
+            "--directory",
             "--",
             ":(glob)**/.gitignore",
             ":(glob)**/.ignore",
@@ -223,7 +226,9 @@ fn git_ignore_state(root: &Path) -> Option<String> {
     for raw_path in ignored_controls
         .stdout
         .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
+        // Git names an ignored directory or a nested repository with a
+        // trailing slash. Neither is an ignore file.
+        .filter(|path| !path.is_empty() && !path.ends_with(b"/"))
     {
         let path = root.join(std::str::from_utf8(raw_path).ok()?);
         let independent = path.file_name().is_some_and(|name| name == ".ignore");
