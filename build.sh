@@ -126,4 +126,4 @@ if [[ "$profile" == "release" ]]; then
 fi
 
 configure_cuda_compute_cap
-run cargo build "${cargo_args[@]}" "${extra_args[@]}"
+run cargo build "${cargo_args[@]}" ${extra_args[@]+"${extra_args[@]}"}

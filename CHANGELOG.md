@@ -15,6 +15,10 @@ All notable changes to ivygrep are documented in this file.
 - The documentation and website explain search, context packs, memory limits, and model behavior in simpler language. A new resource report includes repeated released-binary measurements and a separate source comparison. It reports regressions, shared-host limits, and differences from historical model screening.
 - Literal search, regex search, result previews, symbol reference lookup, and indexing batches validate the workspace root once for each request or batch, not once for each file. Reads beneath the root keep the same symlink and regular-file checks. For a 200-file workspace whose root path has five directory names, one literal query makes 656 `open` and `openat` calls instead of 1,850. A first index of that workspace makes 1,320 calls instead of 3,696.
 
+### Fixed
+
+- `./build.sh`, `./test.sh`, `./bench.sh`, and `scripts/stress_large_repo.sh` run under Bash 3.2, the system Bash on macOS. They stopped with `unbound variable` when an optional argument list was empty, for example `./build.sh` without extra arguments.
+
 ## [1.3.0] - 2026-09-26
 
 ### Upgrade notes

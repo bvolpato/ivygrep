@@ -260,7 +260,7 @@ if ((do_shellcheck)); then
 fi
 
 if ((do_clippy)); then
-  run cargo clippy "${profile_flags[@]}" --all-targets "${cargo_flags[@]}" -- -D warnings
+  run cargo clippy ${profile_flags[@]+"${profile_flags[@]}"} --all-targets "${cargo_flags[@]}" -- -D warnings
 fi
 
 if ((do_web)); then
@@ -281,9 +281,9 @@ if ((do_web)); then
 fi
 
 if [[ "$mode" == "stress" ]]; then
-  cmd=(cargo test "${profile_flags[@]}" --test stress_harness "${cargo_flags[@]}" "${extra_args[@]}" -- --ignored --nocapture --test-threads 1)
+  cmd=(cargo test ${profile_flags[@]+"${profile_flags[@]}"} --test stress_harness "${cargo_flags[@]}" ${extra_args[@]+"${extra_args[@]}"} -- --ignored --nocapture --test-threads 1)
 else
-  cmd=(cargo test "${profile_flags[@]}" "${scope_flags[@]}" "${cargo_flags[@]}" "${extra_args[@]}" "${filter[@]}")
+  cmd=(cargo test ${profile_flags[@]+"${profile_flags[@]}"} "${scope_flags[@]}" "${cargo_flags[@]}" ${extra_args[@]+"${extra_args[@]}"} ${filter[@]+"${filter[@]}"})
   if ((${#test_args[@]})); then
     cmd+=(-- "${test_args[@]}")
   fi
@@ -297,7 +297,7 @@ fi
 
 if ((run_e2e)); then
   # Quick/library-only tests do not produce the CLI used by acceptance tests.
-  run cargo build "${profile_flags[@]}" "${cargo_flags[@]}" --bin ig
+  run cargo build ${profile_flags[@]+"${profile_flags[@]}"} "${cargo_flags[@]}" --bin ig
   target_dir="$(cargo metadata --format-version 1 --no-deps |
     python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
   e2e_binary="$target_dir/debug/ig"
