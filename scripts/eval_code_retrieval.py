@@ -1070,6 +1070,12 @@ def evaluate(args: argparse.Namespace) -> dict:
                 )
                 if key in workspace
             }
+            # `ig --status` does not measure the SQLite tiers of a large store.
+            # `ig --doctor` reads every page of the store and always measures them.
+            doctor, _ = run_json(
+                [str(binary), "--doctor", "--json", str(repo)], repo, daemon_env
+            )
+            index_configuration["index_components"] = doctor["index_components"]
             result = {
                 "dataset": dataset.name,
                 "dataset_provenance": provenance,

@@ -948,10 +948,8 @@ async fn run_status(json: bool) -> Result<()> {
                 let size = format_bytes(ws.index_size_bytes);
                 println!("{prefix}  Size:   {size}");
                 println!(
-                    "{prefix}          chunks {}, graph {}, sqlite aux {}, lexical {}, hash {}, neural {}",
-                    format_bytes(ws.index_components.stored_chunks_bytes),
-                    format_bytes(ws.index_components.graph_bytes),
-                    format_bytes(ws.index_components.sqlite_auxiliary_bytes),
+                    "{prefix}          {}, lexical {}, hash {}, neural {}",
+                    format_sqlite_tiers(&ws.index_components),
                     format_bytes(ws.index_components.lexical_bytes),
                     format_bytes(ws.index_components.hash_vectors_bytes),
                     format_bytes(ws.index_components.neural_vectors_bytes),
@@ -1107,6 +1105,27 @@ async fn run_status(json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The SQLite part of an index size line. A status listing does not measure
+/// the tiers of a large store, because that reads every page of it.
+fn format_sqlite_tiers(components: &crate::workspace::IndexComponentSizes) -> String {
+    match (
+        components.stored_chunks_bytes,
+        components.graph_bytes,
+        components.sqlite_auxiliary_bytes,
+    ) {
+        (Some(chunks), Some(graph), Some(auxiliary)) => format!(
+            "chunks {}, graph {}, sqlite aux {}",
+            format_bytes(chunks),
+            format_bytes(graph),
+            format_bytes(auxiliary)
+        ),
+        _ => format!(
+            "sqlite {} (tiers: ig --doctor)",
+            format_bytes(components.metadata_bytes)
+        ),
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -2328,10 +2347,8 @@ fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<
         report.neural_dimensions,
     );
     println!(
-        "Index: chunks {}, graph {}, sqlite aux {}, lexical {}, hash {}, neural {}, other {}",
-        format_bytes(report.index_components.stored_chunks_bytes),
-        format_bytes(report.index_components.graph_bytes),
-        format_bytes(report.index_components.sqlite_auxiliary_bytes),
+        "Index: {}, lexical {}, hash {}, neural {}, other {}",
+        format_sqlite_tiers(&report.index_components),
         format_bytes(report.index_components.lexical_bytes),
         format_bytes(report.index_components.hash_vectors_bytes),
         format_bytes(report.index_components.neural_vectors_bytes),
