@@ -18,6 +18,7 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 
 - `./build.sh`, `./test.sh`, `./bench.sh`, and `scripts/stress_large_repo.sh` run under Bash 3.2, the system Bash on macOS. They stopped with `unbound variable` when an optional argument list was empty, for example `./build.sh` without extra arguments.
+- On Windows, a commit no longer makes a concurrent reader report an incompatible index format. Every commit replaced the format marker, and Windows can refuse to open a file while it is replaced. The reader then got version 0 for a healthy index. A marker that already holds the current version now stays in place.
 
 ## [1.3.0] - 2026-09-26
 
