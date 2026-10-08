@@ -186,6 +186,55 @@ fn cli_force_add_preserves_watch_intent_without_daemon() {
     assert!(metadata.watch_enabled);
 }
 
+// `dirs::home_dir` reads `HOME` only on Unix.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn cli_does_not_index_the_home_directory_without_confirmation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let user_home = tmp.path().join("user");
+    let ivygrep_home = tmp.path().join("ivygrep_home");
+    std::fs::create_dir_all(&user_home).unwrap();
+    std::fs::write(user_home.join("notes.rs"), "pub fn greeting() {}\n").unwrap();
+    // The test has no terminal, so `ig` cannot ask.
+    let ig = |args: &[&str]| {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+        command
+            .args(["--hash", "--no-watch"])
+            .args(args)
+            .current_dir(&user_home)
+            .env("HOME", &user_home)
+            .env("IVYGREP_HOME", &ivygrep_home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1");
+        command
+    };
+    let refused = || {
+        predicates::str::contains("it is your home directory")
+            .and(predicates::str::contains("--yes"))
+    };
+    let indexed = || {
+        let workspace_home = ivygrep_home.join("indexes");
+        workspace_home.is_dir() && std::fs::read_dir(workspace_home).unwrap().next().is_some()
+    };
+
+    ig(&["greeting"]).assert().failure().stderr(refused());
+    ig(&["--add"]).assert().failure().stderr(refused());
+    assert!(!indexed(), "a refused command must not create an index");
+
+    let found = predicates::str::contains("notes.rs");
+    ig(&["--yes", "greeting"])
+        .assert()
+        .success()
+        .stdout(found.clone());
+    // An existing index of the home directory needs no confirmation.
+    ig(&["greeting"]).assert().success().stdout(found);
+    ig(&["--add"]).assert().success();
+    ig(&["--add", "--force"])
+        .assert()
+        .failure()
+        .stderr(refused());
+}
+
 #[test]
 #[serial]
 fn cli_help_snapshot() {

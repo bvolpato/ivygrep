@@ -277,6 +277,8 @@ ig --rm ~/notes      # remove a saved index; defaults to current directory
 ig --gc              # remove indexes whose directory has been gone past the grace period
 ```
 
+A search, `ig --interactive`, or `ig --add` that would index your home directory, a directory that contains it, or the filesystem root asks for confirmation first. Without a terminal, `ig` does not build that index unless you pass `--yes`.
+
 The daemon also removes the index of a directory that stays missing for seven days (`IVYGREP_INDEX_GC_GRACE_SECS`), and the overlay of a worktree removed with `git worktree remove` after ten minutes.
 
 ## Troubleshooting, upgrade, and uninstall

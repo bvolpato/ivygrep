@@ -200,7 +200,7 @@ impl App {
             None => std::env::current_dir()?,
         };
         let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
-        let bg_status = prepare_workspace_for_tui(&cli, &workspace, &runtime);
+        let bg_status = prepare_workspace_for_tui(&cli, &workspace, &runtime)?;
 
         Ok(Self {
             input: Input::default().with_value(cli.query.clone().unwrap_or_default()),
@@ -643,9 +643,9 @@ fn prepare_workspace_for_tui(
     cli: &Cli,
     workspace: &Workspace,
     runtime: &tokio::runtime::Handle,
-) -> Option<String> {
+) -> Result<Option<String>> {
     if cli.all_indices && !cli.skip_gitignore {
-        return None;
+        return Ok(None);
     }
 
     let needs_reindex_for_gitignore = cli.skip_gitignore
@@ -668,8 +668,11 @@ fn prepare_workspace_for_tui(
     let looks_indexed = metadata_present && artifacts_exist;
 
     if looks_indexed && !needs_reindex_for_gitignore {
-        return None;
+        return Ok(None);
     }
+
+    // The terminal is not in raw mode yet, so the question can be asked here.
+    crate::cli::confirm_broad_index(&workspace.root, cli.yes)?;
 
     // Not indexed — fire-and-forget: kick off indexing in the background
     // and let the TUI launch immediately.  trigger_search() already falls
@@ -703,7 +706,9 @@ fn prepare_workspace_for_tui(
         }
     });
 
-    Some("Indexing in background… search results may be partial".to_string())
+    Ok(Some(
+        "Indexing in background… search results may be partial".to_string(),
+    ))
 }
 
 fn tui_limit(cli: &Cli) -> Option<usize> {

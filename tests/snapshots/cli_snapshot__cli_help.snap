@@ -31,6 +31,7 @@ Options:
       --mcp                   Serve Model Context Protocol tools over stdio
       --wait-for-enhancement  Wait for requested vector enhancement and report worker failures
   -f, --force                 Rebuild workspace index from scratch when used with --add
+  -y, --yes                   Index a home directory or filesystem root without asking first
       --interactive           Launch the interactive terminal UI [alias: --ui]
   -l, --literal               Fast exact-match search backed by the index. Deterministic results
       --symbol                Find exact symbol definitions
