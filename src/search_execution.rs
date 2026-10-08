@@ -863,8 +863,10 @@ fn search_hits(
 
     let file_count = hits_by_file.len();
     let mut hits = Vec::with_capacity(merged_len);
+    // The first preview read walks the root. The other reads reuse that walk.
+    let files = ctx.workspace_files();
     for (file_path, file_hits) in hits_by_file {
-        let file_content = ctx.read_file_content(&file_path);
+        let file_content = ctx.read_file_content(&files, &file_path);
         for (chunk, score, sources) in file_hits {
             hits.push(prepare_hit(
                 chunk,

@@ -12,6 +12,7 @@ All notable changes to ivygrep are documented in this file.
 - Result caches, neural query caches, and idle search contexts now have byte budgets. Indexing batches use source-byte targets and estimated payload reservations. These limits control retained data, not total process RSS. One oversized indexing payload can proceed alone.
 - Semantic search retries ANN with bounded adaptive overfetch when rejected candidates leave too few visible results. Exact scoring remains available when retries underfill. Debug diagnostics record stage timings, recovery frequency, and scanned-key counts.
 - The documentation and website explain search, context packs, memory limits, and model behavior in simpler language. A new resource report includes repeated released-binary measurements and a separate source comparison. It reports regressions, shared-host limits, and differences from historical model screening.
+- Literal search, regex search, result previews, symbol reference lookup, and indexing batches validate the workspace root once for each request or batch, not once for each file. Reads beneath the root keep the same symlink and regular-file checks. For a 200-file workspace whose root path has five directory names, one literal query makes 656 `open` and `openat` calls instead of 1,850. A first index of that workspace makes 1,320 calls instead of 3,696.
 
 ## [1.3.0] - 2026-09-26
 

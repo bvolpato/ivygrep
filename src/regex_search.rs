@@ -25,6 +25,7 @@ use crate::protocol::SearchHit;
 use crate::search::SearchOptions;
 use crate::walker::SourcePathMatcher;
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
+use crate::workspace_file::RootHandle;
 
 const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COVERAGE_CACHE_ENTRIES: usize = 32;
@@ -324,6 +325,7 @@ fn unindexed_matching_paths(
     // ignore rules, so an exclude added since that walk hides them even when
     // reindexing finds nothing to publish.
     let mut source_paths = None;
+    let files = RootHandle::new(&workspace.root);
     let mut paths = Vec::new();
     for (rel, recorded) in candidates {
         if options.is_cancelled() {
@@ -341,7 +343,7 @@ fn unindexed_matching_paths(
                     .allows(rel)
                     .ok()?)
             && (type_match != PathTypeFilterMatch::ValidateText
-                || unknown_file_is_indexable_text(&workspace.root, rel))
+                || unknown_file_is_indexable_text(&files, rel))
         {
             paths.push(rel.clone());
         }
@@ -418,9 +420,10 @@ fn cached_unindexed_paths(
             // Empty files and files with a NUL in the sniffed prefix cannot
             // produce a literal hit. Drop them once per publication instead of
             // reading every binary asset on each query.
+            let files = RootHandle::new(&workspace.root);
             recorded = recorded
                 .into_par_iter()
-                .filter(|path| !options.is_cancelled() && may_contain_text(&workspace.root, path))
+                .filter(|path| !options.is_cancelled() && may_contain_text(&files, path))
                 .collect();
             Vec::new()
         }
@@ -505,8 +508,8 @@ fn chunk_backed_paths(workspace: &Workspace, use_overlay: bool) -> Option<HashSe
 /// Matches literal verification, which finds no text in empty files or files
 /// with a NUL in the prefix indexing sniffs. Unreadable files stay candidates,
 /// so a transient open failure cannot hide them for a whole publication.
-fn may_contain_text(root: &std::path::Path, path: &std::path::Path) -> bool {
-    let Ok(file) = crate::workspace_file::open(root, path) else {
+fn may_contain_text(files: &RootHandle, path: &std::path::Path) -> bool {
+    let Ok(file) = files.open(path) else {
         return true;
     };
     let mut sample = Vec::with_capacity(crate::chunking::TEXT_SNIFF_BYTES);
@@ -623,11 +626,13 @@ fn regex_search_parallel(
         left.truncate(max_hits);
         left
     };
+    // The first read walks the root. Every other candidate file reuses that walk.
+    let files = RootHandle::new(&workspace.root);
     let search_file = |rel_path: &PathBuf| {
         if options.is_cancelled() {
             return Vec::new();
         }
-        let Ok(file) = crate::workspace_file::open(&workspace.root, rel_path) else {
+        let Ok(file) = files.open(rel_path) else {
             return Vec::new();
         };
         let mut searcher = text_searcher();
@@ -711,6 +716,7 @@ fn regex_search_walk(
         .case_insensitive(true)
         .build(pattern)?;
     let mut searcher = text_searcher();
+    let files = RootHandle::new(&workspace.root);
 
     let mut hits = Vec::new();
 
@@ -749,7 +755,7 @@ fn regex_search_walk(
             break;
         }
         let mut local_hits = Vec::new();
-        let Ok(file) = crate::workspace_file::open(&workspace.root, &rel_path) else {
+        let Ok(file) = files.open(&rel_path) else {
             continue;
         };
         searcher.search_file(
@@ -781,7 +787,7 @@ fn regex_search_walk(
 
         if type_filter_match == PathTypeFilterMatch::ValidateText
             && !local_hits.is_empty()
-            && !unknown_file_is_indexable_text(&workspace.root, &rel_path)
+            && !unknown_file_is_indexable_text(&files, &rel_path)
         {
             continue;
         }
@@ -825,8 +831,8 @@ fn type_filter_match_for_path(
     }
 }
 
-fn unknown_file_is_indexable_text(root: &std::path::Path, path: &std::path::Path) -> bool {
-    let Ok(mut file) = crate::workspace_file::open(root, path) else {
+fn unknown_file_is_indexable_text(files: &RootHandle, path: &std::path::Path) -> bool {
+    let Ok(mut file) = files.open(path) else {
         return false;
     };
     crate::chunking::is_indexable_file_reader(path, &mut file).unwrap_or(false)
@@ -838,9 +844,8 @@ fn expand_regex_context(
     context: usize,
     options: &SearchOptions,
 ) {
-    expand_regex_context_with_paths(hits, context, Some(options), |path| {
-        crate::workspace_file::open(&workspace.root, path)
-    });
+    let files = RootHandle::new(&workspace.root);
+    expand_regex_context_with_paths(hits, context, Some(options), |path| files.open(path));
 }
 
 pub(crate) fn expand_regex_context_absolute(
