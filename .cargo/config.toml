@@ -26,3 +26,15 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # and E2E workflows assert it.
 [env]
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_LG_PAGE = "16"
+
+# Many tests run `git commit` and then immediately `git worktree add`. Since
+# Git 2.54, `git commit` starts a detached `git maintenance run --auto` that
+# can run `git worktree prune`. That prune removes the administrative
+# directory of a `git worktree add` that has not written its `locked` file
+# yet, and the add fails with "could not open '.git/worktrees/<name>/locked'".
+# These variables set `maintenance.auto=false` for the Git commands of each
+# process that Cargo starts, which includes the test binaries. Cargo keeps a
+# variable that the caller already set.
+GIT_CONFIG_COUNT = "1"
+GIT_CONFIG_KEY_0 = "maintenance.auto"
+GIT_CONFIG_VALUE_0 = "false"
