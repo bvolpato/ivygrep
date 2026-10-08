@@ -1252,7 +1252,8 @@ def main() -> None:
         if getattr(args, name) is None:
             setattr(args, name, value)
     if sys.platform == "darwin":
-        # MALLOC_ARENA_MAX is a glibc setting. Without it the load phase reports memory and does not gate it.
+        # MALLOC_ARENA_MAX is a glibc setting. Without it the load phase reports the daemon's memory and does
+        # not gate it. The memory budget of the largest session still applies.
         args.malloc_arenas = "default"
     elif not Path("/proc/self/smaps_rollup").is_file():
         parser.error("the MCP session soak requires Linux /proc or macOS libproc")

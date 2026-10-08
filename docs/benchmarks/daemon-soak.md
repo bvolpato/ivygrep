@@ -486,10 +486,11 @@ budgets are the same. Some quantities differ:
 - Idle wakeups are the wakeup counters of the whole process, not the voluntary
   context switches of each thread.
 - `MALLOC_ARENA_MAX` is a glibc setting. On macOS the MCP session soak always
-  runs as `--malloc-arenas default`: the load phase reports memory and does not
-  gate it. The lifecycle and churn phases and the daemon soak still apply the
-  anonymous-memory budget to the footprint. Whether that budget suits the macOS
-  allocator is not established.
+  runs as `--malloc-arenas default`: the load phase reports the daemon's memory
+  and does not gate it. The load phase still applies the 16 MiB budget to the
+  largest session. The lifecycle and churn phases and the daemon soak still
+  apply the anonymous-memory budget to the footprint. Whether these budgets
+  suit the macOS allocator is not established.
 
 Each macOS report has a `resource_sampling` entry that states these
 derivations, and its `cpu_affinity` is `null`. Every measured run in this
