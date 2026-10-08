@@ -68,6 +68,30 @@ class E2EWorkflowTest(unittest.TestCase):
                     self.assertEqual("--no-default-features" in build, hash_only)
                     self.assertIn("--bin ig", build)
 
+    def test_build_and_bench_run_without_extra_arguments(self) -> None:
+        # Bash 3.2, the system Bash on macOS, rejects "${array[@]}" for an
+        # empty array when `set -u` is active.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for script in ("build.sh", "bench.sh"):
+                shutil.copy2(E2E_WORKFLOW.parents[2] / script, root / script)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            cargo = bin_dir / "cargo"
+            cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CARGO_RECORD"\n')
+            cargo.chmod(0o755)
+            record = root / "cargo-record"
+            env = {
+                **os.environ,
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "CARGO_RECORD": str(record),
+            }
+            for script in ("build.sh", "bench.sh"):
+                subprocess.run(["bash", script], cwd=root, env=env, check=True, capture_output=True)
+            build, bench = record.read_text().splitlines()
+            self.assertEqual(build, "build --release --bin ig")
+            self.assertTrue(bench.startswith("bench --locked --bench indexer_bench "))
+
     def test_aarch64_smoke_uses_git_and_python_images(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")
         arm = workflow.split("cross-linux-aarch64:", maxsplit=1)[1].split(

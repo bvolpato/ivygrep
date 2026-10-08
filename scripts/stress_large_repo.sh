@@ -225,7 +225,7 @@ for q in "${QARR[@]}"; do
   t0=$(python3 -c 'import time;print(time.time())')
   # Run under a watchdog so a hung query produces a failure signal instead of
   # blocking the run forever, and treat a non-zero exit as a phase failure.
-  "$BIN" --no-watch "${QUERY_MODE[@]}" -n 20 "$q" "$REPO" >/dev/null 2>&1 &
+  "$BIN" --no-watch ${QUERY_MODE[@]+"${QUERY_MODE[@]}"} -n 20 "$q" "$REPO" >/dev/null 2>&1 &
   qpid=$!; waited=0; qrc=0
   while kill -0 "$qpid" 2>/dev/null; do
     if [ "$waited" -ge "$QUERY_TIMEOUT" ]; then kill -KILL "$qpid" 2>/dev/null; qrc=124; break; fi
