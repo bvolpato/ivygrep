@@ -18,6 +18,7 @@ import os
 import platform
 from pathlib import Path
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -151,8 +152,59 @@ def watcher_observed_probe(home: Path, repo: Path, expected: str | None) -> None
         if probe_matches(hits, expected):
             return
         if time.monotonic() >= deadline:
-            raise AssertionError(f"watcher returned stale probe: expected={expected!r}, hits={hits}")
+            raise StaleProbeError(f"watcher returned stale probe: expected={expected!r}, hits={hits}")
         time.sleep(0.1)
+
+
+class StaleProbeError(AssertionError):
+    pass
+
+
+def stale_probe_evidence(binary: Path, home: Path, repo: Path, env: dict[str, str]) -> dict[str, Any]:
+    """Where the stale probe lives: in the source tree, in the index stores, or only in the daemon.
+
+    Call it while the daemon still runs. Each fact is read independently, and a
+    fact that cannot be read is reported as its error text.
+    """
+    def read(fact: Any) -> Any:
+        try:
+            return fact()
+        except Exception as error:
+            return f"unavailable: {error}"
+
+    def git_clean() -> bool:
+        return not run(["git", "status", "--porcelain"], repo, env).strip()
+
+    def stores() -> list[dict[str, Any]]:
+        found = []
+        for index in sorted((home / "indexes").iterdir()):
+            if not (index / "metadata.sqlite3").is_file():
+                continue
+            connection = sqlite3.connect(f"file:{index / 'metadata.sqlite3'}?mode=ro", uri=True)
+            try:
+                chunks = connection.execute("SELECT COUNT(*) FROM chunks WHERE file_path = ?", (PROBE,)).fetchone()[0]
+            finally:
+                connection.close()
+            found.append({"sqlite_probe_chunks": chunks,
+                          "snapshot_lists_probe": f'"{PROBE}"' in (index / "merkle_snapshot.json").read_text(),
+                          "clean_checkout_state_recorded": (index / "indexed_git_state").is_file()})
+        return found
+
+    def local_search() -> bool:
+        # Without `--no-watch` the query goes to the daemon. With it, this process reads the stores.
+        output = run([str(binary), "--hash", "--json", "--no-watch", "-n", "10", "--include", PROBE,
+                      "soak revision value", str(repo)], repo, env)
+        return any(group.get("hits") for group in json.loads(output))
+
+    return {
+        "probe_file_exists": (repo / PROBE).exists(),
+        "git_worktree_clean": read(git_clean),
+        "index_stores": read(stores),
+        # A query that the daemon cannot have cached.
+        "daemon_uncached_query_returns_probe": read(
+            lambda: bool(search(home, repo, f"soak revision value {time.monotonic_ns()}", probe_only=True))),
+        "local_search_returns_probe": read(local_search),
+    }
 
 
 def main() -> None:
@@ -313,6 +365,8 @@ def main() -> None:
         except Exception as error:
             failure = error
             report["failure"] = str(error)
+            if isinstance(error, StaleProbeError):
+                report["stale_probe_evidence"] = stale_probe_evidence(binary, home, repo, env)
         finally:
             if daemon is not None:
                 daemon.stop()

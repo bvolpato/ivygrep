@@ -1,8 +1,11 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -37,6 +40,41 @@ class DaemonSoakTest(unittest.TestCase):
         with mock.patch.object(soak, "search", return_value=stale), mock.patch.object(soak.time, "monotonic", side_effect=[0, 21]):
             with self.assertRaisesRegex(AssertionError, "stale probe"):
                 soak.watcher_observed_probe(Path("home"), Path("repo"), expected)
+
+    def test_stale_probe_evidence_names_the_layer_that_holds_the_probe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home, repo = Path(temporary) / "home", Path(temporary) / "repo"
+            index = home / "indexes" / "workspace"
+            index.mkdir(parents=True)
+            repo.mkdir()
+            connection = sqlite3.connect(index / "metadata.sqlite3")
+            connection.execute("CREATE TABLE chunks (file_path TEXT NOT NULL)")
+            connection.execute("INSERT INTO chunks VALUES (?)", (soak.PROBE,))
+            connection.commit()
+            connection.close()
+            (index / "merkle_snapshot.json").write_text(json.dumps({"files": {"src/lib.rs": "1-0"}}))
+            # The stores hold the probe, the snapshot does not, and the daemon and a local search return it.
+            hit = [{"file_path": soak.PROBE}]
+            with mock.patch.object(soak, "search", return_value=hit), \
+                    mock.patch.object(soak, "run", side_effect=["", json.dumps([{"hits": hit}])]):
+                evidence = soak.stale_probe_evidence(Path("ig"), home, repo, {})
+            self.assertEqual(evidence, {
+                "probe_file_exists": False,
+                "git_worktree_clean": True,
+                "index_stores": [{"sqlite_probe_chunks": 1, "snapshot_lists_probe": False,
+                                  "clean_checkout_state_recorded": False}],
+                "daemon_uncached_query_returns_probe": True,
+                "local_search_returns_probe": True,
+            })
+            # A fact that cannot be read does not hide the other facts.
+            (index / "merkle_snapshot.json").unlink()
+            with mock.patch.object(soak, "search", return_value=[]), \
+                    mock.patch.object(soak, "run", side_effect=[" M src/lib.rs\n", "[]"]):
+                evidence = soak.stale_probe_evidence(Path("ig"), home, repo, {})
+            self.assertFalse(evidence["git_worktree_clean"])
+            self.assertTrue(evidence["index_stores"].startswith("unavailable: "))
+            self.assertFalse(evidence["daemon_uncached_query_returns_probe"])
+            self.assertFalse(evidence["local_search_returns_probe"])
 
     def test_resource_gates_reject_rss_fd_and_thread_growth(self):
         budgets = soak.resource_budgets(rss_growth_mib=32, total_rss_growth_mib=96, fd_growth=8, thread_growth=4)

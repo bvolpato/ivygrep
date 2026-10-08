@@ -26,7 +26,12 @@ These are bounded-growth gates, not a proof that arbitrarily slow leaks cannot
 exist. A restart cannot hide a failed epoch. Missing samples, failed queries,
 stale content, insufficient samples, or a budget violation fail the run.
 
-The JSON report and adjacent daemon log are retained on failure. Reports identify
+The JSON report and adjacent daemon log are retained on failure. When the probe
+stays stale, the report also has `stale_probe_evidence`: whether the probe file
+exists, whether the SQLite store and the Merkle snapshot still list it, whether
+a clean-checkout state is recorded, and whether an uncached daemon query and a
+local search return it. These facts separate a stale index from a stale daemon
+cache. Reports identify
 the binary, source commit/dirty status, harness hash, per-epoch query counts,
 mutations, correctness checks, and resource windows. Latency quantiles describe
 the last 50,000 successful requests of each epoch; they are load diagnostics, not
