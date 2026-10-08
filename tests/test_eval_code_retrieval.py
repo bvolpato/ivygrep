@@ -229,6 +229,24 @@ class RetrievalMetricsTest(unittest.TestCase):
                 ],
             )
 
+    def test_indexed_workspace_matches_a_repo_below_a_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            real = Path(temp).resolve() / "real"
+            (real / "repo").mkdir(parents=True)
+            link = Path(temp) / "link"
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlinks are not available: {error}")
+            status = [
+                {"root": str(real / "other"), "chunk_count": 1},
+                {"root": str(real / "repo"), "chunk_count": 2},
+            ]
+            workspace = eval_code_retrieval.indexed_workspace(status, link / "repo")
+            self.assertEqual(workspace["chunk_count"], 2)
+            with self.assertRaisesRegex(RuntimeError, "does not list"):
+                eval_code_retrieval.indexed_workspace(status, link / "missing")
+
     def test_query_scope_rejects_parent_path(self):
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaisesRegex(ValueError, "unsafe query scope"):

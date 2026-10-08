@@ -414,7 +414,9 @@ class MillionBenchmarkTest(unittest.TestCase):
                 text=True,
                 stdout=subprocess.PIPE,
             ).stdout.strip()
-            self.assertEqual(Path(top_level), corpus)
+            # Git reports the canonical path. The temporary directory can sit
+            # below a symlink, as `/tmp` and `/var` do on macOS.
+            self.assertEqual(Path(top_level), corpus.resolve())
 
     def test_start_daemon_creates_fresh_home_before_opening_log(self):
         with tempfile.TemporaryDirectory() as temp:

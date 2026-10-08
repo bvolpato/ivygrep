@@ -354,6 +354,19 @@ def query_targets_support(text: str) -> bool:
     )
 
 
+def indexed_workspace(status: object, repo: Path) -> dict:
+    """Return the status entry for `repo`.
+
+    ivygrep stores canonical roots. A temporary directory can sit below a
+    symlink (`/tmp` and `/var` on macOS), so compare resolved paths.
+    """
+    root = repo.resolve()
+    for item in status if isinstance(status, list) else []:
+        if Path(item["root"]).resolve() == root:
+            return item
+    raise RuntimeError(f"ig --status does not list the indexed workspace {root}")
+
+
 def run_json(
     command: list[str], cwd: Path, env: dict[str, str]
 ) -> tuple[object, float]:
@@ -769,7 +782,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             )
             neural_enhancement_ms = (time.perf_counter() - started) * 1000.0
             status, _ = run_json([str(binary), "--status", "--json"], repo, neural_env)
-            workspace = next(item for item in status if Path(item["root"]) == repo)
+            workspace = indexed_workspace(status, repo)
             if not workspace["has_neural_vectors"]:
                 raise RuntimeError(
                     "neural mode requested but no neural vectors were built"
@@ -1034,7 +1047,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                 )
 
             status, _ = run_json([str(binary), "--status", "--json"], repo, daemon_env)
-            workspace = next(item for item in status if Path(item["root"]) == repo)
+            workspace = indexed_workspace(status, repo)
             index_configuration = {
                 key: workspace[key]
                 for key in (
