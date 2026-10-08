@@ -128,6 +128,9 @@ fn clean_git_head(root: &Path) -> Option<String> {
             "--untracked-files=normal",
             "--ignore-submodules=none",
         ])
+        // `git status` otherwise rewrites the index of the repository to
+        // refresh its cached file data, and holds `index.lock` meanwhile.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .current_dir(root)
         .output()
         .ok()?;
