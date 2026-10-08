@@ -218,6 +218,51 @@ fn git_reuse_starts_six_git_processes_for_an_unchanged_checkout() {
 
 #[test]
 #[serial]
+fn git_reuse_does_not_rewrite_the_git_index() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join("lib.rs"), "pub fn unchanged_marker() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
+
+    // The same content with a new modification time makes the file data that
+    // Git caches in its index stale. `git status` would refresh the index.
+    fs::File::options()
+        .write(true)
+        .open(root.path().join("lib.rs"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+        .unwrap();
+    let git_index = root.path().join(".git/index");
+    let before = fs::read(&git_index).unwrap();
+
+    let stats = index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(stats.indexed_files, 0);
+    assert_eq!(
+        workspace.read_metadata().unwrap().unwrap().index_generation,
+        generation
+    );
+    assert_eq!(fs::read(&git_index).unwrap(), before);
+
+    assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(root.path())
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .env("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT", "1")
+        .args(["context", "Review lib.rs:1", "--lexical-only", "--no-watch"])
+        .assert()
+        .success();
+    assert_eq!(fs::read(&git_index).unwrap(), before);
+}
+
+#[test]
+#[serial]
 fn git_reuse_observes_ancestor_ignore_changes() {
     let home = tempdir().unwrap();
     unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };

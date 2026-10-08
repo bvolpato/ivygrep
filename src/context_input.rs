@@ -415,7 +415,11 @@ fn git_bytes_scoped(root: &Path, args: &[&str], workspace_prefix: &Path) -> Resu
     if !workspace_prefix.as_os_str().is_empty() {
         command.arg(workspace_prefix);
     }
-    let output = command.current_dir(root).output()?;
+    // Reading the change scope must not rewrite the index of the repository.
+    let output = command
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .current_dir(root)
+        .output()?;
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
