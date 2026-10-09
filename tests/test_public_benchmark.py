@@ -1817,6 +1817,8 @@ class PublicBenchmarkTest(unittest.TestCase):
                 return [], 0.1, {"record": record, "process_id": 123}
 
             def status(command, cwd, env):
+                if "--doctor" in command:
+                    return {"index_components": {"metadata_bytes": 1}}, 0.0
                 return [
                     {
                         "root": str(cwd),
@@ -1880,6 +1882,10 @@ class PublicBenchmarkTest(unittest.TestCase):
                                         "reranker_model": "public-linear-reranker-v2",
                                     }
                                 ]
+                            )
+                        if "--doctor" in command:
+                            output = json.dumps(
+                                {"index_components": {"metadata_bytes": 1}}
                             )
                         return evaluator.subprocess.CompletedProcess(
                             command, 0, stdout=output, stderr=""

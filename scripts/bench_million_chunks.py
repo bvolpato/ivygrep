@@ -868,6 +868,18 @@ def main() -> int:
         ).stdout
     )
     workspace = next(item for item in status if Path(item["root"]) == corpus)
+    # `ig --status` does not measure the SQLite tiers of a large store.
+    # `ig --doctor` reads every page of the store and always measures them.
+    doctor = json.loads(
+        subprocess.run(
+            [str(binary), "--doctor", "--json", str(corpus)],
+            cwd=root,
+            env=env,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+    )
     if workspace["chunk_count"] < manifest["expected_chunks"]:
         raise RuntimeError(
             f"expected at least {manifest['expected_chunks']} chunks, "
@@ -896,7 +908,7 @@ def main() -> int:
             "chunk_count": workspace["chunk_count"],
             "file_count": workspace["file_count"],
             "size_bytes": workspace["index_size_bytes"],
-            "components": workspace.get("index_components", {}),
+            "components": doctor["index_components"],
             "chunks_per_second": (
                 workspace["chunk_count"] / (index_metrics["wall_ms"] / 1000.0)
                 if index_metrics

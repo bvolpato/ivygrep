@@ -180,12 +180,14 @@ pub struct WorkspaceStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexComponentSizes {
     pub metadata_bytes: u64,
-    #[serde(default)]
-    pub stored_chunks_bytes: u64,
-    #[serde(default)]
-    pub graph_bytes: u64,
-    #[serde(default)]
-    pub sqlite_auxiliary_bytes: u64,
+    /// The three SQLite tiers are `None` when they were not measured. A status
+    /// listing does not measure them for a large store. `ig --doctor` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_chunks_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite_auxiliary_bytes: Option<u64>,
     pub lexical_bytes: u64,
     pub hash_vectors_bytes: u64,
     pub neural_vectors_bytes: u64,
@@ -1033,8 +1035,10 @@ impl Workspace {
         read_sqlite_vector_key_count(&self.index_dir)
     }
 
+    /// Measures the SQLite tiers of a store of any size. This reads every
+    /// page of the store.
     pub fn index_component_sizes(&self) -> IndexComponentSizes {
-        index_component_sizes(&self.index_dir)
+        index_component_sizes(&self.index_dir, None)
     }
 
     pub fn index_compaction_health(&self) -> IndexCompactionHealth {
@@ -1751,7 +1755,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
     for (index_dir, metadata) in entries {
         let (chunk_count, file_count) = read_sqlite_counts(&index_dir);
         let index_size_bytes = dir_size_bytes(&index_dir);
-        let index_components = index_component_sizes(&index_dir);
+        let index_components = index_component_sizes(&index_dir, Some(STATUS_TIER_SCAN_MAX_BYTES));
         let compaction = index_compaction_health(&index_dir);
         let vector_key_count = read_sqlite_vector_key_count(&index_dir);
         let hash_vector_count = vector_store_size(
@@ -2040,11 +2044,19 @@ fn read_cached_sqlite_counts(index_dir: &Path) -> Option<(u64, u64)> {
     Some((chunks as u64, files as u64))
 }
 
-fn index_component_sizes(index_dir: &Path) -> IndexComponentSizes {
-    let metadata_bytes: u64 = ["metadata.sqlite3", "overlay.sqlite3"]
-        .iter()
-        .map(|name| file_size(&index_dir.join(name)))
-        .sum();
+/// The tier split comes from `dbstat`, which reads every page of a store. That
+/// took 138 seconds for an 8.3 GB store, three times per status listing. A
+/// listing therefore measures the tiers only for a store up to this size.
+const STATUS_TIER_SCAN_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// `tier_scan_max_bytes` is the largest SQLite store whose tiers are measured.
+/// `None` measures a store of any size.
+fn index_component_sizes(
+    index_dir: &Path,
+    tier_scan_max_bytes: Option<u64>,
+) -> IndexComponentSizes {
+    let sqlite_stores = ["metadata.sqlite3", "overlay.sqlite3"].map(|name| index_dir.join(name));
+    let metadata_bytes: u64 = sqlite_stores.iter().map(|path| file_size(path)).sum();
     let lexical_bytes: u64 = ["tantivy", "overlay_tantivy"]
         .iter()
         .map(|name| shallow_dir_size_bytes(&index_dir.join(name)))
@@ -2054,19 +2066,24 @@ fn index_component_sizes(index_dir: &Path) -> IndexComponentSizes {
         .map(|name| file_size(&index_dir.join(name)))
         .sum();
     let neural_vectors_bytes = file_size(&index_dir.join("vectors_neural.usearch"));
-    let (stored_chunks_bytes, graph_bytes) = ["metadata.sqlite3", "overlay.sqlite3"]
+    let tiers = sqlite_stores
         .iter()
-        .map(|name| sqlite_tier_bytes(&index_dir.join(name)))
-        .fold((0, 0), |(chunks, graph), (next_chunks, next_graph)| {
-            (chunks + next_chunks, graph + next_graph)
+        .all(|path| tier_scan_max_bytes.is_none_or(|max_bytes| file_size(path) <= max_bytes))
+        .then(|| {
+            sqlite_stores
+                .iter()
+                .map(|path| sqlite_tier_bytes(path))
+                .fold((0, 0), |(chunks, graph), (next_chunks, next_graph)| {
+                    (chunks + next_chunks, graph + next_graph)
+                })
         });
-    let sqlite_auxiliary_bytes = metadata_bytes.saturating_sub(stored_chunks_bytes + graph_bytes);
     let classified = metadata_bytes + lexical_bytes + hash_vectors_bytes + neural_vectors_bytes;
     IndexComponentSizes {
         metadata_bytes,
-        stored_chunks_bytes,
-        graph_bytes,
-        sqlite_auxiliary_bytes,
+        stored_chunks_bytes: tiers.map(|(chunks, _)| chunks),
+        graph_bytes: tiers.map(|(_, graph)| graph),
+        sqlite_auxiliary_bytes: tiers
+            .map(|(chunks, graph)| metadata_bytes.saturating_sub(chunks + graph)),
         lexical_bytes,
         hash_vectors_bytes,
         neural_vectors_bytes,
@@ -2094,14 +2111,7 @@ fn index_compaction_health(index_dir: &Path) -> IndexCompactionHealth {
         let (page_bytes, free_bytes) = sqlite_page_usage(&conn);
         sqlite_page_bytes += page_bytes;
         sqlite_free_bytes += free_bytes;
-        legacy_graph_bytes += sqlite_named_bytes(
-            &conn,
-            &[
-                "symbol_edges",
-                "sqlite_autoindex_symbol_edges_1",
-                "idx_symbol_edges_source_chunk",
-            ],
-        );
+        legacy_graph_bytes += sqlite_legacy_graph_bytes(&conn);
     }
 
     let sqlite_free_percent = if sqlite_page_bytes == 0 {
@@ -2134,39 +2144,70 @@ fn sqlite_tier_bytes(path: &Path) -> (u64, u64) {
     ) else {
         return (0, 0);
     };
-    let stored_chunks_bytes = sqlite_named_bytes(&conn, &["chunks"]);
-    let graph_bytes = sqlite_named_bytes(
-        &conn,
-        &[
-            "symbols",
-            "idx_symbols_name",
-            "idx_symbols_chunk_key",
-            "file_edges",
-            "idx_file_edges_target",
-            "resolved_file_dependencies",
-            "idx_resolved_file_dependencies_lookup",
-            "unresolved_file_dependencies",
-            "idx_unresolved_file_dependencies_lookup",
-            "symbol_edges",
-            "sqlite_autoindex_symbol_edges_1",
-            "idx_symbol_edges_source_chunk",
-        ],
-    );
-    (stored_chunks_bytes, graph_bytes)
-}
-
-fn sqlite_named_bytes(conn: &rusqlite::Connection, names: &[&str]) -> u64 {
+    const GRAPH_NAMES: [&str; 9] = [
+        "symbols",
+        "idx_symbols_name",
+        "idx_symbols_chunk_key",
+        "file_edges",
+        "idx_file_edges_target",
+        "resolved_file_dependencies",
+        "idx_resolved_file_dependencies_lookup",
+        "unresolved_file_dependencies",
+        "idx_unresolved_file_dependencies_lookup",
+    ];
+    // One pass over the store gives both tiers.
     let Ok(mut stmt) = conn.prepare("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name") else {
-        return 0;
+        return (0, 0);
     };
     let Ok(rows) = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     }) else {
-        return 0;
+        return (0, 0);
     };
-    rows.filter_map(Result::ok)
-        .filter(|(name, _)| names.contains(&name.as_str()))
-        .map(|(_, bytes)| bytes.max(0) as u64)
+    let (mut stored_chunks_bytes, mut graph_bytes) = (0, 0);
+    for (name, bytes) in rows.filter_map(Result::ok) {
+        let bytes = bytes.max(0) as u64;
+        if name == "chunks" {
+            stored_chunks_bytes += bytes;
+        } else if GRAPH_NAMES.contains(&name.as_str())
+            || LEGACY_GRAPH_NAMES.contains(&name.as_str())
+        {
+            graph_bytes += bytes;
+        }
+    }
+    (stored_chunks_bytes, graph_bytes)
+}
+
+/// The table and the indexes of the call graph that earlier index formats
+/// stored.
+const LEGACY_GRAPH_NAMES: [&str; 3] = [
+    "symbol_edges",
+    "sqlite_autoindex_symbol_edges_1",
+    "idx_symbol_edges_source_chunk",
+];
+
+/// A `dbstat` query with a name reads only the pages of that table or index.
+/// A current store has none of the legacy names, so this reads no pages.
+fn sqlite_legacy_graph_bytes(conn: &rusqlite::Connection) -> u64 {
+    LEGACY_GRAPH_NAMES
+        .iter()
+        .filter(|name| {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                [name],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+        })
+        .map(|name| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            .max(0) as u64
+        })
         .sum()
 }
 
@@ -3637,19 +3678,80 @@ mod tests {
         crate::indexer::index_workspace(&ws, &model).unwrap();
 
         let sizes = ws.index_component_sizes();
-        assert!(sizes.stored_chunks_bytes > 0);
-        assert!(sizes.graph_bytes > 0);
-        assert!(sizes.sqlite_auxiliary_bytes > 0);
-        assert!(
-            sizes.stored_chunks_bytes + sizes.graph_bytes + sizes.sqlite_auxiliary_bytes
-                <= sizes.metadata_bytes
-        );
+        let stored_chunks_bytes = sizes.stored_chunks_bytes.unwrap();
+        let graph_bytes = sizes.graph_bytes.unwrap();
+        let sqlite_auxiliary_bytes = sizes.sqlite_auxiliary_bytes.unwrap();
+        assert!(stored_chunks_bytes > 0);
+        assert!(graph_bytes > 0);
+        assert!(sqlite_auxiliary_bytes > 0);
+        assert!(stored_chunks_bytes + graph_bytes + sqlite_auxiliary_bytes <= sizes.metadata_bytes);
+
+        // A status listing does not read every page of a store above its
+        // limit. It still reports the size of the store.
+        let unscanned = index_component_sizes(&ws.index_dir, Some(sizes.metadata_bytes - 1));
+        assert_eq!(unscanned.stored_chunks_bytes, None);
+        assert_eq!(unscanned.graph_bytes, None);
+        assert_eq!(unscanned.sqlite_auxiliary_bytes, None);
+        assert_eq!(unscanned.metadata_bytes, sizes.metadata_bytes);
+        assert_eq!(unscanned.lexical_bytes, sizes.lexical_bytes);
+        let listed = index_component_sizes(&ws.index_dir, Some(sizes.metadata_bytes));
+        assert_eq!(listed.stored_chunks_bytes, Some(stored_chunks_bytes));
+        assert_eq!(listed.graph_bytes, Some(graph_bytes));
 
         let health = ws.index_compaction_health();
         assert_eq!(health.format_version, INDEX_FORMAT_VERSION);
         assert_eq!(health.legacy_graph_bytes, 0);
         assert!(!health.compaction_recommended);
         assert!(health.healthy);
+    }
+
+    #[test]
+    #[serial]
+    fn compaction_health_measures_a_legacy_call_graph_by_name() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let ws = Workspace::resolve(root.path()).unwrap();
+        ws.ensure_dirs().unwrap();
+        let conn = crate::indexer::open_sqlite(&ws.sqlite_path()).unwrap();
+        ws.write_index_format_version().unwrap();
+        assert_eq!(ws.index_compaction_health().legacy_graph_bytes, 0);
+
+        conn.execute_batch(
+            "CREATE TABLE symbol_edges (
+                 source_chunk INTEGER NOT NULL,
+                 target TEXT NOT NULL,
+                 PRIMARY KEY (source_chunk, target)
+             );
+             CREATE INDEX idx_symbol_edges_source_chunk ON symbol_edges (source_chunk);",
+        )
+        .unwrap();
+        for index in 0..2000 {
+            conn.execute(
+                "INSERT INTO symbol_edges VALUES (?1, ?2)",
+                rusqlite::params![index, format!("callee_{index:05}")],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        // The pages of the table and of its two indexes, from one full pass.
+        let expected: i64 = conn
+            .query_row(
+                "SELECT SUM(pgsize) FROM dbstat WHERE name LIKE '%symbol_edges%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let health = ws.index_compaction_health();
+        assert_eq!(health.legacy_graph_bytes, expected as u64);
+        assert!(expected > 3 * 4096, "{expected}");
+        assert!(!health.healthy);
+        // The legacy call graph still counts as graph storage.
+        assert!(ws.index_component_sizes().graph_bytes.unwrap() >= expected as u64);
     }
 
     #[test]

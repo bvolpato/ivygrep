@@ -865,6 +865,12 @@ advanced skips the redundant rescan.
 indexes. Status distinguishes lexical readiness, hash coverage, neural coverage,
 active jobs, stalled work, watcher health, and compaction recommendations.
 
+The split of the SQLite store into stored chunks, graph, and auxiliary bytes
+comes from `dbstat`, which reads every page of the store. A status listing
+therefore measures it only for a store up to 256 MiB, and leaves the three
+fields out for a larger store. `ig --doctor` measures it for a store of any
+size.
+
 ## Memory budgets and performance diagnostics
 
 These limits describe the source implementation. Released-binary measurements are linked from the [resource report](benchmarks/resource-load.html).
