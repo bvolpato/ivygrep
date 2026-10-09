@@ -148,9 +148,17 @@ fn corrupt_store_recovery_rebuilds_all_sources_and_preserves_settings() {
             let mut incomplete = before.clone();
             incomplete.last_indexed_at_unix = None;
             workspace.write_metadata(&incomplete).unwrap();
-            let summary =
-                index_workspace_inner(workspace, &fixture.model, false, None, true, false, false)
-                    .unwrap();
+            let summary = index_workspace_inner(
+                workspace,
+                &fixture.model,
+                false,
+                None,
+                true,
+                false,
+                false,
+                &mut false,
+            )
+            .unwrap();
             // This test bypasses the outer entry point, which normally clears
             // the publication marker after recording the indexed filter.
             fs::remove_file(workspace.indexing_incomplete_path()).unwrap();

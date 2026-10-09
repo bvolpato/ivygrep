@@ -23,6 +23,107 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn chunk_count(workspace: &Workspace, path: &str) -> i64 {
+    open_sqlite(&workspace.sqlite_path())
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE file_path = ?1",
+            [path],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+#[serial]
+fn file_deleted_before_its_read_does_not_fail_the_update() {
+    use crate::merkle::test_support::{Stage, vanish};
+
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept_before() {}\n").unwrap();
+    fs::write(root.path().join("gone.rs"), "pub fn gone_before() {}\n").unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+    assert_eq!(chunk_count(&workspace, "gone.rs"), 1);
+
+    // The scan lists both edited files. One vanishes before the indexer
+    // reads it.
+    fs::write(root.path().join("kept.rs"), "pub fn kept_after() {}\n").unwrap();
+    fs::write(root.path().join("gone.rs"), "pub fn gone_after() {}\n").unwrap();
+    let vanished = vanish(Stage::Index, &workspace.root.join("gone.rs"));
+    index_workspace(&workspace, &model).unwrap();
+    drop(vanished);
+    assert_eq!(chunk_count(&workspace, "gone.rs"), 0);
+    assert_eq!(
+        literal_search(&workspace, "kept_after", &SearchOptions::default())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The next run handles the missing path as an ordinary deletion.
+    fs::remove_file(root.path().join("gone.rs")).unwrap();
+    let summary = index_workspace(&workspace, &model).unwrap();
+    assert_eq!((summary.indexed_files, summary.deleted_files), (0, 1));
+    assert_eq!(
+        MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
+        MerkleSnapshot::build(&workspace.root, false).unwrap()
+    );
+}
+
+#[test]
+#[serial]
+fn file_that_returns_after_it_vanished_is_indexed_by_the_next_run() {
+    use crate::merkle::test_support::{Stage, vanish};
+
+    // A clean Git checkout must not record the first run as current.
+    for use_git in [false, true] {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("kept.rs"), "pub fn kept() {}\n").unwrap();
+        fs::write(root.path().join("back.rs"), "pub fn back() {}\n").unwrap();
+        if use_git {
+            git(root.path(), &["init", "-q"]);
+            git(root.path(), &["config", "core.autocrlf", "false"]);
+            git(root.path(), &["add", "."]);
+            git(
+                root.path(),
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+            );
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+
+        let vanished = vanish(Stage::Index, &workspace.root.join("back.rs"));
+        index_workspace(&workspace, &model).unwrap();
+        drop(vanished);
+        assert_eq!(chunk_count(&workspace, "back.rs"), 0, "git={use_git}");
+
+        // The file is on disk again with the metadata that the scan recorded.
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 1, "git={use_git}");
+        assert_eq!(chunk_count(&workspace, "back.rs"), 1, "git={use_git}");
+        assert_eq!(
+            index_workspace(&workspace, &model).unwrap().indexed_files,
+            0
+        );
+    }
+}
+
 #[test]
 #[serial]
 fn unchanged_sources_repair_invalid_stores_before_noop() {
