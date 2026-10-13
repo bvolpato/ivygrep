@@ -4472,20 +4472,25 @@ async fn handle_request_with_cancellation(
                 if let Some(mut cached_hits) =
                     state_clone.cached_query_results(&cache_key, cache_revision)
                 {
+                    let cached_hit_count = cached_hits.len();
                     crate::search_service::retain_live_hits(&mut cached_hits, &workspaces);
-                    let cancelled = options.is_cancelled();
-                    if !cancelled {
-                        state_clone
-                            .schedule_search_enhancement(workspaces.clone(), query_uses_neural);
+                    // Cached results are already limited. Removing any hit
+                    // requires a new search to promote live candidates.
+                    if cached_hits.len() == cached_hit_count {
+                        let cancelled = options.is_cancelled();
+                        if !cancelled {
+                            state_clone
+                                .schedule_search_enhancement(workspaces.clone(), query_uses_neural);
+                        }
+                        return (
+                            cached_hits,
+                            all_errors,
+                            workspaces.len(),
+                            query,
+                            options,
+                            cancelled,
+                        );
                     }
-                    return (
-                        cached_hits,
-                        all_errors,
-                        workspaces.len(),
-                        query,
-                        options,
-                        cancelled,
-                    );
                 }
 
                 let mut neural_query_cache_write = None;
@@ -10731,12 +10736,94 @@ mod tests {
         }
         assert_eq!(state.query_results.lock().results.len(), 1);
         assert!(
-            state.search_contexts.lock().is_empty(),
-            "deleted-source cache hit loaded a context"
+            !state.search_contexts.lock().is_empty(),
+            "deleted-source cache entry must trigger a fresh search"
         );
 
         state.clear_workspace_contexts(&workspace);
         assert!(state.query_results.lock().results.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_search_cache_promotes_live_runner_up_after_top_hit_is_deleted() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+
+        let repo = tempdir().unwrap();
+        for path in ["auth.rs", "fallback.rs"] {
+            std::fs::write(
+                repo.path().join(path),
+                "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        let request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "authenticate_user".to_string(),
+            limit: Some(1),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+        let first = handle_request(state.clone(), request.clone()).await;
+        let cached_path = match first {
+            DaemonResponse::SearchResults { hits, .. } => {
+                assert_eq!(hits.len(), 1);
+                hits[0].file_path.clone()
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        };
+        let remaining_path = if cached_path == Path::new("auth.rs") {
+            Path::new("fallback.rs")
+        } else {
+            assert_eq!(cached_path, Path::new("fallback.rs"));
+            Path::new("auth.rs")
+        };
+        state.search_contexts.lock().clear();
+        match handle_request(state.clone(), request.clone()).await {
+            DaemonResponse::SearchResults { hits, .. } => {
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].file_path, cached_path);
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+        assert!(state.search_contexts.lock().is_empty());
+        assert_eq!(state.query_results.lock().results.len(), 1);
+
+        std::fs::remove_file(repo.path().join(&cached_path)).unwrap();
+        match handle_request(state.clone(), request.clone()).await {
+            DaemonResponse::SearchResults { hits, .. } => {
+                assert_eq!(hits.len(), 1, "cached deletion lost the live runner-up");
+                assert_eq!(hits[0].file_path, remaining_path);
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+
+        state.search_contexts.lock().clear();
+        match handle_request(state.clone(), request).await {
+            DaemonResponse::SearchResults { hits, .. } => {
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].file_path, remaining_path);
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+        assert!(
+            state.search_contexts.lock().is_empty(),
+            "the recomputed live result must replace the stale cache entry"
+        );
     }
 
     #[tokio::test]
