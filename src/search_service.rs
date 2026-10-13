@@ -74,6 +74,34 @@ pub(crate) struct SearchOutcome {
     pub(crate) warnings: Vec<String>,
 }
 
+pub(crate) fn retain_live_hits(hits: &mut Vec<SearchHit>, workspaces: &[Workspace]) {
+    let mut roots = workspaces
+        .iter()
+        .map(|workspace| {
+            (
+                &workspace.root,
+                crate::workspace_file::RootHandle::new(&workspace.root),
+            )
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|(root, _)| std::cmp::Reverse(root.components().count()));
+    let mut missing_paths = std::collections::HashMap::new();
+    hits.retain(|hit| {
+        let workspace = if hit.file_path.is_absolute() {
+            roots
+                .iter()
+                .find(|(root, _)| hit.file_path.starts_with(root))
+        } else {
+            roots.first()
+        };
+        workspace.is_none_or(|(root, files)| {
+            !*missing_paths
+                .entry((root, hit.file_path.clone()))
+                .or_insert_with(|| files.is_missing(&hit.file_path))
+        })
+    });
+}
+
 pub(crate) struct SearchBatch {
     hits: Vec<SearchHit>,
     warnings: Vec<String>,

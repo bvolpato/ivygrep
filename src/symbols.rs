@@ -241,6 +241,7 @@ fn search_symbols_in_index(
     } else {
         workspace.sqlite_path()
     };
+    let files = crate::workspace_file::RootHandle::new(&workspace.root);
     let mut hits = query_sqlite_at(search_context, &primary_sqlite, |primary| {
         query_workspace_db(
             primary,
@@ -249,6 +250,7 @@ fn search_symbols_in_index(
             options,
             &path_matcher,
             None,
+            &files,
         )
     })?;
 
@@ -273,6 +275,7 @@ fn search_symbols_in_index(
                     options,
                     &path_matcher,
                     Some(&shadowed_paths),
+                    &files,
                 )
             },
         )?);
@@ -533,6 +536,7 @@ fn query_workspace_db(
     options: &SearchOptions,
     path_matcher: &PathGlobMatcher,
     shadowed_paths: Option<&ShadowedBasePaths<'_>>,
+    files: &crate::workspace_file::RootHandle,
 ) -> Result<Vec<(u8, SearchHit)>> {
     if options.limit == Some(0) {
         return Ok(Vec::new());
@@ -583,6 +587,7 @@ fn query_workspace_db(
             || !type_matches(&language, options.type_filter.as_deref())
             || !path_matcher.matches(&file_path)
             || (!options.skip_gitignore && is_ignored)
+            || files.is_missing(&file_path)
         {
             continue;
         }
@@ -2663,6 +2668,9 @@ mod tests {
 
         let matcher = PathGlobMatcher::new(&[], &[]).unwrap();
         let query = parse_symbol_query("broken");
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/broken.rs"), "pub fn broken() {}\n").unwrap();
         let search_error = query_workspace_db(
             &conn,
             &query,
@@ -2670,6 +2678,7 @@ mod tests {
             &SearchOptions::default(),
             &matcher,
             None,
+            &crate::workspace_file::RootHandle::new(root.path()),
         )
         .unwrap_err()
         .to_string();

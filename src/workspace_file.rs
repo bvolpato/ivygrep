@@ -96,6 +96,11 @@ impl RootHandle {
         open(&self.root, path)
     }
 
+    pub(crate) fn is_missing(&self, path: &Path) -> bool {
+        self.open(path)
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    }
+
     /// Invalid UTF-8 is replaced, matching how indexing decodes source files.
     pub(crate) fn read_to_string(&self, path: &Path) -> io::Result<String> {
         Ok(lossy_string(self.read(path)?))

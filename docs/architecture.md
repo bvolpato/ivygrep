@@ -84,7 +84,12 @@ serving; it is not required for every read path.
 
 Cargo builds one binary, `ig`. Default features include local neural retrieval.
 `--no-default-features` produces a hash-only build. Platform features select
-Accelerate, Metal, or CUDA support where available.
+Accelerate, Metal, or CUDA support where available. The shell installer selects
+CUDA only on Linux x86_64 with a visible supported NVIDIA GPU and a complete
+CUDA 13 runtime; it selects Metal on Apple Silicon and portable builds
+elsewhere. Homebrew uses Metal on Apple Silicon and portable builds on Intel
+macOS and Linux. CUDA and Metal accelerate transformer profiles; the default
+Model2Vec profile runs on CPU in every build.
 
 `build.rs` embeds `web/dist` into the binary. Frontend source changes therefore
 require a deterministic `pnpm -C web build` and committed generated assets.
@@ -168,8 +173,11 @@ queryable.
 
 The Merkle snapshot compares current file fingerprints with the last committed
 state. Its diff contains added or modified paths plus deleted paths. Incremental
-updates replace affected chunks, graph edges, symbols, lexical documents, and
-vector keys inside bounded transactions.
+updates replace changed chunks and remove deleted-path data from the stores
+owned by that workspace inside bounded transactions. Main-index deletions remove
+their chunks, graph edges, symbols, lexical documents, and vector keys. In a
+worktree, deletion of a base-backed path is represented by an overlay tombstone;
+see [Worktree overlays](#worktree-overlays).
 
 Watcher events use a targeted refresh only when path-level reconciliation is
 safe. New directories, ignore-file changes, uncertain Git state, and similar
@@ -186,6 +194,19 @@ indexing checks both overlay and inherited base stores. Failed validation forces
 complete staged recovery, not a replay of an empty or partial Merkle delta.
 These checks add store-opening/counting work even when source discovery is skipped;
 they do not validate every vector payload or compare concurrent enhancement markers.
+
+The clean-checkout reuse marker also certifies that indexed snapshot paths are
+Git-tracked and still match live source metadata. A temporary file indexed and
+deleted between two clean Git checks cannot certify that state. Older markers
+require reconciliation once, and explicit watcher paths bypass the shortcut.
+
+On current `main`, CLI searches and context requests, the TUI, and `ig --add`
+ask before building an index for the home directory, a directory containing
+home, or the filesystem root. An interactive terminal accepts `y` or `yes`;
+non-interactive use requires `--yes`. A plain `--add` of an already indexed,
+healthy directory does not trigger this prompt. `--force` rebuilds it, while
+`--skip-gitignore` can add ignored files, and both prompt when they target a
+broad root. The `v1.3.0` release predates this CLI safeguard.
 
 Main indexes and overlays mark live publication as incomplete before changing
 stores. The marker survives failures and is cleared only after stores, metadata,
@@ -289,6 +310,13 @@ module-level JavaScript and TypeScript function bindings, and module-level Rust
 in that function's chunk and does not register a definition.
 
 ## Search pipeline
+
+Search omits a file immediately when the contained workspace reader returns
+`NotFound`, even before the watcher reconciles the index or snapshot. The same
+filter applies to fresh and warm daemon hybrid results, symbol definitions, and
+context graph items. Permission, unavailable, and symlink failures retain the
+indexed-text fallback; only `NotFound` counts as deletion. This behavior on
+current `main` is not included in the released `v1.3.0`.
 
 ### Workspace selection
 
@@ -690,7 +718,10 @@ conventional parent module file, such as `#[path]` modules, get no `self::` or
 Stack-trace frames under `node_modules`, `site-packages`, `dist-packages`, the
 Cargo registry, or the Go module cache map only by their package-relative path,
 and `rustc` toolchain frames are ignored. `--since` accepts one commit-ish, such
-as `HEAD~3` or `@{upstream}`, and rejects ranges and negated references.
+as `HEAD~3` or `@{upstream}`, finds its Git merge base with `HEAD`, and compares
+that base with `HEAD`. It adds staged, unstaged, and untracked changes, and
+rejects ranges and negated references. The selected ref itself is not used as
+the diff base.
 
 ## Worktree overlays
 
@@ -708,6 +739,13 @@ from the active worktree. Base generation or incarnation changes trigger
 reconciliation before overlay content is trusted. A base rebuild can reuse a
 generation number, so that counter alone is not an identity. Legacy references
 without an incarnation reconcile once; unchanged files still use the shared base.
+
+The overlay stores a tombstone for each deleted path that still exists in the
+base index. That tombstone hides inherited results for this worktree without
+changing the base index. Deleting an overlay-only addition removes its overlay
+data and needs no base tombstone. Restoring base-identical content clears the
+overlay entry and tombstone so the worktree inherits the base again; restoring
+divergent content keeps it in the overlay and continues to shadow the base path.
 
 ## Daemon, watchers, and background work
 

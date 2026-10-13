@@ -4469,9 +4469,10 @@ async fn handle_request_with_cancellation(
                     model.model_identity().is_some(),
                     all_indices,
                 );
-                if let Some(cached_hits) =
+                if let Some(mut cached_hits) =
                     state_clone.cached_query_results(&cache_key, cache_revision)
                 {
+                    crate::search_service::retain_live_hits(&mut cached_hits, &workspaces);
                     let cancelled = options.is_cancelled();
                     if !cancelled {
                         state_clone
@@ -4581,6 +4582,7 @@ async fn handle_request_with_cancellation(
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
+                crate::search_service::retain_live_hits(&mut all_hits, &workspaces);
                 truncate_daemon_search_hits(&mut all_hits, &options);
                 drop(neural_query_vector_job.take());
                 let cancelled = options.is_cancelled();
@@ -10710,7 +10712,7 @@ mod tests {
             unreachable!("test request is a search")
         };
         query.push_str("  ");
-        let second = handle_request(state.clone(), equivalent_request).await;
+        let second = handle_request(state.clone(), equivalent_request.clone()).await;
         let second_count = match second {
             DaemonResponse::SearchResults { hits, .. } => hits.len(),
             other => panic!("expected SearchResults, got {other:?}"),
@@ -10720,6 +10722,17 @@ mod tests {
         assert!(
             state.search_contexts.lock().is_empty(),
             "query cache hit should not reload SearchContext"
+        );
+
+        std::fs::remove_file(repo.path().join("auth.rs")).unwrap();
+        match handle_request(state.clone(), equivalent_request).await {
+            DaemonResponse::SearchResults { hits, .. } => assert!(hits.is_empty()),
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+        assert_eq!(state.query_results.lock().results.len(), 1);
+        assert!(
+            state.search_contexts.lock().is_empty(),
+            "deleted-source cache hit loaded a context"
         );
 
         state.clear_workspace_contexts(&workspace);

@@ -23,6 +23,26 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn commit_fixture(root: &Path) {
+    git(root, &["init", "-q"]);
+    git(root, &["config", "core.autocrlf", "false"]);
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    );
+}
+
 fn chunk_count(workspace: &Workspace, path: &str) -> i64 {
     open_sqlite(&workspace.sqlite_path())
         .unwrap()
@@ -32,6 +52,162 @@ fn chunk_count(workspace: &Workspace, path: &str) -> i64 {
             |row| row.get(0),
         )
         .unwrap()
+}
+
+fn assert_transient_source_does_not_poison_clean_checkout_reuse(tracked: bool) {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept() {}\n").unwrap();
+    let changed_path = root.path().join("transient.rs");
+    if tracked {
+        fs::write(&changed_path, "pub fn original() {}\n").unwrap();
+    }
+    commit_fixture(root.path());
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    let mutation = git_state::test_support::transient_source(
+        &workspace.root,
+        &workspace.root.join("transient.rs"),
+        b"pub fn transient_indexed_but_not_current_marker() {}\n",
+    );
+
+    // Both Git checks see the same clean checkout, but indexing reads a
+    // transient source between them. A clean marker would suppress repair.
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    drop(mutation);
+    assert_eq!(chunk_count(&workspace, "transient.rs"), 1);
+    assert!(CleanGitCheckout::capture(&workspace.root).is_some());
+    assert!(
+        !indexed_git_state_path(&workspace).exists(),
+        "a transient indexed source was certified as current: tracked={tracked}"
+    );
+
+    let repaired = index_workspace_for_watcher(&workspace, &model).unwrap();
+    if tracked {
+        assert_eq!((repaired.indexed_files, repaired.deleted_files), (1, 0));
+        assert_eq!(chunk_count(&workspace, "transient.rs"), 1);
+        assert_eq!(
+            literal_search(&workspace, "original", &SearchOptions::default())
+                .unwrap()
+                .len(),
+            1
+        );
+    } else {
+        assert_eq!((repaired.indexed_files, repaired.deleted_files), (0, 1));
+        assert_eq!(chunk_count(&workspace, "transient.rs"), 0);
+    }
+    assert!(
+        literal_search(
+            &workspace,
+            "transient_indexed_but_not_current_marker",
+            &SearchOptions::default()
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
+        MerkleSnapshot::build(&workspace.root, false).unwrap()
+    );
+    assert!(indexed_git_state_path(&workspace).exists());
+}
+
+#[test]
+#[serial]
+fn deleted_transient_source_does_not_poison_clean_checkout_reuse() {
+    assert_transient_source_does_not_poison_clean_checkout_reuse(false);
+}
+
+#[test]
+#[serial]
+fn restored_transient_source_does_not_poison_clean_checkout_reuse() {
+    assert_transient_source_does_not_poison_clean_checkout_reuse(true);
+}
+
+#[test]
+#[serial]
+fn legacy_clean_checkout_marker_reconciles_deleted_sources_before_reuse() {
+    for refresh_base in [false, true] {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("kept.rs"), "pub fn kept() {}\n").unwrap();
+        commit_fixture(root.path());
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        fs::write(
+            root.path().join("gone.rs"),
+            "pub fn legacy_deleted_marker() {}\n",
+        )
+        .unwrap();
+        index_workspace_for_watcher(&workspace, &model).unwrap();
+        fs::remove_file(root.path().join("gone.rs")).unwrap();
+        let checkout = CleanGitCheckout::capture(&workspace.root).unwrap();
+        let legacy_state = checkout
+            .state()
+            .lines()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(indexed_git_state_path(&workspace), legacy_state).unwrap();
+
+        // The former base metadata refresh also trusted the poisoned marker,
+        // skipping reconciliation or overwriting the only deletion evidence.
+        if refresh_base {
+            assert!(!refresh_clean_base_metadata(&workspace).unwrap());
+        }
+        let repaired = index_workspace_for_watcher(&workspace, &model).unwrap();
+        assert_eq!(repaired.deleted_files, 1);
+        assert_eq!(chunk_count(&workspace, "gone.rs"), 0);
+        assert_eq!(
+            MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
+            MerkleSnapshot::build(&workspace.root, false).unwrap()
+        );
+        assert!(
+            literal_search(
+                &workspace,
+                "legacy_deleted_marker",
+                &SearchOptions::default()
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn watcher_deletion_delta_is_applied_even_with_a_matching_clean_marker() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept() {}\n").unwrap();
+    commit_fixture(root.path());
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    let marker = fs::read(indexed_git_state_path(&workspace)).unwrap();
+    let probe_rel = PathBuf::from("probe.rs");
+    let probe = workspace.root.join(&probe_rel);
+    fs::write(&probe, "pub fn watcher_deleted_probe() {}\n").unwrap();
+    index_workspace_paths_for_watcher(&workspace, &model, std::slice::from_ref(&probe_rel))
+        .unwrap();
+    fs::remove_file(&probe).unwrap();
+    // Model a stale clean certification independently of its writer. Explicit
+    // watcher events must be applied even if a reused marker says no change.
+    fs::write(indexed_git_state_path(&workspace), marker).unwrap();
+    let summary =
+        index_workspace_paths_for_watcher(&workspace, &model, std::slice::from_ref(&probe_rel))
+            .unwrap();
+    assert_eq!(summary.deleted_files, 1);
+    assert_eq!(chunk_count(&workspace, "probe.rs"), 0);
+    assert!(
+        !MerkleSnapshot::load(&workspace.merkle_snapshot_path())
+            .unwrap()
+            .files
+            .contains_key("probe.rs")
+    );
 }
 
 #[test]

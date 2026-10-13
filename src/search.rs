@@ -623,6 +623,9 @@ impl SearchContext {
         task: &str,
         skip_gitignore: bool,
     ) -> Result<Option<SearchHit>> {
+        if self.workspace_files().is_missing(file_path) {
+            return Ok(None);
+        }
         let mut chunks = query_chunks_for_file(&self.sqlite, file_path, skip_gitignore)?;
         if chunks.is_empty()
             && let Some(base_sqlite) = &self.base_sqlite
@@ -715,7 +718,7 @@ impl SearchContext {
         &self,
         files: &crate::workspace_file::RootHandle,
         path: &Path,
-    ) -> Option<CachedFileContent> {
+    ) -> std::io::Result<CachedFileContent> {
         FileContentCache::read(&self.file_contents, files, path, self.file_contents_epoch)
     }
 }
@@ -8499,7 +8502,7 @@ mod tests {
         assert!(
             context
                 .read_file_content(&context.workspace_files(), &path)
-                .is_none()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
         );
     }
 
