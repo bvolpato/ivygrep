@@ -75,31 +75,55 @@ pub(crate) struct SearchOutcome {
 }
 
 pub(crate) fn retain_live_hits(hits: &mut Vec<SearchHit>, workspaces: &[Workspace]) {
+    if hits.is_empty() || workspaces.is_empty() {
+        return;
+    }
+    if let [workspace] = workspaces {
+        let roots = [(
+            workspace.root.as_path(),
+            crate::workspace_file::RootHandle::new(&workspace.root),
+        )];
+        retain_live_hits_with_roots(hits, &roots);
+        return;
+    }
     let mut roots = workspaces
         .iter()
         .map(|workspace| {
             (
-                &workspace.root,
+                workspace.root.as_path(),
                 crate::workspace_file::RootHandle::new(&workspace.root),
             )
         })
         .collect::<Vec<_>>();
     roots.sort_by_key(|(root, _)| std::cmp::Reverse(root.components().count()));
-    let mut missing_paths = std::collections::HashMap::new();
-    hits.retain(|hit| {
-        let workspace = if hit.file_path.is_absolute() {
-            roots
-                .iter()
-                .find(|(root, _)| hit.file_path.starts_with(root))
-        } else {
-            roots.first()
-        };
-        workspace.is_none_or(|(root, files)| {
-            !*missing_paths
-                .entry((root, hit.file_path.clone()))
-                .or_insert_with(|| files.is_missing(&hit.file_path))
+    retain_live_hits_with_roots(hits, &roots);
+}
+
+fn retain_live_hits_with_roots(
+    hits: &mut Vec<SearchHit>,
+    roots: &[(&Path, crate::workspace_file::RootHandle)],
+) {
+    let mut missing_paths = std::collections::HashMap::with_capacity(hits.len());
+    let mut buffer = Vec::with_capacity(256);
+    let keep = hits
+        .iter()
+        .map(|hit| {
+            let workspace = if hit.file_path.is_absolute() {
+                roots
+                    .iter()
+                    .find(|(root, _)| hit.file_path.starts_with(root))
+            } else {
+                roots.first()
+            };
+            workspace.is_none_or(|(_, files)| {
+                !*missing_paths
+                    .entry(hit.file_path.as_path())
+                    .or_insert_with(|| files.is_missing_with_buffer(&hit.file_path, &mut buffer))
+            })
         })
-    });
+        .collect::<Vec<_>>();
+    let mut keep = keep.into_iter();
+    hits.retain(|_| keep.next().unwrap());
 }
 
 pub(crate) struct SearchBatch {

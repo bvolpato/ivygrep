@@ -97,7 +97,11 @@ impl RootHandle {
     }
 
     pub(crate) fn is_missing(&self, path: &Path) -> bool {
-        // Presence does not authorize a live read. A successful metadata check
+        self.is_missing_with_buffer(path, &mut Vec::new())
+    }
+
+    pub(crate) fn is_missing_with_buffer(&self, path: &Path, buffer: &mut Vec<u8>) -> bool {
+        // Presence does not authorize a live read. A successful presence check
         // rules out confirmed absence; errors still need the contained opener,
         // which distinguishes deletion from an unsafe symlink or denied access.
         // Once opened, keep observing the pinned directory if its path changes.
@@ -116,13 +120,52 @@ impl RootHandle {
                 && relative
                     .components()
                     .all(|component| matches!(component, Component::Normal(_)))
-                && self.root.join(relative).metadata().is_ok()
+                && self.path_is_present(path, relative, buffer)
             {
                 return false;
             }
         }
         self.open(path)
             .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    }
+
+    #[cfg(unix)]
+    fn path_is_present(&self, path: &Path, relative: &Path, buffer: &mut Vec<u8>) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+
+        buffer.clear();
+        if path.is_absolute() {
+            buffer.reserve(path.as_os_str().len() + 1);
+            buffer.extend_from_slice(path.as_os_str().as_bytes());
+        } else {
+            let root = self.root.as_os_str().as_bytes();
+            let relative = relative.as_os_str().as_bytes();
+            let needs_separator = !root.ends_with(b"/");
+            buffer.reserve(root.len() + relative.len() + usize::from(needs_separator) + 1);
+            buffer.extend_from_slice(root);
+            if needs_separator {
+                buffer.push(b'/');
+            }
+            buffer.extend_from_slice(relative);
+        }
+        buffer.push(0);
+        std::ffi::CStr::from_bytes_with_nul(buffer).is_ok_and(|name| {
+            // SAFETY: name is NUL-terminated and live for the call. F_OK only
+            // checks presence; it does not authorize or perform a content read.
+            unsafe { libc::access(name.as_ptr(), libc::F_OK) == 0 }
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn path_is_present(&self, path: &Path, relative: &Path, _buffer: &mut Vec<u8>) -> bool {
+        if path.is_absolute() {
+            return path.metadata().is_ok();
+        }
+        let mut full_path =
+            PathBuf::with_capacity(self.root.as_os_str().len() + relative.as_os_str().len() + 1);
+        full_path.push(&self.root);
+        full_path.push(relative);
+        full_path.metadata().is_ok()
     }
 
     /// Invalid UTF-8 is replaced, matching how indexing decodes source files.
