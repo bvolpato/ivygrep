@@ -175,7 +175,7 @@
             <div class="grid grid-2 align-center context-pack-grid">
                 <div>
                     <h3>Current work becomes retrieval signal</h3>
-                    <p><code>ig context --since main</code> combines task anchors with committed branch changes, staged and dirty files, untracked files, and paths found in an issue or stack trace. It follows dependencies, dependents, definitions, callers, references, tests, configuration, docs, and recent co-changes.</p>
+                    <p><code>ig context --since main</code> finds the Git merge base of the current branch and <code>main</code>. It includes committed changes from that base to the current branch, plus staged, unstaged, and untracked files, task anchors, and paths found in an issue or stack trace. The <code>main</code> ref is not itself the diff base. Context packs follow dependencies, dependents, definitions, callers, references, tests, configuration, docs, and recent co-changes.</p>
                     <div class="context-role-list" aria-label="Context pack evidence roles">
                         <span>Primary</span><span>Dependencies</span><span>Dependents</span><span>Definitions</span><span>Callers</span><span>References</span>
                         <span>Tests</span><span>Config</span><span>Docs</span>
@@ -200,7 +200,7 @@ Signals: lexical, symbol, git change.</pre>
         </div>
 
         <div class="grid grid-3 mt-4">
-            <div class="glass-card fade-in-scroll"><h3>Use current changes</h3><p>Context packs include staged and uncommitted changes. With <code>--since main</code>, they also use commits since the branch point.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Use current changes</h3><p>Context packs include staged, unstaged, and untracked changes. With <code>--since main</code>, they also include commits on the current branch since the merge base of that branch and <code>main</code>.</p></div>
             <div class="glass-card fade-in-scroll"><h3>Include related code</h3><p>Each pack can include definitions, callers, dependencies, tests, configuration, and documentation. Selection reasons explain each item.</p></div>
             <div class="glass-card fade-in-scroll"><h3>Set a token budget</h3><p>The <code>--budget</code> option limits the rendered pack in estimated tokens. Context packs supply evidence for an agent to inspect.</p></div>
         </div>
@@ -270,12 +270,12 @@ Signals: lexical, symbol, git change.</pre>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji" aria-hidden="true">🌿</span></div>
                 <h3>Thin worktree overlays</h3>
-                <p>Worktrees reuse the repository base index and store only divergent chunks and tombstones across lexical, vector, and relationship stores.</p>
+                <p>Worktrees reuse the repository base index. Their overlays store changed chunks and tombstones that hide base files deleted on that branch.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji" aria-hidden="true">⚡</span></div>
                 <h3>Incremental availability</h3>
-                <p>Changed chunks update incrementally. Lexical results remain available while hash and neural vectors build in the background.</p>
+                <p>Changed chunks update incrementally. On current <code>main</code>, files confirmed missing disappear from results immediately while the watcher removes owned index entries or records an overlay tombstone. Permission and other read errors are not treated as deletion. This fix is not included in v1.3.0.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji" aria-hidden="true">🧭</span></div>
@@ -353,15 +353,15 @@ Signals: lexical, symbol, git change.</pre>
                 <svg width="22" height="22" fill="none" stroke="#10b981" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8V5a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3M8 16v3a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-3"/></svg>
                 Git-aware indexing
             </h3>
-            <p class="git-panel-subtitle">Worktrees share a base index. Branch switches re-index only changed files.</p>
+            <p class="git-panel-subtitle">Worktrees share a base index. Branch switches reconcile only changed paths, including deletions.</p>
             <div class="grid grid-2" style="gap: 1.5rem;">
                 <div class="git-feature">
                     <h4>Worktree overlays</h4>
-                    <p>Each worktree references the shared base index. SQLite, lexical, and vector overlays store changed chunks and tombstones.</p>
+                    <p>Each worktree references the shared base index. Its overlay stores changed chunks and tombstones that hide base files deleted on that branch.</p>
                 </div>
                 <div class="git-feature">
                     <h4>Branch-switch deltas</h4>
-                    <p>Merkle reconciliation re-indexes <strong>changed files</strong>. Content hashes skip byte-identical files across branches.</p>
+                    <p>Merkle reconciliation handles <strong>changed paths, including deletions</strong>. Content hashes skip byte-identical files across branches.</p>
                 </div>
             </div>
         </div>
@@ -638,7 +638,7 @@ Signals: lexical, symbol, git change.</pre>
         <div class="section-header">
             <span class="section-tag">Get started</span>
             <h2 class="section-title text-center">Install ivygrep</h2>
-            <p class="text-center subtitle-small">The installer selects CUDA on compatible NVIDIA Linux hosts and Metal on Apple Silicon. GPU builds only speed up transformer profiles (<code>IVYGREP_MODEL_PROFILE=code|code-hq|general</code>); the default <code>potion-code-16m-v2</code> profile runs on CPU. Run <code>ig hardware</code> to inspect the selected build.</p>
+            <p class="text-center subtitle-small">The shell installer selects CUDA only on compatible NVIDIA Linux x86_64 hosts with the CUDA 13 runtime, and Metal on Apple Silicon. Homebrew uses portable builds on Linux and Intel macOS, and Metal on Apple Silicon. GPU builds only speed up transformer profiles (<code>IVYGREP_MODEL_PROFILE=code|code-hq|general</code>); the default <code>potion-code-16m-v2</code> profile runs on CPU. Run <code>ig hardware</code> to inspect the selected build.</p>
         </div>
 
         <div class="grid grid-2 mt-4">
@@ -648,7 +648,7 @@ Signals: lexical, symbol, git change.</pre>
                     <pre class="code-block"><span class="prompt">$</span> brew install bvolpato/tap/ivygrep</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
                 </div>
-                <p class="benchmark-note">Metal on Apple Silicon for transformer profiles. Portable elsewhere.</p>
+                <p class="benchmark-note">Metal on Apple Silicon for transformer profiles. Portable on Linux and Intel macOS.</p>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
                 <h3 class="install-title">Shell installer for Linux and macOS</h3>
@@ -656,7 +656,7 @@ Signals: lexical, symbol, git change.</pre>
                     <pre class="code-block"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
                 </div>
-                <p class="benchmark-note">Detects CUDA, Metal, and missing runtime libraries.</p>
+                <p class="benchmark-note">Selects CUDA only on Linux x86_64 with a supported NVIDIA GPU and complete CUDA 13 runtime; selects Metal on Apple Silicon. Other supported hosts use the portable build.</p>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
                 <h3 class="install-title">WinGet for Windows</h3>

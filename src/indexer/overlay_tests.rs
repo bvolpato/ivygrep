@@ -360,6 +360,100 @@ fn incremental_overlay_recovers_when_ignore_edit_is_reverted_after_partial_commi
 
 #[test]
 #[serial]
+fn overlay_deletion_tombstones_follow_base_restores_and_overlay_only_removals() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let parent = tempdir().unwrap();
+    let (base_root, linked_root) = linked_workspace(&parent.path().canonicalize().unwrap());
+    let base = Workspace::resolve(&base_root).unwrap();
+    let workspace = Workspace::resolve(&linked_root).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    let original_base = stored_state(&base, false);
+    let inherited = linked_root.join("stable.rs");
+    let overlay_only = linked_root.join("added.rs");
+    let overlay_counts = |path: &str| {
+        let sqlite = open_sqlite_readonly(&workspace.overlay_sqlite_path()).unwrap();
+        let chunks = sqlite
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE file_path = ?1",
+                [path],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let tombstones = sqlite
+            .query_row(
+                "SELECT COUNT(*) FROM tombstones WHERE file_path = ?1",
+                [path],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        (chunks, tombstones)
+    };
+
+    // Inherited paths must gain a durable tombstone when removed.
+    fs::remove_file(&inherited).unwrap();
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(overlay_counts("stable.rs"), (0, 1));
+    assert!(
+        literal_search(
+            &workspace,
+            "shared_overlay_marker",
+            &SearchOptions::default()
+        )
+        .unwrap()
+        .is_empty()
+    );
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(overlay_counts("stable.rs"), (0, 1));
+
+    // A divergent restore remains shadowed, including after deletion again.
+    fs::write(&inherited, "pub fn divergent_restore_marker() {}\n").unwrap();
+    fs::write(&overlay_only, "pub fn overlay_added_marker() {}\n").unwrap();
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(overlay_counts("stable.rs"), (1, 1));
+    assert_eq!(overlay_counts("added.rs"), (1, 0));
+    fs::remove_file(&inherited).unwrap();
+    fs::remove_file(&overlay_only).unwrap();
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(overlay_counts("stable.rs"), (0, 1));
+    assert_eq!(overlay_counts("added.rs"), (0, 0));
+    for marker in [
+        "shared_overlay_marker",
+        "divergent_restore_marker",
+        "overlay_added_marker",
+    ] {
+        assert!(
+            literal_search(&workspace, marker, &SearchOptions::default())
+                .unwrap()
+                .is_empty(),
+            "{marker}"
+        );
+    }
+
+    // Returning to base content clears both the tombstone and overlay chunks.
+    fs::copy(base_root.join("stable.rs"), &inherited).unwrap();
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(overlay_counts("stable.rs"), (0, 0));
+    assert_eq!(
+        literal_search(
+            &workspace,
+            "shared_overlay_marker",
+            &SearchOptions::default()
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert_state_preserved(&base, false, &original_base);
+    assert_eq!(
+        MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
+        MerkleSnapshot::build(&workspace.root, false).unwrap()
+    );
+}
+
+#[test]
+#[serial]
 fn fresh_overlay_rolls_back_failed_completion_publication() {
     assert_overlay_publication_recovers(false, PublicationFailure::Completion);
 }

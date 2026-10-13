@@ -32,7 +32,7 @@
             <section class="glass-panel integration-card"><h2>Install</h2><pre class="integration-command">brew install bvolpato/tap/ivygrep
 ig agent install cursor
 ig agent doctor</pre><p>Windows: <code>winget install --id BrunoVolpato.ivygrep --exact</code>. See <a href="../index.html#install">all install options</a>.</p><p>Restart Cursor after setup. For project-local configuration, add this to <code>.cursor/mcp.json</code>:</p><pre class="integration-command">{"mcpServers":{"ig":{"type":"stdio","command":"ig","args":["--mcp"]}}}</pre><h3>Use</h3><pre class="integration-command">Use ig_search with output=context_pack and budget_tokens=8000 for this task.</pre></section>
-            <aside class="glass-panel integration-card"><h2>Good task pack</h2><ul><li>Concrete task or error as query</li><li>Absolute repository path</li><li><code>since=main</code> for active changes</li><li>One focused literal search only if needed</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
+            <aside class="glass-panel integration-card"><h2>Good task pack</h2><ul><li>Concrete task or error as query</li><li>Absolute repository path</li><li><code>since=main</code> includes committed current-branch changes since the merge base, plus staged, unstaged, and untracked files</li><li>One focused literal search only if needed</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
         </div>
     </div></main>
 </body>

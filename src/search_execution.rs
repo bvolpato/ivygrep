@@ -866,7 +866,11 @@ fn search_hits(
     // The first preview read walks the root. The other reads reuse that walk.
     let files = ctx.workspace_files();
     for (file_path, file_hits) in hits_by_file {
-        let file_content = ctx.read_file_content(&files, &file_path);
+        let file_content = match ctx.read_file_content(&files, &file_path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => None,
+        };
         for (chunk, score, sources) in file_hits {
             hits.push(prepare_hit(
                 chunk,

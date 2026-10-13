@@ -1,11 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use crate::merkle::{MerkleSnapshot, normalized_indexable_content};
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, index_path_string};
+
+// Older markers checked only Git state, which cannot detect a transient
+// untracked file that was indexed and deleted between two clean checks.
+const CLEAN_GIT_STATE_VERSION: &str = "indexed-sources-v1";
 
 pub(super) fn files_have_same_contents(left: &Path, right: &Path) -> bool {
     match (fs::read(left), fs::read(right)) {
@@ -27,6 +31,7 @@ pub(super) struct CleanGitCheckout {
     index_hash: String,
     ignore_controls: IgnoreControls,
     ignore_state: String,
+    tracked_paths: BTreeSet<String>,
 }
 
 impl CleanGitCheckout {
@@ -36,10 +41,10 @@ impl CleanGitCheckout {
         let paths = git_paths(root)?;
         let index_hash = file_hash(&paths.index)?;
         let config = git_core_config(root);
-        let ignore_controls = git_ignore_controls(root, &paths, config.as_ref())?;
+        let (ignore_controls, tracked_paths) = git_ignore_controls(root, &paths, config.as_ref())?;
         let ignore_state = ignore_controls_state(&ignore_controls)?;
         let state = format!(
-            "{head}\n{index_hash}\n{}\n{ignore_state}",
+            "{head}\n{index_hash}\n{}\n{ignore_state}\n{CLEAN_GIT_STATE_VERSION}",
             git_sparse_checkout_state(root, config.as_ref()),
         );
         Some(Self {
@@ -49,6 +54,7 @@ impl CleanGitCheckout {
             index_hash,
             ignore_controls,
             ignore_state,
+            tracked_paths,
         })
     }
 
@@ -67,6 +73,19 @@ impl CleanGitCheckout {
             && ignore_controls_state(&self.ignore_controls).as_deref()
                 == Some(self.ignore_state.as_str())
     }
+
+    /// Git's clean status proves contents only for tracked paths. Also check
+    /// the actual indexed inputs: an untracked create/read/delete can leave
+    /// Git unchanged, and a tracked edit/read/restore changes source metadata.
+    fn matches_indexed_sources(&self, workspace: &Workspace) -> bool {
+        let Ok(snapshot) = MerkleSnapshot::load(&workspace.merkle_snapshot_path()) else {
+            return false;
+        };
+        snapshot.files.iter().all(|(path, hash)| {
+            self.tracked_paths.contains(path)
+                && MerkleSnapshot::path_matches_metadata_snapshot(&workspace.root.join(path), hash)
+        })
+    }
 }
 
 pub(super) fn indexed_git_state_path(workspace: &Workspace) -> PathBuf {
@@ -81,6 +100,7 @@ pub(super) fn record_indexed_git_state(
 ) -> bool {
     if let Some(checkout) = expected
         && checkout.is_unchanged(&workspace.root)
+        && checkout.matches_indexed_sources(workspace)
         && fs::write(indexed_git_state_path(workspace), checkout.state()).is_ok()
     {
         return true;
@@ -270,9 +290,9 @@ fn parse_git_bool(value: &str) -> Option<bool> {
 
 /// Git status cannot observe edits hidden by index flags. Collect tracked
 /// .ignore files here too: their whitelist rules can include Git-ignored code.
-fn tracked_ignore_controls(root: &Path) -> Option<Vec<PathBuf>> {
+fn tracked_ignore_controls(root: &Path) -> Option<(Vec<PathBuf>, BTreeSet<String>)> {
     let output = std::process::Command::new("git")
-        .args(["ls-files", "-z", "-v", "--cached"])
+        .args(["ls-files", "-z", "-v", "--cached", "--recurse-submodules"])
         .current_dir(root)
         .output()
         .ok()?;
@@ -280,6 +300,7 @@ fn tracked_ignore_controls(root: &Path) -> Option<Vec<PathBuf>> {
         return None;
     }
     let mut controls = Vec::new();
+    let mut tracked_paths = BTreeSet::new();
     for record in output
         .stdout
         .split(|byte| *byte == 0)
@@ -293,8 +314,9 @@ fn tracked_ignore_controls(root: &Path) -> Option<Vec<PathBuf>> {
         if relative.file_name().is_some_and(|name| name == ".ignore") {
             controls.push(root.join(relative));
         }
+        tracked_paths.insert(index_path_string(relative));
     }
-    Some(controls)
+    Some((controls, tracked_paths))
 }
 
 /// Ignore files that the walker can read. The bool marks controls whose
@@ -306,9 +328,10 @@ fn git_ignore_controls(
     root: &Path,
     paths: &GitPaths,
     config: Option<&GitCoreConfig>,
-) -> Option<IgnoreControls> {
+) -> Option<(IgnoreControls, BTreeSet<String>)> {
     let mut controls = IgnoreControls::new();
-    for path in tracked_ignore_controls(root)? {
+    let (tracked_controls, tracked_paths) = tracked_ignore_controls(root)?;
+    for path in tracked_controls {
         controls.insert(path, true);
     }
     let configured_global_ignore = match config {
@@ -367,7 +390,7 @@ fn git_ignore_controls(
         let independent = path.file_name().is_some_and(|name| name == ".ignore");
         controls.entry(path).or_insert(independent);
     }
-    Some(controls)
+    Some((controls, tracked_paths))
 }
 
 /// Hashes the contents of the ignore files. `None` if a file cannot be read
@@ -466,6 +489,11 @@ fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
     let Some(indexed_state) = fs::read_to_string(indexed_git_state_path(workspace)).ok() else {
         return BaseIndexCheckoutState::Stale;
     };
+    // Refreshing snapshot metadata must not bless a marker written before
+    // indexed inputs were checked. Its stores may still contain deleted files.
+    if indexed_state.lines().nth(4) != Some(CLEAN_GIT_STATE_VERSION) {
+        return BaseIndexCheckoutState::Stale;
+    }
     if indexed_state == current_state {
         return BaseIndexCheckoutState::Current;
     }
@@ -477,6 +505,67 @@ fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
         BaseIndexCheckoutState::MetadataChanged
     } else {
         BaseIndexCheckoutState::Stale
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    struct SourceChange {
+        path: PathBuf,
+        indexed_contents: Vec<u8>,
+        restored_contents: Option<Vec<u8>>,
+    }
+
+    static CHANGES: LazyLock<Mutex<HashMap<PathBuf, SourceChange>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) struct TransientSourceChange(PathBuf);
+
+    impl Drop for TransientSourceChange {
+        fn drop(&mut self) {
+            CHANGES.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    /// Change one source after clean checkout capture, then restore its
+    /// original contents or absence just before the clean marker is recorded.
+    pub(crate) fn transient_source(
+        root: &Path,
+        path: &Path,
+        indexed_contents: &[u8],
+    ) -> TransientSourceChange {
+        let change = SourceChange {
+            path: path.to_path_buf(),
+            indexed_contents: indexed_contents.to_vec(),
+            restored_contents: std::fs::read(path).ok(),
+        };
+        assert!(
+            CHANGES
+                .lock()
+                .unwrap()
+                .insert(root.to_path_buf(), change)
+                .is_none()
+        );
+        TransientSourceChange(root.to_path_buf())
+    }
+
+    pub(crate) fn after_capture(root: &Path) {
+        if let Some(change) = CHANGES.lock().unwrap().get(root) {
+            std::fs::write(&change.path, &change.indexed_contents).unwrap();
+        }
+    }
+
+    pub(crate) fn before_record(root: &Path) {
+        if let Some(change) = CHANGES.lock().unwrap().get(root) {
+            match &change.restored_contents {
+                Some(contents) => std::fs::write(&change.path, contents).unwrap(),
+                None => std::fs::remove_file(&change.path).unwrap(),
+            }
+        }
     }
 }
 
