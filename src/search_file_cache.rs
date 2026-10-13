@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
+use std::io::{self, Read};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -129,15 +129,15 @@ impl FileContentCache {
         files: &crate::workspace_file::RootHandle,
         path: &Path,
         index_epoch: u64,
-    ) -> Option<CachedFileContent> {
+    ) -> io::Result<CachedFileContent> {
         let mut file = match files.open(path) {
             Ok(file) => file,
-            Err(_) => {
+            Err(error) => {
                 cache.lock().remove(path);
-                return None;
+                return Err(error);
             }
         };
-        let metadata = file.metadata().ok()?;
+        let metadata = file.metadata()?;
         let stamp = FileStamp::from_metadata(&metadata);
         {
             let mut cache = cache.lock();
@@ -145,14 +145,14 @@ impl FileContentCache {
                 && content.index_epoch == index_epoch
                 && content.stamp == stamp
             {
-                return Some(content.clone());
+                return Ok(content.clone());
             }
             cache.remove(path);
         }
 
         // Disk reads and line indexing stay outside the shared cache lock.
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).ok()?;
+        file.read_to_end(&mut bytes)?;
         let content = Arc::<str>::from(crate::workspace_file::lossy_string(bytes));
         let lines = line_spans(&content).into();
         let cached = CachedFileContent {
@@ -162,7 +162,7 @@ impl FileContentCache {
             lines,
         };
         cache.lock().insert(path.to_path_buf(), cached.clone());
-        Some(cached)
+        Ok(cached)
     }
 }
 
@@ -199,7 +199,13 @@ mod tests {
                 fs::rename(&path, root.join("original.rs")).unwrap();
                 symlink(outside.join("source.rs"), &path).unwrap();
             }
-            assert!(FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0).is_none());
+            assert_ne!(
+                FileContentCache::read(&cache, &RootHandle::new(&root), &path, 0)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::NotFound
+            );
             assert!(!cache.lock().entries.contains(&path));
             assert_eq!(cache.lock().bytes, 0);
         }

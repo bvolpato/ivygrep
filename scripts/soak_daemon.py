@@ -137,6 +137,12 @@ def search(home: Path, repo: Path, query: str, *, probe_only: bool = False) -> l
     return response["hits"]
 
 
+def uncached_probe_hits(home: Path, repo: Path) -> list[dict[str, Any]]:
+    # A new query key on every request avoids accepting a stale daemon result
+    # from the query cache after a source mutation.
+    return search(home, repo, f"soak revision value {time.monotonic_ns()}", probe_only=True)
+
+
 def probe_matches(hits: list[dict[str, Any]], expected: str | None) -> bool:
     if expected is None:
         return not hits
@@ -220,9 +226,350 @@ def stale_probe_evidence(home: Path, repo: Path, env: dict[str, str]) -> dict[st
     }
 
 
+def workspace_index_dir(home: Path, repo: Path) -> Path:
+    for metadata_path in (home / "indexes").glob("*/workspace.json"):
+        metadata = json.loads(metadata_path.read_text())
+        indexed_root = Path(metadata["root"])
+        if indexed_root.resolve() == repo.resolve():
+            return metadata_path.parent
+    raise FileNotFoundError(f"workspace index is missing for {repo.name}")
+
+
+def mutation_probe_store_state(home: Path, repo: Path, *, overlay: bool) -> dict[str, Any]:
+    index_dir = workspace_index_dir(home, repo)
+    sqlite_path = index_dir / ("overlay.sqlite3" if overlay else "metadata.sqlite3")
+    connection = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+    try:
+        texts = [stored_chunk_text(row[0]) for row in connection.execute(
+            "SELECT text FROM chunks WHERE file_path = ?", (PROBE,))]
+        has_tombstones = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tombstones'"
+        ).fetchone() is not None
+        tombstones = ({row[0] for row in connection.execute("SELECT file_path FROM tombstones")}
+                      if has_tombstones else set())
+    finally:
+        connection.close()
+    snapshot = json.loads((index_dir / "merkle_snapshot.json").read_text())
+    return {
+        "sqlite_chunk_texts": texts,
+        "snapshot_lists_probe": PROBE in snapshot.get("files", {}),
+        "overlay_tombstones_probe": PROBE in tombstones,
+        "clean_checkout_state_recorded": (index_dir / "indexed_git_state").is_file(),
+    }
+
+
+def assert_mutation_probe_state(
+    state: dict[str, Any],
+    expected: str | None,
+    *,
+    overlay: bool,
+    overlay_tombstone_expected: bool | None = None,
+) -> None:
+    if expected is None:
+        if state["sqlite_chunk_texts"] or state["snapshot_lists_probe"]:
+            raise AssertionError(f"deleted probe remains in index state: {state}")
+        if overlay and not state["overlay_tombstones_probe"]:
+            raise AssertionError(f"deleted base probe has no overlay tombstone: {state}")
+    else:
+        if not state["snapshot_lists_probe"] or not state["sqlite_chunk_texts"]:
+            raise AssertionError(f"live probe is missing from index state: {state}")
+        if (overlay and overlay_tombstone_expected is not None
+                and state["overlay_tombstones_probe"] != overlay_tombstone_expected):
+            raise AssertionError(f"overlay tombstone state is incorrect: {state}")
+
+
+def verify_mutation_state(
+    home: Path,
+    repo: Path,
+    expected: str | None,
+    *,
+    overlay: bool,
+    overlay_tombstone_expected: bool | None = None,
+    require_clean_checkout: bool = False,
+    stage: str,
+    report: dict[str, Any],
+) -> None:
+    report["active_stage"] = stage
+    deadline = time.monotonic() + 20
+    uncached_hits: list[dict[str, Any]] = []
+    cached_hits: list[dict[str, Any]] = []
+    state: dict[str, Any] | None = None
+    state_error: str | None = None
+    clean = False
+    while True:
+        try:
+            uncached_hits = uncached_probe_hits(home, repo)
+            cached_hits = search(home, repo, "soak revision value", probe_only=True)
+            state = mutation_probe_store_state(home, repo, overlay=overlay)
+            state_error = None
+            try:
+                assert_mutation_probe_state(
+                    state,
+                    expected,
+                    overlay=overlay,
+                    overlay_tombstone_expected=overlay_tombstone_expected,
+                )
+            except AssertionError as error:
+                state_error = str(error)
+            if require_clean_checkout:
+                clean = not run(["git", "status", "--porcelain"], repo, os.environ.copy()).strip()
+            clean_state_ready = (
+                not require_clean_checkout or (clean and state["clean_checkout_state_recorded"])
+            )
+            if (probe_matches(uncached_hits, expected)
+                    and probe_matches(cached_hits, expected)
+                    and state_error is None and clean_state_ready):
+                break
+        except Exception as error:
+            state_error = f"unavailable: {error}"
+        if time.monotonic() >= deadline:
+            report["last_stage_observation"] = {
+                "uncached_hits": uncached_hits,
+                "cached_hits": cached_hits,
+                "store_state": state,
+                "store_error": state_error,
+                "git_worktree_clean": clean,
+            }
+            raise StaleProbeError(
+                f"mutation state did not settle at {stage}: expected={expected!r}, "
+                f"uncached_hits={uncached_hits}, cached_hits={cached_hits}, "
+                f"store_state={state}, store_error={state_error}, git_clean={clean}"
+            )
+        time.sleep(0.1)
+    check = {
+        "stage": stage,
+        "expected_present": expected is not None,
+        "uncached_hits": uncached_hits,
+        "cached_hits": cached_hits,
+        "store_state": state,
+        "passed": True,
+    }
+    if require_clean_checkout:
+        check["git_worktree_clean"] = clean
+    report["mutation_checks"].append(check)
+
+
+def mutation_revision(revision: int) -> str:
+    return f"pub fn soak_revision() -> u64 {{ {revision} }}"
+
+
+def clean_branch_mutation_storm(home: Path, repo: Path, git: Any, report: dict[str, Any]) -> None:
+    stop = threading.Event()
+    lock = threading.Lock()
+    generation = [0]
+    stable_deleted_observed = threading.Event()
+    stats = {"queries": 0, "stable_deleted_queries": 0, "stable_deleted_hits": 0,
+             "query_errors": []}
+    report["clean_branch_mutation_storm"] = stats
+    probe = repo / PROBE
+
+    def query_worker() -> None:
+        while not stop.is_set():
+            with lock:
+                generation_before = generation[0]
+                present_before = probe.exists()
+            try:
+                hits = uncached_probe_hits(home, repo)
+                with lock:
+                    generation_after = generation[0]
+                    present_after = probe.exists()
+                    stats["queries"] += 1
+                    stable_deleted_window = (
+                        generation_before == generation_after
+                        and generation_after % 2 == 0
+                        and not present_before
+                        and not present_after
+                    )
+                    if stable_deleted_window:
+                        stats["stable_deleted_queries"] += 1
+                        if not probe_matches(hits, None):
+                            stats["stable_deleted_hits"] += 1
+                        stable_deleted_observed.set()
+            except Exception as error:
+                with lock:
+                    if len(stats["query_errors"]) < 5:
+                        stats["query_errors"].append(str(error))
+            stop.wait(0.01)
+
+    def checkout(branch: str) -> None:
+        with lock:
+            generation[0] += 1
+        try:
+            git("checkout", "-q", branch)
+        finally:
+            with lock:
+                generation[0] += 1
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(query_worker) for _ in range(2)]
+        try:
+            for cycle in range(12):
+                checkout("deleted-probe")
+                if cycle == 0 and not stable_deleted_observed.wait(timeout=10):
+                    raise AssertionError("no query observed a stable deleted-branch window")
+                checkout("main")
+            checkout("deleted-probe")
+        finally:
+            stop.set()
+            for future in futures:
+                future.result(timeout=35)
+
+    if (not stats["queries"] or not stats["stable_deleted_queries"]
+            or stats["query_errors"] or stats["stable_deleted_hits"]):
+        raise AssertionError(f"clean branch mutation queries failed: {stats}")
+
+
+def run_mutation_correctness(binary: Path, root: Path, home: Path, env: dict[str, str],
+                             report: dict[str, Any]) -> None:
+    repo = root / "repo"
+    worktree = root / "deleted-branch"
+    repo.mkdir()
+    env.update(IVYGREP_HOME=str(home), IVYGREP_NO_AUTOSPAWN="1",
+               IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT="1")
+    env.setdefault("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0")
+
+    def git(*args: str, cwd: Path = repo) -> None:
+        run(["git", "-c", "user.name=Mutation Soak", "-c", "user.email=soak@example.invalid",
+             "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", *args], cwd, env)
+
+    def index(path: Path) -> None:
+        run([str(binary), "--add", str(path), "--force", "--hash", "--json"], path, env)
+        run([str(binary), "--enhance-hash-internal", str(path)], path, env)
+
+    git("init", "-q", "-b", "main")
+    probe = repo / PROBE
+    probe.parent.mkdir(parents=True)
+    initial = mutation_revision(0)
+    probe.write_text(initial + "\n")
+    git("add", ".")
+    git("commit", "-qm", "initial probe")
+
+    # Create a linked branch whose committed tree deletes a file inherited from
+    # the indexed base. This exercises the overlay tombstone path before any
+    # dirty-worktree mutations happen.
+    git("checkout", "-q", "-b", "deleted-probe")
+    probe.unlink()
+    git("add", "-A")
+    git("commit", "-qm", "delete probe in branch")
+    git("checkout", "-q", "main")
+    git("worktree", "add", "-q", "--detach", str(worktree), "deleted-probe")
+
+    index(repo)
+    index(worktree)
+    daemon = start_daemon(binary, cwd=repo, env=env, bench_home=home)
+    report["transport"] = "direct-daemon-rpc-with-cached-and-uncached-queries"
+
+    def evidence(path: Path, *, overlay: bool) -> dict[str, Any]:
+        def read(fact: Any) -> Any:
+            try:
+                return fact()
+            except Exception as error:
+                return f"unavailable: {error}"
+
+        def file_text() -> str | None:
+            current = path / PROBE
+            return current.read_text() if current.exists() else None
+
+        return {
+            "probe_file_text": read(file_text),
+            "git_worktree_status": read(lambda: run(["git", "status", "--porcelain"], path, env)),
+            "index_store": read(lambda: mutation_probe_store_state(home, path, overlay=overlay)),
+            "daemon_uncached_query_hits": read(lambda: uncached_probe_hits(home, path)),
+        }
+
+    try:
+        verify_mutation_state(home, repo, initial, overlay=False, stage="base-initial", report=report)
+        verify_mutation_state(home, worktree, None, overlay=True,
+                              stage="branch-delete-tombstone", report=report)
+
+        clean_branch_mutation_storm(home, repo, git, report)
+        verify_mutation_state(home, repo, None, overlay=False, require_clean_checkout=True,
+                              stage="base-clean-branch-delete", report=report)
+        git("checkout", "-q", "main")
+        verify_mutation_state(home, repo, initial, overlay=False,
+                              stage="base-clean-branch-restore", report=report)
+
+        revision = mutation_revision(1)
+        probe.write_text(revision + "\n")
+        verify_mutation_state(home, repo, revision, overlay=False, stage="base-update", report=report)
+
+        probe.unlink()
+        verify_mutation_state(home, repo, None, overlay=False, stage="base-delete", report=report)
+
+        revision = mutation_revision(2)
+        probe.write_text(revision + "\n")
+        verify_mutation_state(home, repo, revision, overlay=False, stage="base-restore", report=report)
+
+        worktree_probe = worktree / PROBE
+        revision = mutation_revision(3)
+        worktree_probe.parent.mkdir(parents=True, exist_ok=True)
+        worktree_probe.write_text(revision + "\n")
+        verify_mutation_state(home, worktree, revision, overlay=True,
+                              overlay_tombstone_expected=True,
+                              stage="overlay-restore", report=report)
+
+        worktree_probe.unlink()
+        verify_mutation_state(home, worktree, None, overlay=True,
+                              stage="overlay-dirty-delete", report=report)
+
+        revision = mutation_revision(4)
+        worktree_probe.write_text(revision + "\n")
+        verify_mutation_state(home, worktree, revision, overlay=True,
+                              overlay_tombstone_expected=True,
+                              stage="overlay-dirty-restore", report=report)
+    except Exception:
+        report["stale_probe_evidence"] = {
+            "base": evidence(repo, overlay=False),
+            "overlay": evidence(worktree, overlay=True),
+        }
+        raise
+    finally:
+        daemon.stop()
+
+
+def main_correctness(args: argparse.Namespace, binary: Path) -> None:
+    env = os.environ.copy()
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "mutation-correctness",
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "binary_sha256": sha256_file(binary),
+        "binary_version": run([str(binary), "--version"], Path.cwd(), env).strip(),
+        "harness_sha256": sha256_file(Path(__file__)),
+        "transport": "direct-daemon-rpc-no-cli-fallback",
+        "mutation_checks": [],
+        "passed": False,
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    failure = None
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="ivygrep-mutation-") as temporary:
+        root = Path(temporary)
+        home = root / "home"
+        try:
+            run_mutation_correctness(binary, root, home, env, report)
+            report["passed"] = True
+        except Exception as error:
+            failure = error
+            report["failure"] = str(error)
+        finally:
+            log = home / "equivalence-daemon.log"
+            if log.exists():
+                shutil.copyfile(log, args.output.with_suffix(".daemon.log"))
+            report["duration_seconds"] = time.monotonic() - started
+            args.output.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    if failure is not None:
+        raise RuntimeError(f"mutation correctness failed; evidence: {args.output}") from failure
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--correctness-only", action="store_true",
+                        help="run bounded create/update/delete/restore checks without resource sampling")
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--duration", type=float, default=300.0, help="total loaded seconds, excluding cooldowns")
     parser.add_argument("--workers", type=int, default=4)
@@ -242,6 +589,9 @@ def main() -> None:
     args = parser.parse_args()
     if not (sys.platform == "darwin" or Path("/proc/self/status").is_file()) or not hasattr(os, "killpg"):
         parser.error("daemon soak requires Linux /proc or macOS libproc, and process groups")
+    if args.correctness_only:
+        main_correctness(args, args.binary.resolve())
+        return
     numeric = (args.duration, args.mutation_interval, args.check_interval, args.cooldown, args.warmup,
                args.rss_growth_mib, args.total_rss_growth_mib)
     if not all(math.isfinite(value) for value in numeric):

@@ -80,6 +80,78 @@ class DaemonSoakTest(unittest.TestCase):
             self.assertTrue(evidence["index_stores"].startswith("unavailable: "))
             self.assertEqual(evidence["daemon_uncached_query_hits"], [])
 
+    def test_mutation_evidence_requires_overlay_tombstone_and_no_stale_chunk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home, repo = root / "home", root / "repo"
+            index = home / "indexes" / "overlay"
+            index.mkdir(parents=True)
+            repo.mkdir()
+            (index / "workspace.json").write_text(json.dumps({"root": str(repo)}))
+            (index / "merkle_snapshot.json").write_text(json.dumps({"files": {}}))
+            connection = sqlite3.connect(index / "overlay.sqlite3")
+            connection.execute("CREATE TABLE chunks (file_path TEXT NOT NULL, text TEXT NOT NULL)")
+            connection.execute("CREATE TABLE tombstones (file_path TEXT PRIMARY KEY)")
+            connection.execute("INSERT INTO tombstones VALUES (?)", (soak.PROBE,))
+            connection.commit()
+            connection.close()
+
+            state = soak.mutation_probe_store_state(home, repo, overlay=True)
+            self.assertFalse(state["sqlite_chunk_texts"])
+            self.assertFalse(state["snapshot_lists_probe"])
+            self.assertTrue(state["overlay_tombstones_probe"])
+            soak.assert_mutation_probe_state(state, None, overlay=True)
+
+            connection = sqlite3.connect(index / "overlay.sqlite3")
+            connection.execute("INSERT INTO chunks VALUES (?, ?)", (soak.PROBE, "stale source"))
+            connection.commit()
+            connection.close()
+            stale = soak.mutation_probe_store_state(home, repo, overlay=True)
+            with self.assertRaisesRegex(AssertionError, "deleted probe remains"):
+                soak.assert_mutation_probe_state(stale, None, overlay=True)
+
+            connection = sqlite3.connect(index / "overlay.sqlite3")
+            connection.execute("DELETE FROM chunks")
+            connection.execute("INSERT INTO chunks VALUES (?, ?)", (soak.PROBE, "restored source"))
+            connection.commit()
+            connection.close()
+            (index / "merkle_snapshot.json").write_text(
+                json.dumps({"files": {soak.PROBE: "restored"}})
+            )
+            restored = soak.mutation_probe_store_state(home, repo, overlay=True)
+            soak.assert_mutation_probe_state(
+                restored, "restored source", overlay=True, overlay_tombstone_expected=True
+            )
+
+    def test_mutation_state_waits_for_query_and_store_convergence(self):
+        stale = [{"file_path": soak.PROBE, "preview": "stale source"}]
+        stale_store = {
+            "sqlite_chunk_texts": ["stale source"],
+            "snapshot_lists_probe": True,
+            "overlay_tombstones_probe": True,
+            "clean_checkout_state_recorded": False,
+        }
+        settled_store = {
+            "sqlite_chunk_texts": [],
+            "snapshot_lists_probe": False,
+            "overlay_tombstones_probe": True,
+            "clean_checkout_state_recorded": False,
+        }
+        report = {"mutation_checks": []}
+        with mock.patch.object(soak, "uncached_probe_hits", side_effect=[stale, []]), \
+                mock.patch.object(soak, "search", side_effect=[stale, []]), \
+                mock.patch.object(soak, "mutation_probe_store_state",
+                                  side_effect=[stale_store, settled_store]), \
+                mock.patch.object(soak.time, "monotonic", side_effect=[0, 1]), \
+                mock.patch.object(soak.time, "sleep"):
+            soak.verify_mutation_state(
+                Path("home"), Path("repo"), None, overlay=True,
+                stage="delete-settled", report=report,
+            )
+
+        self.assertEqual(report["mutation_checks"][0]["stage"], "delete-settled")
+        self.assertEqual(report["mutation_checks"][0]["store_state"], settled_store)
+
     def test_resource_gates_reject_rss_fd_and_thread_growth(self):
         budgets = soak.resource_budgets(rss_growth_mib=32, total_rss_growth_mib=96, fd_growth=8, thread_growth=4)
         stable = [{"rss_bytes": 100 * 1024**2, "rss_anon_bytes": 60 * 1024**2, "fds": 50, "threads": 16}
