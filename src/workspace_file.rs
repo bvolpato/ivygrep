@@ -97,6 +97,30 @@ impl RootHandle {
     }
 
     pub(crate) fn is_missing(&self, path: &Path) -> bool {
+        // Presence does not authorize a live read. A successful metadata check
+        // rules out confirmed absence; errors still need the contained opener,
+        // which distinguishes deletion from an unsafe symlink or denied access.
+        // Once opened, keep observing the pinned directory if its path changes.
+        #[cfg(unix)]
+        let unopened = self.directory.get().is_none();
+        #[cfg(not(unix))]
+        let unopened = true;
+        if unopened && self.root.is_absolute() {
+            let relative = if path.is_absolute() {
+                path.strip_prefix(&self.root).ok()
+            } else {
+                Some(path)
+            };
+            if let Some(relative) = relative
+                && !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+                && self.root.join(relative).metadata().is_ok()
+            {
+                return false;
+            }
+        }
         self.open(path)
             .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
     }
@@ -443,6 +467,72 @@ mod tests {
         assert!(RootHandle::new(Path::new("relative")).open(name).is_err());
         assert!(RootHandle::new(&root.join("missing")).open(name).is_err());
         assert!(RootHandle::new(&root.join("source.rs")).open(name).is_err());
+    }
+
+    #[test]
+    fn presence_checks_observe_deletion_and_restoration() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("source.rs");
+        let files = RootHandle::new(&root);
+        std::fs::write(&source, "inside").unwrap();
+        assert!(!files.is_missing(Path::new("source.rs")));
+        std::fs::remove_file(&source).unwrap();
+        assert!(files.is_missing(Path::new("source.rs")));
+        std::fs::write(&source, "restored").unwrap();
+        assert!(!files.is_missing(&source));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presence_errors_require_contained_confirmation() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = directory.path().canonicalize().unwrap();
+        let root = fixture.join("root");
+        let outside = fixture.join("outside");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("present.rs"), "outside").unwrap();
+        symlink(outside.join("missing.rs"), root.join("dangling.rs")).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        for path in ["dangling.rs", "linked/missing.rs", "linked/present.rs"] {
+            let files = RootHandle::new(&root);
+            assert!(!files.is_missing(Path::new(path)), "{path}");
+            assert!(files.read(Path::new(path)).is_err(), "{path}");
+        }
+        assert!(RootHandle::new(&root).is_missing(Path::new("src/missing.rs")));
+        assert!(RootHandle::new(&root.join("removed")).is_missing(Path::new("source.rs")));
+
+        // A root replaced by a symlink is unavailable, even if its target
+        // contains no corresponding file. It is not a confirmed deletion.
+        std::fs::rename(&root, fixture.join("previous")).unwrap();
+        symlink(&outside, &root).unwrap();
+        assert!(!RootHandle::new(&root).is_missing(Path::new("missing.rs")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presence_checks_keep_an_opened_roots_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = directory.path().canonicalize().unwrap();
+        let root = fixture.join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("source.rs"), "original").unwrap();
+        let files = RootHandle::new(&root);
+        files.read(Path::new("source.rs")).unwrap();
+
+        let previous = fixture.join("previous");
+        std::fs::rename(&root, &previous).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("replacement.rs"), "replacement").unwrap();
+        assert!(!files.is_missing(Path::new("source.rs")));
+        assert!(files.is_missing(Path::new("replacement.rs")));
+        std::fs::remove_file(previous.join("source.rs")).unwrap();
+        std::fs::write(root.join("source.rs"), "replacement").unwrap();
+        assert!(files.is_missing(Path::new("source.rs")));
+        assert!(!RootHandle::new(&root).is_missing(Path::new("source.rs")));
     }
 
     #[cfg(unix)]
