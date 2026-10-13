@@ -31,7 +31,7 @@
         <div class="integration-grid">
             <section class="glass-panel integration-card"><h2>Install</h2><pre class="integration-command">brew install bvolpato/tap/ivygrep
 gemini mcp add --scope user --transport stdio ig ig --mcp</pre><p>Windows: <code>winget install --id BrunoVolpato.ivygrep --exact</code>. See <a href="../index.html#install">all install options</a>.</p><p>Confirm server after restarting Gemini CLI:</p><pre class="integration-command">gemini mcp list</pre><h3>Use</h3><pre class="integration-command">Use ig_search to build one 8000-token context pack for this task, scoped to current repository.</pre></section>
-            <aside class="glass-panel integration-card"><h2>Recommended inputs</h2><ul><li><code>output=context_pack</code></li><li><code>budget_tokens=8000</code></li><li><code>since=main</code> when branch changes matter</li><li>Absolute path to active worktree</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
+            <aside class="glass-panel integration-card"><h2>Recommended inputs</h2><ul><li><code>output=context_pack</code></li><li><code>budget_tokens=8000</code></li><li><code>since=main</code> to include committed current-branch changes since the merge base</li><li>Absolute path to active worktree</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
         </div>
     </div></main>
 </body>

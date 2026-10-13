@@ -748,6 +748,9 @@ fn index_workspace_with_options(
             && !reset_worktree_overlay
             && !skip_gitignore
             && indexed_filter_is_current
+            // Explicit filesystem events remain authoritative even when Git
+            // returned to the same clean state before they were processed.
+            && watcher_paths.is_none_or(|paths| paths.is_empty())
             && fs::read_to_string(indexed_git_state_path(workspace))
                 .ok()
                 .as_deref()
@@ -767,6 +770,9 @@ fn index_workspace_with_options(
             },
         });
     }
+
+    #[cfg(test)]
+    git_state::test_support::after_capture(&workspace.root);
 
     let pid_path = workspace.indexing_pid_path();
     let _ = fs::write(&pid_path, std::process::id().to_string());
@@ -839,6 +845,8 @@ fn index_workspace_with_options(
         Ok(summary)
     });
     if result.is_ok() && tracks_reusable_base_state {
+        #[cfg(test)]
+        git_state::test_support::before_record(&workspace.root);
         // The index holds no chunks for a file that vanished during the run,
         // even if the checkout is clean again. Do not record it as current.
         record_indexed_git_state(

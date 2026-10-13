@@ -53,7 +53,12 @@ Signals: lexical, symbol, git change.
 Search returns ranked file paths, line numbers, and previews. Context packs add related code and explain why each item was selected.
 
 The context command uses your task, file paths in pasted text, and staged or uncommitted changes.
-With `--since`, it also uses commits since the selected revision.
+With `--since`, it resolves the selected ref and finds its Git merge base with
+`HEAD`. The pack includes changes committed on the current branch since that
+base, plus staged, unstaged, and untracked files. The selected ref does not act
+as the diff base itself.
+Deleted changes can contribute Git history labeled `git_deleted` to a context
+pack. The unreleased deletion fix excludes missing files from current search results.
 The pack can include definitions, callers, dependencies, tests, configuration, and documentation.
 It trims the rendered Markdown to the requested estimated token budget. It does not generate an answer or modify files.
 
@@ -79,11 +84,12 @@ irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
 Installers select a compatible archive, verify its SHA-256 checksum, and install `ig`.
-Apple Silicon gets a Metal build. Compatible NVIDIA Linux hosts get a CUDA build.
-CUDA requires CUDA 13 and compute capability 8.0 or newer. Other hosts use the portable build.
-
-The default `potion-code-16m-v2` model runs on CPU in every build.
-Metal and CUDA accelerate the optional transformer profiles: `general`, `code`, and `code-hq`.
+The shell installer selects a Metal build on Apple Silicon. It selects CUDA
+only on Linux x86_64 when an NVIDIA GPU with compute capability 8.0 or newer is
+visible and the CUDA 13 runtime is available. Other supported hosts use the
+portable build. Homebrew installs the Metal build on Apple Silicon and portable
+builds on Intel macOS and Linux. CUDA and Metal accelerate optional transformer
+profiles; the default model runs on CPU in every build.
 Run `ig hardware` to check compatibility and see the matching reinstall command.
 
 Build from source on macOS or Linux:
@@ -98,6 +104,17 @@ install -m 0755 target/release/ig ~/.local/bin/ig
 ## Search
 
 The first query indexes the current repository. The daemon then watches for changes and updates the index incrementally.
+
+On current `main`, search immediately excludes a file that the safe file reader
+confirms is missing, even before watcher reconciliation. Reconciliation then
+removes entries owned by that workspace. Permission, unavailable, and symlink
+failures are not treated as deletion. This fix is not included in the released
+v1.3.0.
+
+Linked Git worktrees share a base index. An overlay tombstone hides a
+base-backed file deleted on that branch without changing what other worktrees
+can search. Deleting a file added only in the worktree removes its overlay
+entries and does not need a base tombstone.
 
 ```bash
 ig "where is authentication handled?"       # hybrid semantic + lexical
@@ -277,7 +294,14 @@ ig --rm ~/notes      # remove a saved index; defaults to current directory
 ig --gc              # remove indexes whose directory has been gone past the grace period
 ```
 
-A search, `ig --interactive`, or `ig --add` that would index your home directory, a directory that contains it, or the filesystem root asks for confirmation first. Without a terminal, `ig` does not build that index unless you pass `--yes`. The same applies when `--add --force` rebuilds such an index or `--skip-gitignore` adds the ignored files to it.
+On current `main`, a CLI search or context request, `ig --interactive`, or
+`ig --add` prompts before it builds an index for your home directory, a
+directory containing it, or the filesystem root. Confirm with `y` or `yes`.
+Without an interactive terminal, the command stops unless you pass `--yes`.
+An already indexed, healthy directory does not prompt on a plain `ig --add`.
+`ig --add --force` rebuilds it, and `--skip-gitignore` may add ignored files,
+so those cases prompt too. This safeguard is not included in the released
+v1.3.0.
 
 The daemon also removes the index of a directory that stays missing for seven days (`IVYGREP_INDEX_GC_GRACE_SECS`), and the overlay of a worktree removed with `git worktree remove` after ten minutes.
 

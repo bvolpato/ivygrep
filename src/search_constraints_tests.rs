@@ -28,6 +28,255 @@ fn paths(hits: &[SearchHit]) -> HashSet<PathBuf> {
 
 #[test]
 #[serial]
+fn deleted_sources_are_hidden_before_index_reconciliation() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("deleted.rs"),
+        "pub fn deletion_marker() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("remaining.rs"),
+        format!(
+            "pub fn deletion_marker() {{ /* {} */ }}\n",
+            "filler ".repeat(100)
+        ),
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+    let context = SearchContext::load(&workspace, Some(model.dimensions()), false).unwrap();
+    fs::remove_file(root.path().join("deleted.rs")).unwrap();
+
+    for embedding in [None, Some(&model as &dyn EmbeddingModel)] {
+        for limit in [1, 10] {
+            let options = SearchOptions {
+                limit: Some(limit),
+                ..Default::default()
+            };
+            let hits = hybrid_search_with_context(
+                &context,
+                &workspace,
+                "deletion_marker",
+                embedding,
+                &options,
+            )
+            .unwrap();
+            assert_eq!(
+                paths(&hits),
+                HashSet::from([PathBuf::from("remaining.rs")]),
+                "deleted candidates occupied the result limit"
+            );
+            let definitions = crate::symbols::search_symbol_definitions_with_context(
+                &workspace,
+                &context,
+                "deletion_marker",
+                &options,
+            )
+            .unwrap();
+            assert_eq!(
+                paths(&definitions),
+                HashSet::from([PathBuf::from("remaining.rs")])
+            );
+        }
+    }
+    assert!(
+        context
+            .representative_hit_for_file(Path::new("deleted.rs"), "deletion_marker", false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        context
+            .representative_hit_for_file(Path::new("remaining.rs"), "deletion_marker", false)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+#[serial]
+fn deleted_inherited_sources_are_hidden_from_a_loaded_overlay() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    git(root.path(), &["init", "-q"]);
+    fs::write(
+        root.path().join("inherited.rs"),
+        "pub fn inherited_deletion_marker() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-qm", "base"]);
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    let base = Workspace::resolve(root.path()).unwrap();
+    index_workspace(&base, &model).unwrap();
+    let parent = tempdir().unwrap();
+    let worktree = parent.path().join("worktree");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "deletion-visibility",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let overlay = Workspace::resolve(&worktree).unwrap();
+    index_workspace(&overlay, &model).unwrap();
+    let context = SearchContext::load(&overlay, Some(model.dimensions()), false).unwrap();
+    fs::remove_file(worktree.join("inherited.rs")).unwrap();
+    let options = SearchOptions::default();
+    assert!(
+        hybrid_search_with_context(
+            &context,
+            &overlay,
+            "inherited_deletion_marker",
+            Some(&model),
+            &options
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert!(
+        crate::symbols::search_symbol_definitions_with_context(
+            &overlay,
+            &context,
+            "inherited_deletion_marker",
+            &options
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert!(
+        context
+            .representative_hit_for_file(
+                Path::new("inherited.rs"),
+                "inherited_deletion_marker",
+                false
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !hybrid_search(&base, "inherited_deletion_marker", None, &options)
+            .unwrap()
+            .is_empty()
+    );
+
+    index_workspace(&overlay, &model).unwrap();
+    let database = open_sqlite_readonly(&overlay.overlay_sqlite_path()).unwrap();
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM tombstones WHERE file_path = 'inherited.rs'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE file_path = 'inherited.rs'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn unavailable_sources_keep_indexed_fallback_without_following_symlinks() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    fs::write(
+        root.path().join("source.rs"),
+        "pub fn unavailable_marker() {}\n",
+    )
+    .unwrap();
+    fs::write(outside.path().join("source.rs"), "outside secret\n").unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+    let context = SearchContext::load(&workspace, None, false).unwrap();
+    fs::remove_file(root.path().join("source.rs")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("source.rs"),
+        root.path().join("source.rs"),
+    )
+    .unwrap();
+    let hits = hybrid_search_with_context(
+        &context,
+        &workspace,
+        "unavailable_marker",
+        None,
+        &SearchOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(paths(&hits), HashSet::from([PathBuf::from("source.rs")]));
+    assert!(hits[0].preview.contains("unavailable_marker"));
+    assert!(!hits[0].preview.contains("outside secret"));
+    assert!(hits[0].reason.contains("using indexed text"));
+}
+
+#[test]
+#[serial]
+fn deleted_sources_do_not_raise_the_relevance_cutoff() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    for index in 0..3 {
+        fs::write(
+            root.path().join(format!("gone{index}.rs")),
+            "pub fn validate_token() { /* authentication token validation security checks */ }\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.path().join("remaining.rs"),
+        format!(
+            "pub fn verify_auth() {{ /* authentication token validation security checks {} */ }}\n",
+            "padding ".repeat(300),
+        ),
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+    let context = SearchContext::load(&workspace, None, false).unwrap();
+    for index in 0..3 {
+        fs::remove_file(root.path().join(format!("gone{index}.rs"))).unwrap();
+    }
+    for limit in [1, 10] {
+        let hits = hybrid_search_with_context(
+            &context,
+            &workspace,
+            "authentication token validation security checks",
+            None,
+            &SearchOptions {
+                limit: Some(limit),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paths(&hits), HashSet::from([PathBuf::from("remaining.rs")]));
+    }
+}
+
+#[test]
+#[serial]
 fn public_search_eligibility_ignores_invisible_top_docs() {
     let home = tempdir().unwrap();
     unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };

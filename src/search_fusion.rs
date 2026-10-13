@@ -832,6 +832,16 @@ pub(super) fn fuse_rrf_with_context(
             .total_cmp(&left.score)
             .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
     });
+    // Missing files must not raise the relevance cutoff for live candidates.
+    if let Some(ctx) = ctx {
+        let files = ctx.workspace_files();
+        let mut missing_paths = HashMap::new();
+        ranked.retain(|candidate| {
+            !*missing_paths
+                .entry(candidate.chunk.file_path.clone())
+                .or_insert_with(|| files.is_missing(&candidate.chunk.file_path))
+        });
+    }
     let enable_backfill = backfill_enabled(&ranked);
 
     if matches!(

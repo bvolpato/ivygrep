@@ -96,6 +96,78 @@ impl RootHandle {
         open(&self.root, path)
     }
 
+    pub(crate) fn is_missing(&self, path: &Path) -> bool {
+        self.is_missing_with_buffer(path, &mut Vec::new())
+    }
+
+    pub(crate) fn is_missing_with_buffer(&self, path: &Path, buffer: &mut Vec<u8>) -> bool {
+        // Presence does not authorize a live read. A successful presence check
+        // rules out confirmed absence; errors still need the contained opener,
+        // which distinguishes deletion from an unsafe symlink or denied access.
+        // Once opened, keep observing the pinned directory if its path changes.
+        #[cfg(unix)]
+        let unopened = self.directory.get().is_none();
+        #[cfg(not(unix))]
+        let unopened = true;
+        if unopened && self.root.is_absolute() {
+            let relative = if path.is_absolute() {
+                path.strip_prefix(&self.root).ok()
+            } else {
+                Some(path)
+            };
+            if let Some(relative) = relative
+                && !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+                && self.path_is_present(path, relative, buffer)
+            {
+                return false;
+            }
+        }
+        self.open(path)
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+    }
+
+    #[cfg(unix)]
+    fn path_is_present(&self, path: &Path, relative: &Path, buffer: &mut Vec<u8>) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+
+        buffer.clear();
+        if path.is_absolute() {
+            buffer.reserve(path.as_os_str().len() + 1);
+            buffer.extend_from_slice(path.as_os_str().as_bytes());
+        } else {
+            let root = self.root.as_os_str().as_bytes();
+            let relative = relative.as_os_str().as_bytes();
+            let needs_separator = !root.ends_with(b"/");
+            buffer.reserve(root.len() + relative.len() + usize::from(needs_separator) + 1);
+            buffer.extend_from_slice(root);
+            if needs_separator {
+                buffer.push(b'/');
+            }
+            buffer.extend_from_slice(relative);
+        }
+        buffer.push(0);
+        std::ffi::CStr::from_bytes_with_nul(buffer).is_ok_and(|name| {
+            // SAFETY: name is NUL-terminated and live for the call. F_OK only
+            // checks presence; it does not authorize or perform a content read.
+            unsafe { libc::access(name.as_ptr(), libc::F_OK) == 0 }
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn path_is_present(&self, path: &Path, relative: &Path, _buffer: &mut Vec<u8>) -> bool {
+        if path.is_absolute() {
+            return path.metadata().is_ok();
+        }
+        let mut full_path =
+            PathBuf::with_capacity(self.root.as_os_str().len() + relative.as_os_str().len() + 1);
+        full_path.push(&self.root);
+        full_path.push(relative);
+        full_path.metadata().is_ok()
+    }
+
     /// Invalid UTF-8 is replaced, matching how indexing decodes source files.
     pub(crate) fn read_to_string(&self, path: &Path) -> io::Result<String> {
         Ok(lossy_string(self.read(path)?))
@@ -438,6 +510,72 @@ mod tests {
         assert!(RootHandle::new(Path::new("relative")).open(name).is_err());
         assert!(RootHandle::new(&root.join("missing")).open(name).is_err());
         assert!(RootHandle::new(&root.join("source.rs")).open(name).is_err());
+    }
+
+    #[test]
+    fn presence_checks_observe_deletion_and_restoration() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("source.rs");
+        let files = RootHandle::new(&root);
+        std::fs::write(&source, "inside").unwrap();
+        assert!(!files.is_missing(Path::new("source.rs")));
+        std::fs::remove_file(&source).unwrap();
+        assert!(files.is_missing(Path::new("source.rs")));
+        std::fs::write(&source, "restored").unwrap();
+        assert!(!files.is_missing(&source));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presence_errors_require_contained_confirmation() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = directory.path().canonicalize().unwrap();
+        let root = fixture.join("root");
+        let outside = fixture.join("outside");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("present.rs"), "outside").unwrap();
+        symlink(outside.join("missing.rs"), root.join("dangling.rs")).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        for path in ["dangling.rs", "linked/missing.rs", "linked/present.rs"] {
+            let files = RootHandle::new(&root);
+            assert!(!files.is_missing(Path::new(path)), "{path}");
+            assert!(files.read(Path::new(path)).is_err(), "{path}");
+        }
+        assert!(RootHandle::new(&root).is_missing(Path::new("src/missing.rs")));
+        assert!(RootHandle::new(&root.join("removed")).is_missing(Path::new("source.rs")));
+
+        // A root replaced by a symlink is unavailable, even if its target
+        // contains no corresponding file. It is not a confirmed deletion.
+        std::fs::rename(&root, fixture.join("previous")).unwrap();
+        symlink(&outside, &root).unwrap();
+        assert!(!RootHandle::new(&root).is_missing(Path::new("missing.rs")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presence_checks_keep_an_opened_roots_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = directory.path().canonicalize().unwrap();
+        let root = fixture.join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("source.rs"), "original").unwrap();
+        let files = RootHandle::new(&root);
+        files.read(Path::new("source.rs")).unwrap();
+
+        let previous = fixture.join("previous");
+        std::fs::rename(&root, &previous).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("replacement.rs"), "replacement").unwrap();
+        assert!(!files.is_missing(Path::new("source.rs")));
+        assert!(files.is_missing(Path::new("replacement.rs")));
+        std::fs::remove_file(previous.join("source.rs")).unwrap();
+        std::fs::write(root.join("source.rs"), "replacement").unwrap();
+        assert!(files.is_missing(Path::new("source.rs")));
+        assert!(!RootHandle::new(&root).is_missing(Path::new("source.rs")));
     }
 
     #[cfg(unix)]

@@ -34,7 +34,7 @@ query: fix refresh-token races
 path: /absolute/repository/path
 output: context_pack
 since: main
-budget_tokens: 8000</pre></section>
+budget_tokens: 8000</pre><p><code>since</code> resolves a Git ref and finds its merge base with <code>HEAD</code>. The pack includes changes committed on the current branch since that base, plus staged, unstaged, and untracked files. It is valid only for a context pack; the selected ref is not the diff base.</p></section>
             <aside class="glass-panel integration-card"><h2>Tools</h2><ul><li><code>ig_search</code>: search or context pack</li><li><code>ig_status</code>: index state</li><li>stdio transport</li><li>Local source, queries, embeddings, indexes</li></ul><div class="integration-links"><a class="btn btn-ghost" href="https://registry.modelcontextprotocol.io/">MCP Registry</a><a class="btn btn-ghost" href="https://github.com/bvolpato/ivygrep/releases/latest">Release bundle</a></div></aside>
         </div>
     </div></main>
