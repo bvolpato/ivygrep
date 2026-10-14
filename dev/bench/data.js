@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791936246810,
+  "lastUpdate": 1791939790499,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -74814,6 +74814,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2564.98,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3e2a0421742b247c6b05fdedffc6a472da1e08f2",
+          "message": "chore(deps): bump the cargo group with 7 updates (#451)\n\nBumps the cargo group with 7 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [tokio](https://github.com/tokio-rs/tokio) | `1.53.1` | `1.53.2` |\n| [toml_edit](https://github.com/toml-rs/toml) | `0.25.15+spec-1.1.0` | `0.25.16+spec-1.1.0` |\n| [uuid](https://github.com/uuid-rs/uuid) | `1.26.1` | `1.27.0` |\n| [libc](https://github.com/rust-lang/libc) | `0.2.189` | `0.2.190` |\n| [tree-sitter-php](https://github.com/tree-sitter/tree-sitter-php) | `0.24.2` | `0.25.1` |\n| [tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) | `0.7.3` | `0.7.4` |\n| [insta](https://github.com/mitsuhiko/insta) | `1.48.0` | `1.49.0` |\n\n\nUpdates `tokio` from 1.53.1 to 1.53.2\n- [Release notes](https://github.com/tokio-rs/tokio/releases)\n- [Commits](https://github.com/tokio-rs/tokio/compare/tokio-1.53.1...tokio-1.53.2)\n\nUpdates `toml_edit` from 0.25.15+spec-1.1.0 to 0.25.16+spec-1.1.0\n- [Commits](https://github.com/toml-rs/toml/compare/v0.25.15...v0.25.16)\n\nUpdates `uuid` from 1.26.1 to 1.27.0\n- [Release notes](https://github.com/uuid-rs/uuid/releases)\n- [Commits](https://github.com/uuid-rs/uuid/compare/v1.26.1...v1.27.0)\n\nUpdates `libc` from 0.2.189 to 0.2.190\n- [Release notes](https://github.com/rust-lang/libc/releases)\n- [Changelog](https://github.com/rust-lang/libc/blob/0.2.190/CHANGELOG.md)\n- [Commits](https://github.com/rust-lang/libc/compare/0.2.189...0.2.190)\n\nUpdates `tree-sitter-php` from 0.24.2 to 0.25.1\n- [Release notes](https://github.com/tree-sitter/tree-sitter-php/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-php/compare/v0.24.2...v0.25.1)\n\nUpdates `tree-sitter-swift` from 0.7.3 to 0.7.4\n- [Release notes](https://github.com/alex-pinkus/tree-sitter-swift/releases)\n- [Commits](https://github.com/alex-pinkus/tree-sitter-swift/compare/0.7.3...0.7.4)\n\nUpdates `insta` from 1.48.0 to 1.49.0\n- [Release notes](https://github.com/mitsuhiko/insta/releases)\n- [Changelog](https://github.com/mitsuhiko/insta/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/mitsuhiko/insta/compare/1.48.0...1.49.0)\n\n---\nupdated-dependencies:\n- dependency-name: tokio\n  dependency-version: 1.53.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: toml_edit\n  dependency-version: 0.25.16+spec-1.1.0\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: uuid\n  dependency-version: 1.27.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: libc\n  dependency-version: 0.2.190\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tree-sitter-php\n  dependency-version: 0.25.1\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tree-sitter-swift\n  dependency-version: 0.7.4\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: insta\n  dependency-version: 1.49.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: bvolpato <brunocvcunha@gmail.com>",
+          "timestamp": "2026-10-13T20:06:54-04:00",
+          "tree_id": "69ee6c959372efe716e54dcd1133ac2a0415dce1",
+          "url": "https://github.com/bvolpato/ivygrep/commit/3e2a0421742b247c6b05fdedffc6a472da1e08f2"
+        },
+        "date": 1791939789702,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 60406.88,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 6957.95,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 69406.65,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 207767.73,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 10.41,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1612.63,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1290.94,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 3245.5,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 2882.98,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.41,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 91.3,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4705.6,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1454.98,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1429.77,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 2888.18,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3344.06,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3853.54,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 600.05,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1804.33,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 375956.05,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 143.8,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 382957.69,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 42953.49,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 178034.12,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 267.89,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2165.22,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 254.35,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 529.65,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 3432.38,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 75.62,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 396.43,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 1768.29,
             "unit": "µs"
           }
         ]
