@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791933906577,
+  "lastUpdate": 1791936246810,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -74630,6 +74630,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2104.38,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e2b01146b7e5c4fa03d7f1d455b27b5146414fe4",
+          "message": "[deps] Update frontend tooling and bundled assets (#449)\n\n* chore(deps-dev): bump the npm group in /web with 2 updates\n\nBumps the npm group in /web with 2 updates: [@playwright/test](https://github.com/microsoft/playwright) and [vite](https://github.com/vitejs/vite/tree/HEAD/packages/vite).\n\n\nUpdates `@playwright/test` from 1.63.0 to 1.64.0\n- [Release notes](https://github.com/microsoft/playwright/releases)\n- [Commits](https://github.com/microsoft/playwright/compare/v1.63.0...v1.64.0)\n\nUpdates `vite` from 8.3.1 to 8.3.3\n- [Release notes](https://github.com/vitejs/vite/releases)\n- [Changelog](https://github.com/vitejs/vite/blob/main/packages/vite/CHANGELOG.md)\n- [Commits](https://github.com/vitejs/vite/commits/v8.3.3/packages/vite)\n\n---\nupdated-dependencies:\n- dependency-name: \"@playwright/test\"\n  dependency-version: 1.64.0\n  dependency-type: direct:development\n  update-type: version-update:semver-minor\n  dependency-group: npm\n- dependency-name: vite\n  dependency-version: 8.3.3\n  dependency-type: direct:development\n  update-type: version-update:semver-patch\n  dependency-group: npm\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* [deps] Update Vite patch and rebuild bundled frontend\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: bvolpato <brunocvcunha@gmail.com>",
+          "timestamp": "2026-10-13T19:19:39-04:00",
+          "tree_id": "f06f9cc02c37bf1848cc4f95ab61788308963f79",
+          "url": "https://github.com/bvolpato/ivygrep/commit/e2b01146b7e5c4fa03d7f1d455b27b5146414fe4"
+        },
+        "date": 1791936246069,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 41741.2,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3420.7,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 50036.95,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 194305.37,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 12.5,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1934.96,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1537.74,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 1669.54,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 1535,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.85,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 137.18,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4874.17,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1356.1,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1394.06,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3323.84,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3612.14,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 4230,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 510.77,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1795.97,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 473392.24,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 120.92,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 499936.92,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 16451.3,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 91694.68,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 197.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2066.7,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 322.88,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 734.13,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 5071.93,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 102.48,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 562.25,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2564.98,
             "unit": "µs"
           }
         ]
