@@ -91,3 +91,70 @@ fn test_skip_gitignore_overrides_exclusions() {
     let file_path = files3[0].get("file_path").unwrap().as_str().unwrap();
     assert_eq!(file_path, "secret.txt");
 }
+
+#[cfg(unix)]
+#[test]
+fn failed_skip_gitignore_reindex_returns_error_and_retries() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RestorePermissions(std::path::PathBuf, fs::Permissions);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            fs::set_permissions(&self.0, self.1.clone()).unwrap();
+        }
+    }
+
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    let locked = repo.join("locked");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir(&locked).unwrap();
+    fs::write(repo.join(".gitignore"), "secret.txt\n").unwrap();
+    fs::write(repo.join("secret.txt"), "hidden-secret-string\n").unwrap();
+    fs::write(locked.join("visible.txt"), "public data\n").unwrap();
+
+    let mut add = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    add.current_dir(&repo)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", ".", "--hash", "--no-watch"])
+        .assert()
+        .success();
+
+    let restore = RestorePermissions(locked.clone(), fs::metadata(&locked).unwrap().permissions());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked).is_ok() {
+        return;
+    }
+
+    let search = || {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+        command
+            .current_dir(&repo)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args([
+                "--literal",
+                "--skip-gitignore",
+                "--no-watch",
+                "--file-name-only",
+                "--json",
+                "hidden-secret-string",
+            ]);
+        command
+    };
+
+    let failed = search().assert().failure();
+    assert!(
+        String::from_utf8_lossy(&failed.get_output().stderr).contains("Permission denied"),
+        "{failed:?}"
+    );
+    search().assert().failure();
+
+    drop(restore);
+    let result = search().assert().success().get_output().stdout.clone();
+    let files: Vec<String> = serde_json::from_slice(&result).unwrap();
+    assert_eq!(files, ["secret.txt"]);
+}
