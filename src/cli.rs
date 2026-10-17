@@ -1879,8 +1879,8 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
 
     if cli.skip_gitignore && !cli.all_indices && (!cli.regex || cli.literal) {
         #[allow(clippy::collapsible_if)]
-        if let Ok(Some(mut meta)) = workspace.read_metadata() {
-            if !meta.skip_gitignore {
+        if let Some(mut meta) = workspace.read_metadata()? {
+            if !meta.skip_gitignore || !workspace_index_matches_skip_gitignore(&workspace, true) {
                 tracing::info!(
                     "Re-indexing workspace to include gitignore entities as requested..."
                 );
@@ -1907,10 +1907,12 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 // Daemon searches reconcile mode under their per-workspace
                 // lease. Local execution must update metadata before indexing.
                 if !search_via_daemon {
-                    meta.skip_gitignore = true;
-                    let _ = workspace.write_metadata(&meta);
+                    if !meta.skip_gitignore {
+                        meta.skip_gitignore = true;
+                        workspace.write_metadata(&meta)?;
+                    }
                     let model = crate::embedding::create_hash_model();
-                    let _ = crate::indexer::index_workspace(&workspace, model.as_ref());
+                    crate::indexer::index_workspace(&workspace, model.as_ref())?;
                 }
             }
         }
