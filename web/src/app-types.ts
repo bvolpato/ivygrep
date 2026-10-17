@@ -6,6 +6,7 @@ export type BootConfig = {
 
 export type WorkspaceStatus = {
   root: string;
+  statistics_unavailable?: boolean;
   file_count?: number;
   chunk_count?: number;
   watch_enabled?: boolean;

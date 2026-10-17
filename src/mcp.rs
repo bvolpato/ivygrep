@@ -36,7 +36,9 @@ use crate::protocol::{
 use crate::regex_search::regex_search_with_options;
 use crate::search::{SearchOptions, hybrid_search_outcome, literal_search};
 use crate::symbols::{SymbolSearchMode, search_symbols_with_options};
-use crate::workspace::{Workspace, WorkspaceMetadata, resolve_workspace_and_scope};
+use crate::workspace::{
+    Workspace, WorkspaceMetadata, WorkspaceStatus, resolve_workspace_and_scope,
+};
 
 const JSONRPC_VERSION: &str = "2.0";
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -1100,10 +1102,11 @@ fn status_output_schema() -> Value {
                     "type": "object",
                     "properties": {
                         "workspace_root": {"type": "string"},
-                        "ready_to_query": {"type": "boolean"},
+                        "ready_to_query": {"type": ["boolean", "null"]},
                         "status": {"type": "string"},
-                        "chunk_count": {"type": "integer", "minimum": 0},
-                        "file_count": {"type": "integer", "minimum": 0},
+                        "statistics_unavailable": {"type": "boolean"},
+                        "chunk_count": {"type": ["integer", "null"], "minimum": 0},
+                        "file_count": {"type": ["integer", "null"], "minimum": 0},
                         "indexing_in_progress": {"type": "boolean"},
                         "enhancing_in_progress": {"type": "boolean"},
                         "watch_enabled": {"type": "boolean"},
@@ -1115,6 +1118,7 @@ fn status_output_schema() -> Value {
                         "workspace_root",
                         "ready_to_query",
                         "status",
+                        "statistics_unavailable",
                         "chunk_count",
                         "file_count",
                         "indexing_in_progress",
@@ -1201,39 +1205,13 @@ fn execute_ivygrep_status() -> Result<Value> {
         // A run accepted by the daemon but still parked behind the workspace
         // lease or CPU permits has no job heartbeat yet; ask the daemon so the
         // workspace is not reported as idle while its first index is queued.
-        let indexing_in_progress =
-            ws.indexing_in_progress || (!ready_to_query && daemon_index_in_flight(&ws.root));
-        let status_msg = if ready_to_query {
-            if ws.enhancing_in_progress {
-                "Ready to query (Background enhancement in progress)"
-            } else if ws.enhancing_stalled {
-                "Ready to query (Background enhancement stalled)"
-            } else if !ws.has_neural_vectors {
-                "Ready to query (Lexical only)"
-            } else {
-                "Ready to query"
-            }
-        } else if indexing_in_progress {
-            "Indexing in progress (Not ready)"
-        } else if ws.indexing_stalled {
-            "Indexing stalled (Needs attention)"
-        } else {
-            "Not indexed"
-        };
-
-        projects.push(json!({
-            "workspace_root": ws.root,
-            "ready_to_query": ready_to_query,
-            "status": status_msg,
-            "chunk_count": ws.chunk_count,
-            "file_count": ws.file_count,
-            "indexing_in_progress": indexing_in_progress,
-            "enhancing_in_progress": ws.enhancing_in_progress,
-            "watch_enabled": ws.watch_enabled,
-            "watcher_alive": ws.watcher_alive,
-            "indexing_stalled": ws.indexing_stalled,
-            "enhancing_stalled": ws.enhancing_stalled,
-        }));
+        let indexing_in_progress = ws.indexing_in_progress
+            || ((!ready_to_query || ws.statistics_unavailable) && daemon_index_in_flight(&ws.root));
+        projects.push(status_workspace_payload(
+            &ws,
+            ready_to_query,
+            indexing_in_progress,
+        ));
     }
 
     let payload = json!({
@@ -1241,6 +1219,72 @@ fn execute_ivygrep_status() -> Result<Value> {
     });
 
     tool_success_result(payload, true)
+}
+
+fn status_workspace_payload(
+    ws: &WorkspaceStatus,
+    ready_to_query: bool,
+    indexing_in_progress: bool,
+) -> Value {
+    let status = if ws.statistics_unavailable {
+        if indexing_in_progress {
+            "Indexing in progress (Statistics temporarily unavailable)"
+        } else if ws.indexing_stalled {
+            "Indexing stalled (Statistics temporarily unavailable)"
+        } else if ws.enhancing_in_progress {
+            "Background enhancement in progress (Statistics temporarily unavailable)"
+        } else if ws.enhancing_stalled {
+            "Background enhancement stalled (Statistics temporarily unavailable)"
+        } else {
+            "Statistics temporarily unavailable"
+        }
+    } else if ready_to_query {
+        if ws.enhancing_in_progress {
+            "Ready to query (Background enhancement in progress)"
+        } else if ws.enhancing_stalled {
+            "Ready to query (Background enhancement stalled)"
+        } else if !ws.has_neural_vectors {
+            "Ready to query (Lexical only)"
+        } else {
+            "Ready to query"
+        }
+    } else if indexing_in_progress {
+        "Indexing in progress (Not ready)"
+    } else if ws.indexing_stalled {
+        "Indexing stalled (Needs attention)"
+    } else {
+        "Not indexed"
+    };
+    let ready_to_query = if ws.statistics_unavailable {
+        Value::Null
+    } else {
+        json!(ready_to_query)
+    };
+    let chunk_count = if ws.statistics_unavailable {
+        Value::Null
+    } else {
+        json!(ws.chunk_count)
+    };
+    let file_count = if ws.statistics_unavailable {
+        Value::Null
+    } else {
+        json!(ws.file_count)
+    };
+
+    json!({
+        "workspace_root": ws.root,
+        "ready_to_query": ready_to_query,
+        "status": status,
+        "statistics_unavailable": ws.statistics_unavailable,
+        "chunk_count": chunk_count,
+        "file_count": file_count,
+        "indexing_in_progress": indexing_in_progress,
+        "enhancing_in_progress": ws.enhancing_in_progress,
+        "watch_enabled": ws.watch_enabled,
+        "watcher_alive": ws.watcher_alive,
+        "indexing_stalled": ws.indexing_stalled,
+        "enhancing_stalled": ws.enhancing_stalled,
+    })
 }
 
 /// Whether the daemon has an explicit index run queued or running for `root`.
@@ -4339,5 +4383,108 @@ impl AccountManager {
         let _ = workspaces.len();
         assert_eq!(response["isError"], false);
         assert!(response["structuredContent"].is_object());
+    }
+
+    #[test]
+    fn unavailable_mcp_status_keeps_progress_and_marks_counts_unknown() {
+        let schema = status_output_schema();
+        let item = &schema["properties"]["workspaces"]["items"];
+        assert_eq!(
+            item["properties"]["chunk_count"]["type"],
+            json!(["integer", "null"])
+        );
+        assert_eq!(
+            item["properties"]["ready_to_query"]["type"],
+            json!(["boolean", "null"])
+        );
+        assert_eq!(
+            item["properties"]["file_count"]["type"],
+            json!(["integer", "null"])
+        );
+        assert!(
+            item["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("statistics_unavailable"))
+        );
+
+        let mut fixture = json!({
+            "id": "workspace-id",
+            "root": "/tmp/repo",
+            "last_indexed_at_unix": 1,
+            "watch_enabled": true,
+            "statistics_unavailable": true,
+            "chunk_count": 0,
+            "file_count": 0,
+            "index_size_bytes": 4096,
+            "index_components": {
+                "metadata_bytes": 0,
+                "lexical_bytes": 0,
+                "hash_vectors_bytes": 0,
+                "neural_vectors_bytes": 0,
+                "other_bytes": 0
+            },
+            "vector_key_count": 0,
+            "has_neural_vectors": false,
+            "neural_vector_count": 0,
+            "neural_coverage_percent": 0.0,
+            "neural_dimensions": 256,
+            "reranker_candidate_limit": 50,
+            "indexing_in_progress": true,
+            "indexing_progress": "120/300"
+        });
+        let workspace: WorkspaceStatus = serde_json::from_value(fixture.clone()).unwrap();
+        let payload = status_workspace_payload(&workspace, true, true);
+        assert_eq!(payload["statistics_unavailable"], true);
+        assert!(payload["ready_to_query"].is_null());
+        assert!(payload["chunk_count"].is_null());
+        assert!(payload["file_count"].is_null());
+        assert_eq!(payload["indexing_in_progress"], true);
+        assert_eq!(
+            payload["status"],
+            "Indexing in progress (Statistics temporarily unavailable)"
+        );
+        assert!(
+            !payload["status"]
+                .as_str()
+                .unwrap()
+                .contains("Ready to query")
+        );
+
+        fixture["indexing_in_progress"] = json!(false);
+        fixture["indexing_progress"] = Value::Null;
+        fixture["enhancing_in_progress"] = json!(true);
+        let enhancing: WorkspaceStatus = serde_json::from_value(fixture.clone()).unwrap();
+        let enhancing_payload = status_workspace_payload(&enhancing, true, false);
+        assert!(enhancing_payload["ready_to_query"].is_null());
+        assert_eq!(enhancing_payload["enhancing_in_progress"], true);
+        assert_eq!(
+            enhancing_payload["status"],
+            "Background enhancement in progress (Statistics temporarily unavailable)"
+        );
+
+        fixture["enhancing_in_progress"] = json!(false);
+        let unavailable_idle: WorkspaceStatus = serde_json::from_value(fixture.clone()).unwrap();
+        let unavailable_payload = status_workspace_payload(&unavailable_idle, false, false);
+        assert!(unavailable_payload["ready_to_query"].is_null());
+        assert_eq!(
+            unavailable_payload["status"],
+            "Statistics temporarily unavailable"
+        );
+
+        fixture["statistics_unavailable"] = json!(false);
+        let available: WorkspaceStatus = serde_json::from_value(fixture.clone()).unwrap();
+        let available = status_workspace_payload(&available, false, false);
+        assert_eq!(available["chunk_count"], 0);
+        assert_eq!(available["file_count"], 0);
+        assert_eq!(available["ready_to_query"], false);
+        assert_eq!(available["status"], "Not indexed");
+
+        fixture["chunk_count"] = json!(1);
+        fixture["has_neural_vectors"] = json!(true);
+        let available_indexed: WorkspaceStatus = serde_json::from_value(fixture).unwrap();
+        let available_indexed = status_workspace_payload(&available_indexed, true, false);
+        assert_eq!(available_indexed["ready_to_query"], true);
+        assert_eq!(available_indexed["status"], "Ready to query");
     }
 }

@@ -840,7 +840,9 @@ async fn run_status(json: bool) -> Result<()> {
     let workspaces = list_workspaces()?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&workspaces)?);
+        let mut payload = serde_json::to_value(&workspaces)?;
+        omit_unavailable_workspace_statistics(&mut payload);
+        println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if workspaces.is_empty() {
         println!("No indexed workspaces.");
         println!(
@@ -932,7 +934,9 @@ async fn run_status(json: bool) -> Result<()> {
                 }
 
                 // Chunk stats
-                if is_overlay {
+                if ws.statistics_unavailable {
+                    println!("{prefix}  Files:  Statistics temporarily unavailable");
+                } else if is_overlay {
                     println!(
                         "{prefix}  Files:  {} files, {} chunks (overlaid delta)",
                         ws.file_count, ws.chunk_count
@@ -947,35 +951,43 @@ async fn run_status(json: bool) -> Result<()> {
                 // Index size
                 let size = format_bytes(ws.index_size_bytes);
                 println!("{prefix}  Size:   {size}");
-                println!(
-                    "{prefix}          {}, lexical {}, hash {}, neural {}",
-                    format_sqlite_tiers(&ws.index_components),
-                    format_bytes(ws.index_components.lexical_bytes),
-                    format_bytes(ws.index_components.hash_vectors_bytes),
-                    format_bytes(ws.index_components.neural_vectors_bytes),
-                );
-                println!(
-                    "{prefix}          compaction {} ({:.1}% free, format v{}/{})",
-                    if ws.compaction.healthy {
-                        "healthy"
-                    } else {
-                        "attention"
-                    },
-                    ws.compaction.sqlite_free_percent,
-                    ws.compaction.format_version,
-                    ws.compaction.current_format_version,
-                );
+                if ws.statistics_unavailable {
+                    println!("{prefix}          Statistics temporarily unavailable");
+                } else {
+                    println!(
+                        "{prefix}          {}, lexical {}, hash {}, neural {}",
+                        format_sqlite_tiers(&ws.index_components),
+                        format_bytes(ws.index_components.lexical_bytes),
+                        format_bytes(ws.index_components.hash_vectors_bytes),
+                        format_bytes(ws.index_components.neural_vectors_bytes),
+                    );
+                    println!(
+                        "{prefix}          compaction {} ({:.1}% free, format v{}/{})",
+                        if ws.compaction.healthy {
+                            "healthy"
+                        } else {
+                            "attention"
+                        },
+                        ws.compaction.sqlite_free_percent,
+                        ws.compaction.format_version,
+                        ws.compaction.current_format_version,
+                    );
+                }
 
                 // Embedding status
                 if ws.enhancing_in_progress {
                     let phase = ws.enhancing_phase.as_deref().unwrap_or("background");
                     let progress_str = if let Some(count) = ws.enhancing_progress_count {
-                        let pct = if ws.chunk_count > 0 {
-                            (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
+                        if ws.statistics_unavailable {
+                            format!("({count} chunks processed), ")
                         } else {
-                            100
-                        };
-                        format!("({count} / {} chunks, ~{pct}%), ", ws.chunk_count)
+                            let pct = if ws.chunk_count > 0 {
+                                (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
+                            } else {
+                                100
+                            };
+                            format!("({count} / {} chunks, ~{pct}%), ", ws.chunk_count)
+                        }
                     } else {
                         String::new()
                     };
@@ -996,7 +1008,7 @@ async fn run_status(json: bool) -> Result<()> {
                         "{prefix}  Search: {} (run `ig --doctor` or retry a query)",
                         "⚠ stalled neural upgrade".red().bold()
                     );
-                } else if ws.has_neural_vectors {
+                } else if !ws.statistics_unavailable && ws.has_neural_vectors {
                     let pct = format!("{:.0}%", ws.neural_coverage_percent);
                     let backend = ws
                         .neural_backend
@@ -1028,7 +1040,7 @@ async fn run_status(json: bool) -> Result<()> {
                         "{prefix}  Search: {} (run `ig --doctor --fix`)",
                         "⚠ stalled indexing".red().bold()
                     );
-                } else if is_overlay {
+                } else if !ws.statistics_unavailable && is_overlay {
                     if ws.chunk_count > 0 {
                         println!(
                             "{prefix}  Search: {} (+ base neural/hash delegation)",
@@ -1056,6 +1068,11 @@ async fn run_status(json: bool) -> Result<()> {
                         );
                         println!("{prefix}          Error: {}", err_line.red());
                     }
+                } else if ws.statistics_unavailable {
+                    println!(
+                        "{prefix}  Search: {}",
+                        "Statistics temporarily unavailable".bright_black()
+                    );
                 } else if ws.chunk_count > 0 {
                     let pct = format!("{:.0}%", ws.hash_coverage_percent);
                     println!(
@@ -1085,26 +1102,73 @@ async fn run_status(json: bool) -> Result<()> {
         }
 
         // Summary
-        let total_files: u64 = workspaces.iter().map(|w| w.file_count).sum();
-        let total_chunks: u64 = workspaces.iter().map(|w| w.chunk_count).sum();
         let total_size: u64 = workspaces.iter().map(|w| w.index_size_bytes).sum();
-        let neural_count = workspaces.iter().filter(|w| w.has_neural_vectors).count();
-        println!(
-            "{}",
-            format!(
-                "{} workspace(s), {} files, {} chunks, {} on disk, {}/{} neural",
-                workspaces.len(),
-                total_files,
-                total_chunks,
-                format_bytes(total_size),
-                neural_count,
-                workspaces.len(),
-            )
-            .bright_black()
-        );
+        let unavailable = workspaces
+            .iter()
+            .filter(|ws| ws.statistics_unavailable)
+            .count();
+        if unavailable > 0 {
+            println!(
+                "{}",
+                format!(
+                    "{} workspace(s), statistics temporarily unavailable for {unavailable} workspace(s), {} on disk",
+                    workspaces.len(),
+                    format_bytes(total_size),
+                )
+                .bright_black()
+            );
+        } else {
+            let total_files: u64 = workspaces.iter().map(|w| w.file_count).sum();
+            let total_chunks: u64 = workspaces.iter().map(|w| w.chunk_count).sum();
+            let neural_count = workspaces.iter().filter(|w| w.has_neural_vectors).count();
+            println!(
+                "{}",
+                format!(
+                    "{} workspace(s), {} files, {} chunks, {} on disk, {}/{} neural",
+                    workspaces.len(),
+                    total_files,
+                    total_chunks,
+                    format_bytes(total_size),
+                    neural_count,
+                    workspaces.len(),
+                )
+                .bright_black()
+            );
+        }
     }
 
     Ok(())
+}
+
+fn omit_unavailable_workspace_statistics(payload: &mut serde_json::Value) {
+    let Some(workspaces) = payload.as_array_mut() else {
+        return;
+    };
+
+    const UNAVAILABLE_STATISTICS: [&str; 10] = [
+        "chunk_count",
+        "file_count",
+        "index_components",
+        "compaction",
+        "vector_key_count",
+        "hash_vector_count",
+        "hash_coverage_percent",
+        "has_neural_vectors",
+        "neural_vector_count",
+        "neural_coverage_percent",
+    ];
+
+    for workspace in workspaces {
+        if workspace["statistics_unavailable"] != true {
+            continue;
+        }
+        let Some(fields) = workspace.as_object_mut() else {
+            continue;
+        };
+        for key in UNAVAILABLE_STATISTICS {
+            fields.remove(key);
+        }
+    }
 }
 
 /// The SQLite part of an index size line. A status listing does not measure
@@ -1347,15 +1411,19 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
         } else if std::io::stderr().is_terminal() {
             let phase = status.enhancing_phase.as_deref().unwrap_or("background");
             let progress = if let Some(count) = status.enhancing_progress_count {
-                let percent = if status.chunk_count > 0 {
-                    (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
+                if status.statistics_unavailable {
+                    format!(" ({count} chunks processed)")
                 } else {
-                    100
-                };
-                format!(
-                    " ({} / {} chunks, ~{}%)",
-                    count, status.chunk_count, percent
-                )
+                    let percent = if status.chunk_count > 0 {
+                        (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
+                    } else {
+                        100
+                    };
+                    format!(
+                        " ({} / {} chunks, ~{}%)",
+                        count, status.chunk_count, percent
+                    )
+                }
             } else {
                 String::new()
             };
@@ -1593,9 +1661,14 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                                         } else {
                                             cached_msg = format!("indexing {progress} files...");
                                         }
+                                    } else if status.statistics_unavailable {
+                                        cached_msg = "indexing; statistics temporarily unavailable"
+                                            .to_string();
                                     } else {
                                         cached_msg = "indexing...".to_string();
                                     }
+                                } else if status.statistics_unavailable {
+                                    cached_msg = "statistics temporarily unavailable".to_string();
                                 } else {
                                     cached_msg = format!(
                                         "{} files, {} chunks indexed",
@@ -2885,6 +2958,47 @@ mod tests {
         // A root that is not a Git checkout keeps everything below it.
         std::fs::remove_dir_all(root.join(".git")).unwrap();
         assert_eq!(nested_workspace_conflicts(&root, registered), below);
+    }
+
+    #[test]
+    fn status_json_omits_unavailable_statistics_and_keeps_progress() {
+        let mut payload = serde_json::json!([
+            {
+                "statistics_unavailable": true,
+                "chunk_count": 0,
+                "file_count": 0,
+                "index_components": {},
+                "compaction": {},
+                "vector_key_count": 0,
+                "hash_vector_count": 0,
+                "hash_coverage_percent": 0.0,
+                "has_neural_vectors": false,
+                "neural_vector_count": 0,
+                "neural_coverage_percent": 0.0,
+                "index_size_bytes": 4096,
+                "indexing_in_progress": true,
+                "indexing_progress": "120/300"
+            },
+            {
+                "statistics_unavailable": false,
+                "chunk_count": 10,
+                "file_count": 2
+            }
+        ]);
+
+        omit_unavailable_workspace_statistics(&mut payload);
+
+        assert!(payload[0].get("chunk_count").is_none());
+        assert!(payload[0].get("file_count").is_none());
+        assert!(payload[0].get("compaction").is_none());
+        assert!(payload[0].get("hash_coverage_percent").is_none());
+        assert!(payload[0].get("neural_coverage_percent").is_none());
+        assert!(payload[0].get("has_neural_vectors").is_none());
+        assert_eq!(payload[0]["statistics_unavailable"], true);
+        assert_eq!(payload[0]["index_size_bytes"], 4096);
+        assert_eq!(payload[0]["indexing_progress"], "120/300");
+        assert_eq!(payload[1]["chunk_count"], 10);
+        assert_eq!(payload[1]["file_count"], 2);
     }
 
     #[test]

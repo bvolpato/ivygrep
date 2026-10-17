@@ -169,6 +169,14 @@ committed as one cross-store transaction. Promotion keeps rollback artifacts
 until the new set is complete. A failed rebuild leaves the previous index
 queryable.
 
+Daemon index requests and watcher updates acquire exclusive workspace and base
+leases before the CPU permit and index lock. Even a targeted update can discover
+damaged stores that require replacement. Immediately before a store reset or
+staged promotion, the indexer asks the daemon to release cached readers of the
+replaced workspace and its dependent worktrees. Unchanged scans retain those
+readers. This ordering lets Windows replace the stores without live SQLite or
+Tantivy handles and prevents searches from reopening them during replacement.
+
 ### Incremental indexing
 
 The Merkle snapshot compares current file fingerprints with the last committed
@@ -200,13 +208,13 @@ Git-tracked and still match live source metadata. A temporary file indexed and
 deleted between two clean Git checks cannot certify that state. Older markers
 require reconciliation once, and explicit watcher paths bypass the shortcut.
 
-On current `main`, CLI searches and context requests, the TUI, and `ig --add`
+Starting with v1.3.1, CLI searches and context requests, the TUI, and `ig --add`
 ask before building an index for the home directory, a directory containing
 home, or the filesystem root. An interactive terminal accepts `y` or `yes`;
 non-interactive use requires `--yes`. A plain `--add` of an already indexed,
 healthy directory does not trigger this prompt. `--force` rebuilds it, while
 `--skip-gitignore` can add ignored files, and both prompt when they target a
-broad root. The `v1.3.0` release predates this CLI safeguard.
+broad root.
 
 Main indexes and overlays mark live publication as incomplete before changing
 stores. The marker survives failures and is cleared only after stores, metadata,
@@ -267,8 +275,10 @@ atomic replacement; this is not a power-loss durability guarantee.
 
 Background enhancement serializes vector writers with `enhancement.lock`, which
 survives index removal alongside the index and job locks. It takes `index.lock`
-only to open its initial stores and to publish checkpoints, metadata, and journal
-cleanup. Model inference and resource pauses leave lexical indexing unblocked.
+to open its initial stores, read bounded text batches, and publish checkpoints,
+metadata, and journal cleanup. Each batch closes its SQLite reader before model
+inference or resource pauses, leaving lexical indexing and store replacement
+unblocked.
 Every publication checks the captured `index_incarnation`; staged main-index and
 overlay replacements rotate this identity with their stores, and rollback restores
 it. Incremental updates keep the incarnation, leave new deletion journals for the
@@ -315,8 +325,8 @@ Search omits a file immediately when the contained workspace reader returns
 `NotFound`, even before the watcher reconciles the index or snapshot. The same
 filter applies to fresh and warm daemon hybrid results, symbol definitions, and
 context graph items. Permission, unavailable, and symlink failures retain the
-indexed-text fallback; only `NotFound` counts as deletion. This behavior on
-current `main` is not included in the released `v1.3.0`.
+indexed-text fallback; only `NotFound` counts as deletion. This behavior starts
+with `v1.3.1`.
 
 ### Workspace selection
 
@@ -902,6 +912,13 @@ advanced skips the redundant rescan.
 `ig --doctor` checks workspace health and can repair stale daemon state or broken
 indexes. Status distinguishes lexical readiness, hash coverage, neural coverage,
 active jobs, stalled work, watcher health, and compaction recommendations.
+
+Status takes a nonblocking shared index lock before reading SQLite or vector
+statistics. If that lock is unavailable, it keeps workspace identity and job
+progress and sets `statistics_unavailable`. CLI JSON omits those statistics;
+MCP returns `null` counts and readiness. Text and Web status show that statistics
+are temporarily unavailable instead of interpreting placeholders as an empty
+index or complete coverage.
 
 The split of the SQLite store into stored chunks, graph, and auxiliary bytes
 comes from `dbstat`, which reads every page of the store. A status listing

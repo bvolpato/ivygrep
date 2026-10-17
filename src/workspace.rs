@@ -119,6 +119,10 @@ pub struct WorkspaceStatus {
     /// Last watcher start failure recorded in the job ledger while offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_error: Option<String>,
+    /// Counts, coverage, and compaction are unmeasured when true. Ignore their
+    /// placeholder values while the shared index read lock is unavailable.
+    #[serde(default)]
+    pub statistics_unavailable: bool,
     pub chunk_count: u64,
     pub file_count: u64,
     pub index_size_bytes: u64,
@@ -1753,17 +1757,44 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
     let mut by_id = BTreeMap::new();
     let reranker = crate::reranker::runtime_status();
     for (index_dir, metadata) in entries {
-        let (chunk_count, file_count) = read_sqlite_counts(&index_dir);
+        // Status also runs while an indexer owns index.lock. Do not wait or
+        // open SQLite then: Windows cannot replace a store with a live reader.
+        let index_read_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(index_dir.join("index.lock"))
+            .ok()
+            .filter(|lock| fs2::FileExt::try_lock_shared(lock).is_ok());
+        let statistics_unavailable = index_read_lock.is_none();
+        let (chunk_count, file_count) = if statistics_unavailable {
+            (0, 0)
+        } else {
+            read_sqlite_counts(&index_dir)
+        };
         let index_size_bytes = dir_size_bytes(&index_dir);
-        let index_components = index_component_sizes(&index_dir, Some(STATUS_TIER_SCAN_MAX_BYTES));
-        let compaction = index_compaction_health(&index_dir);
-        let vector_key_count = read_sqlite_vector_key_count(&index_dir);
-        let hash_vector_count = vector_store_size(
-            &hash_vector_store_path(&index_dir),
-            crate::EMBEDDING_DIMENSIONS,
-        )
-        .unwrap_or(0);
-        let hash_coverage_percent = if vector_key_count > 0 {
+        let (index_components, compaction, vector_key_count, hash_vector_count) =
+            if statistics_unavailable {
+                (
+                    IndexComponentSizes::default(),
+                    IndexCompactionHealth::default(),
+                    0,
+                    0,
+                )
+            } else {
+                (
+                    index_component_sizes(&index_dir, Some(STATUS_TIER_SCAN_MAX_BYTES)),
+                    index_compaction_health(&index_dir),
+                    read_sqlite_vector_key_count(&index_dir),
+                    vector_store_size(
+                        &hash_vector_store_path(&index_dir),
+                        crate::EMBEDDING_DIMENSIONS,
+                    )
+                    .unwrap_or(0),
+                )
+            };
+        let hash_coverage_percent = if statistics_unavailable {
+            0.0
+        } else if vector_key_count > 0 {
             (hash_vector_count as f64 / vector_key_count as f64 * 100.0).min(100.0)
         } else {
             100.0
@@ -1775,17 +1806,20 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             });
         let neural_dimensions = persisted_or_configured_neural_dimensions(neural_model.as_ref());
         let neural_path = index_dir.join("vectors_neural.usearch");
-        let neural_vector_count = if neural_path.exists() {
+        let neural_vector_count = if !statistics_unavailable && neural_path.exists() {
             vector_store_size(&neural_path, neural_dimensions).unwrap_or(0)
         } else {
             0
         };
         let has_neural_vectors = neural_vector_count > 0;
-        let neural_coverage_percent = if vector_key_count > 0 {
+        let neural_coverage_percent = if statistics_unavailable {
+            0.0
+        } else if vector_key_count > 0 {
             (neural_vector_count as f64 / vector_key_count as f64 * 100.0).min(100.0)
         } else {
             100.0
         };
+        drop(index_read_lock);
         let neural_backend = fs::read_to_string(index_dir.join("neural_backend"))
             .ok()
             .map(|value| value.trim().to_string())
@@ -1924,6 +1958,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 watch_enabled: metadata.watch_enabled,
                 watcher_alive,
                 watcher_error,
+                statistics_unavailable,
                 chunk_count,
                 file_count,
                 index_size_bytes,
@@ -2586,6 +2621,54 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    #[serial]
+    fn listing_busy_workspace_keeps_progress_without_reading_statistics() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("lib.rs"),
+            "pub fn status_lock_marker() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::create_hash_model();
+        crate::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
+        let listed = list_workspaces().unwrap().pop().unwrap();
+        assert!(!listed.statistics_unavailable);
+        assert!(listed.chunk_count > 0);
+
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(workspace.lock_path())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        jobs::start_job(&workspace, JobKind::Indexing, "scanning", 1).unwrap();
+        fs::write(workspace.indexing_progress_path(), "scanning").unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let listing = std::thread::spawn(move || {
+            result_tx.send(list_workspaces()).unwrap();
+        });
+        let busy = result_rx.recv_timeout(std::time::Duration::from_secs(5));
+        fs2::FileExt::unlock(&lock).unwrap();
+        listing.join().unwrap();
+        let busy = busy.unwrap().unwrap().pop().unwrap();
+        assert!(
+            busy.statistics_unavailable,
+            "status must not read SQLite while index.lock is held exclusively"
+        );
+        assert_eq!(busy.id, workspace.id);
+        assert!(busy.indexing_in_progress);
+        assert_eq!(busy.indexing_progress.as_deref(), Some("scanning"));
+
+        let available = list_workspaces().unwrap().pop().unwrap();
+        assert!(!available.statistics_unavailable);
+        assert_eq!(available.chunk_count, listed.chunk_count);
+        assert_eq!(available.file_count, listed.file_count);
+    }
+
+    #[test]
     fn index_paths_use_forward_slashes() {
         assert_eq!(
             index_path_string(&PathBuf::from("src").join("search.rs")),
@@ -3120,6 +3203,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let index_dir = config::indexes_root().unwrap().join("overlay");
         std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::File::create(index_dir.join("index.lock")).unwrap();
 
         let ws = Workspace {
             id: "overlay".to_string(),

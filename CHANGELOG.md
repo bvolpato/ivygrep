@@ -4,6 +4,8 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-16
+
 ### Changed
 
 - `ig --status` no longer reads every page of a large SQLite store. It measured the store tiers (stored chunks, graph, auxiliary) with three full `dbstat` passes, which took 450 seconds for an index with an 8.3 GB store. The MCP status tool, the web UI, and the progress display of a first index ran the same passes. A status listing now measures the tiers in one pass, and only for a store up to 256 MiB. For a larger store, `index_components` has no `stored_chunks_bytes`, `graph_bytes`, or `sqlite_auxiliary_bytes`, and the text output shows the size of the whole store. `ig --doctor` always measures the tiers. The legacy call graph check reads only the legacy tables, so a current store costs no pass.
@@ -20,6 +22,9 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Daemon index rebuilds release cached readers before replacing SQLite, Tantivy, or vector stores, including readers inherited by linked worktrees. Watcher updates take exclusive workspace and base leases because even a targeted update can discover stores that need rebuilding. Unchanged scans retain their caches. This fixes Windows watcher reconciliation failing with `failed to preserve live index ... metadata.sqlite3` and `os error 32`.
+- Background hash and neural enhancement close SQLite readers before model inference or resource pauses. Text is read in bounded batches under the index lock, so a rebuild can replace the database on Windows while enhancement is computing or paused. Incarnation checks still prevent an older worker from publishing into replacement stores.
+- Watcher event filtering and status polling coordinate their SQLite reads with index replacement. Status keeps workspace identity and job progress when statistics cannot be read, and the CLI, MCP tool, and Web UI report statistics as unavailable. CLI JSON omits unavailable statistics, and MCP count and readiness fields are `null` instead of placeholder values.
 - Deleted source files no longer remain searchable through the clean-checkout shortcut. Its reuse marker now certifies the indexed source paths, and older markers are reconciled once before reuse. Watcher events bypass that shortcut. Hybrid search, symbol definitions, context relationships, and cached daemon results exclude files confirmed missing while indexing catches up; other read errors keep the existing indexed-text fallback.
 - Worktree deletion coverage now checks inherited-file tombstones, deletion of overlay-only additions, divergent replacements, base-identical restores, and preservation of the base index. A deleted inherited path stays hidden in that worktree without removing it from other checkouts.
 - The required CI gate now includes a bounded daemon mutation check for base checkouts and linked-worktree overlays. It checks uncached and cached searches together with SQLite, Merkle snapshots, and tombstones, and retains diagnostics when they do not converge.
@@ -29,6 +34,10 @@ All notable changes to ivygrep are documented in this file.
 - A repository keeps the clean-checkout shortcut when an ignored directory contains a nested Git repository, such as a dependency checkout or an agent worktree. Git listed that directory in the search for ignored ignore files, ivygrep could not read it as a file, and every no-change index run then did the full reconciliation. That search also no longer enters ignored directories such as `target/` or `node_modules/`. The walker does not enter them, so their ignore files are not inputs.
 - `./build.sh`, `./test.sh`, `./bench.sh`, and `scripts/stress_large_repo.sh` run under Bash 3.2, the system Bash on macOS. They stopped with `unbound variable` when an optional argument list was empty, for example `./build.sh` without extra arguments.
 - On Windows, a commit no longer makes a concurrent reader report an incompatible index format. Every commit replaced the format marker, and Windows can refuse to open a file while it is replaced. The reader then got version 0 for a healthy index. A marker that already holds the current version now stays in place.
+
+### Security
+
+- A CodeQL workflow analyzes Rust and JavaScript/TypeScript on pull requests, pushes to `main`, weekly, and manual dispatch. It complements the dependency, secret, and workflow audits. Analysis skips a full project build; coverage of generated build output is not guaranteed.
 
 ## [1.3.0] - 2026-09-26
 
