@@ -4022,7 +4022,7 @@ async fn run_index_request(
             }
         }
         Err(err) => DaemonResponse::Error {
-            message: err.to_string(),
+            message: format!("{err:#}"),
         },
     };
     if let Some(lead) = lead {

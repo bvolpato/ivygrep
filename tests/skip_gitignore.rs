@@ -140,25 +140,60 @@ fn skip_gitignore_search(repo: &std::path::Path, home: &std::path::Path, literal
 }
 
 #[cfg(unix)]
+struct Daemon(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+fn start_daemon(repo: &std::path::Path, home: &std::path::Path) -> Daemon {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(repo)
+        .env("IVYGREP_HOME", home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .env("RAYON_NUM_THREADS", "2")
+        .env("TOKIO_WORKER_THREADS", "2")
+        .arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut daemon = Daemon(child);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !home.join("daemon.sock").exists() {
+        assert!(
+            daemon.0.try_wait().unwrap().is_none(),
+            "daemon exited early"
+        );
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    daemon
+}
+
+#[cfg(unix)]
+struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
+
+#[cfg(unix)]
+impl Drop for RestorePermissions {
+    fn drop(&mut self) {
+        std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+    }
+}
+
+#[cfg(unix)]
 fn assert_failed_skip_gitignore_reindex_returns_error_and_retries(use_daemon: bool) {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::process::{Child, Stdio};
-    use std::time::{Duration, Instant};
-
-    struct RestorePermissions(std::path::PathBuf, fs::Permissions);
-    impl Drop for RestorePermissions {
-        fn drop(&mut self) {
-            fs::set_permissions(&self.0, self.1.clone()).unwrap();
-        }
-    }
-    struct Daemon(Child);
-    impl Drop for Daemon {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
 
     let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let (repo, home) = indexed_ignored_workspace(tmp.path());
@@ -169,33 +204,7 @@ fn assert_failed_skip_gitignore_reindex_returns_error_and_retries(use_daemon: bo
         return;
     }
 
-    let _daemon = if use_daemon {
-        let child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("ig"))
-            .current_dir(&repo)
-            .env("IVYGREP_HOME", &home)
-            .env("IVYGREP_NO_AUTOSPAWN", "1")
-            .env("RAYON_NUM_THREADS", "2")
-            .env("TOKIO_WORKER_THREADS", "2")
-            .arg("--daemon")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut daemon = Daemon(child);
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !home.join("daemon.sock").exists() {
-            assert!(
-                daemon.0.try_wait().unwrap().is_none(),
-                "daemon exited early"
-            );
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        Some(daemon)
-    } else {
-        None
-    };
+    let _daemon = use_daemon.then(|| start_daemon(&repo, &home));
 
     for literal in [true, false] {
         let failed = skip_gitignore_search(&repo, &home, literal)
@@ -236,33 +245,160 @@ fn failed_daemon_skip_gitignore_reindex_returns_error_and_retries() {
 }
 
 #[cfg(unix)]
+fn assert_all_indices_skip_gitignore_reindexes(use_daemon: bool) {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let (repo, home) = indexed_ignored_workspace(tmp.path());
+    fs::write(repo.join("secret.txt"), "glimmerquartzuniquemarker\n").unwrap();
+    let other = tmp.path().join("other");
+    fs::create_dir_all(other.join(".git")).unwrap();
+    fs::write(other.join(".gitignore"), "secret.txt\n").unwrap();
+    fs::write(other.join("secret.txt"), "glimmerquartzuniquemarker\n").unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&other)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .env("RAYON_NUM_THREADS", "2")
+        .env("TOKIO_WORKER_THREADS", "2")
+        .args(["--add", ".", "--hash", "--no-watch"])
+        .assert()
+        .success();
+
+    let locked = repo.join("locked");
+    let restore = RestorePermissions(locked.clone(), fs::metadata(&locked).unwrap().permissions());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked).is_ok() {
+        return;
+    }
+    let _daemon = use_daemon.then(|| start_daemon(&repo, &home));
+
+    let modes: &[&str] = if use_daemon {
+        &["--lexical-only"]
+    } else {
+        &["--literal", "--hash", "--lexical-only"]
+    };
+    let search = |mode: &str| {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+        command
+            .current_dir(&repo)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .env("RAYON_NUM_THREADS", "2")
+            .env("TOKIO_WORKER_THREADS", "2")
+            .env("RUST_LOG", "off")
+            .args([
+                "--all-indices",
+                "--skip-gitignore",
+                "--no-watch",
+                "--file-name-only",
+                "--json",
+                mode,
+                "glimmerquartzuniquemarker",
+            ]);
+        command
+    };
+
+    for mode in modes {
+        let failed = search(mode).assert().failure();
+        assert!(
+            String::from_utf8_lossy(&failed.get_output().stderr).contains("Permission denied"),
+            "{mode}: {failed:?}"
+        );
+    }
+    drop(restore);
+
+    let mut expected = vec![
+        repo.canonicalize().unwrap().join("secret.txt"),
+        other.canonicalize().unwrap().join("secret.txt"),
+    ];
+    expected.sort();
+    for mode in modes {
+        let result = search(mode).assert().success().get_output().stdout.clone();
+        let mut files: Vec<std::path::PathBuf> = serde_json::from_slice(&result).unwrap();
+        files.sort();
+        assert_eq!(files, expected, "{mode}");
+    }
+
+    if !use_daemon {
+        let index = home.join("indexes").join(ivygrep::workspace::workspace_id(
+            &repo.canonicalize().unwrap(),
+        ));
+        let incomplete = index.join(".indexing.incomplete");
+        fs::write(&incomplete, "publication pending\n").unwrap();
+        let restore =
+            RestorePermissions(locked.clone(), fs::metadata(&locked).unwrap().permissions());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let failed = search("--literal").assert().failure();
+        assert!(
+            String::from_utf8_lossy(&failed.get_output().stderr).contains("Permission denied"),
+            "{failed:?}"
+        );
+        drop(restore);
+        let result = search("--literal")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let mut files: Vec<std::path::PathBuf> = serde_json::from_slice(&result).unwrap();
+        files.sort();
+        assert_eq!(files, expected);
+        assert!(!incomplete.exists());
+    }
+}
+
+#[cfg(unix)]
 #[test]
-fn disconnected_daemon_does_not_fall_back_to_an_incomplete_index() {
+fn local_all_indices_skip_gitignore_reindexes_and_retries() {
+    assert_all_indices_skip_gitignore_reindexes(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_only_all_indices_skip_gitignore_uses_daemon_for_reindex() {
+    assert_all_indices_skip_gitignore_reindexes(true);
+}
+
+#[cfg(unix)]
+fn disconnect_after_version(
+    home: &std::path::Path,
+    incomplete: Option<std::path::PathBuf>,
+) -> std::thread::JoinHandle<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
 
+    let socket = home.join("daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(request["type"], "version");
+        if let Some(incomplete) = incomplete {
+            std::fs::write(incomplete, "publication pending\n").unwrap();
+        }
+        drop(listener);
+        std::fs::remove_file(socket).unwrap();
+        writeln!(
+            stream,
+            "{{\"type\":\"version\",\"version\":\"{}\"}}",
+            env!("CARGO_PKG_VERSION")
+        )
+        .unwrap();
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn disconnected_daemon_does_not_fall_back_to_an_incomplete_index() {
     let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let (repo, home) = indexed_ignored_workspace(tmp.path());
 
     for literal in [true, false] {
-        let socket = home.join("daemon.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let daemon = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = String::new();
-            BufReader::new(&stream).read_line(&mut request).unwrap();
-            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-            assert_eq!(request["type"], "version");
-            drop(listener);
-            std::fs::remove_file(socket).unwrap();
-            writeln!(
-                stream,
-                "{{\"type\":\"version\",\"version\":\"{}\"}}",
-                env!("CARGO_PKG_VERSION")
-            )
-            .unwrap();
-        });
-
+        let daemon = disconnect_after_version(&home, None);
         let failed = skip_gitignore_search(&repo, &home, literal)
             .assert()
             .failure();
@@ -282,4 +418,28 @@ fn disconnected_daemon_does_not_fall_back_to_an_incomplete_index() {
         .clone();
     let files: Vec<String> = serde_json::from_slice(&output).unwrap();
     assert_eq!(files, ["secret.txt"]);
+
+    let incomplete = home
+        .join("indexes")
+        .join(ivygrep::workspace::workspace_id(
+            &repo.canonicalize().unwrap(),
+        ))
+        .join(".indexing.incomplete");
+    let daemon = disconnect_after_version(&home, Some(incomplete.clone()));
+    let failed = skip_gitignore_search(&repo, &home, true)
+        .arg("--all-indices")
+        .assert()
+        .failure();
+    assert!(
+        String::from_utf8_lossy(&failed.get_output().stderr)
+            .contains("the --skip-gitignore index is incomplete"),
+        "{failed:?}"
+    );
+    daemon.join().unwrap();
+
+    skip_gitignore_search(&repo, &home, true)
+        .arg("--all-indices")
+        .assert()
+        .success();
+    assert!(!incomplete.exists());
 }
