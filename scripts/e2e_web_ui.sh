@@ -56,6 +56,11 @@ esac
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v pnpm >/dev/null 2>&1 || fail "pnpm is required; run pnpm -C web install --frozen-lockfile"
 
+# shellcheck source=scripts/e2e_tmp.sh
+. "$script_dir/e2e_tmp.sh"
+TMPDIR=$(e2e_socket_tmp_parent) || fail "could not find a temporary directory for the daemon socket"
+export TMPDIR
+
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/ivygrep-web-e2e.XXXXXX")
 tmp_root=$(CDPATH='' cd "$tmp_root" && pwd -P) || fail "could not resolve temp root"
 project="$tmp_root/project"

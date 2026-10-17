@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,33 @@ E2E_WORKFLOW = (
 
 
 class E2EWorkflowTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Windows daemons use a TCP port file")
+    def test_e2e_temp_parent_fits_unix_socket(self) -> None:
+        helper = E2E_WORKFLOW.parents[2] / "scripts" / "e2e_tmp.sh"
+        with tempfile.TemporaryDirectory(prefix="ig-tmp-test-", dir="/tmp") as temporary:
+            root = Path(temporary)
+            short = root / "short path"
+            long = root / ("é" * 40)
+            short.mkdir()
+            long.mkdir()
+
+            for requested, expected in ((short, short.resolve()), (long, Path("/tmp").resolve())):
+                with self.subTest(requested=requested):
+                    result = subprocess.run(
+                        ["sh", "-c", '. "$1"; e2e_socket_tmp_parent', "test", str(helper)],
+                        env={**os.environ, "TMPDIR": str(requested)},
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    )
+                    parent = Path(result.stdout.strip())
+                    self.assertEqual(parent, expected)
+                    with tempfile.TemporaryDirectory(prefix="ivygrep-web-e2e.", dir=parent) as home:
+                        socket_dir = Path(home) / "ivygrep-home"
+                        socket_dir.mkdir()
+                        with socket.socket(socket.AF_UNIX) as daemon:
+                            daemon.bind(str(socket_dir / "daemon.sock"))
+
     def test_local_e2e_uses_cargo_target_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
