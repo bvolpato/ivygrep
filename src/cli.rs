@@ -18,14 +18,17 @@ use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::{
-    BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
+    BUILD_VERSION, DaemonRequest, DaemonResponse, FileSearchResult, LiteralSearchOutput, SearchHit,
+    group_hits_by_file,
 };
 use crate::regex_search::{expand_regex_context_absolute, regex_search_with_options};
+#[cfg(test)]
+use crate::search::literal_search;
 use crate::search::{
     BOOLEAN_NOT_APPLIED_WARNING, MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_RESULT_LIMIT, SearchOptions,
-    hybrid_search_outcome, literal_search, validate_forced_neural_workspaces,
+    hybrid_search_outcome, literal_file_search, validate_forced_neural_workspaces,
 };
-use crate::search_service::{HitOrdering, SearchBatch, select_search_workspaces};
+use crate::search_service::{FileSearchBatch, HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
     resolve_workspace_and_scope,
@@ -139,7 +142,8 @@ pub struct Cli {
     #[arg(long = "interactive", visible_alias = "ui")]
     pub ui: bool,
 
-    /// Fast exact-match search backed by the index. Deterministic results.
+    /// Fast exact-match search backed by the index. Bounded searches show up to
+    /// three previews per file. Use --no-limit to show every matching line.
     #[arg(long, short = 'l')]
     pub literal: bool,
 
@@ -1892,6 +1896,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         std::process::exit(0);
     }
 
+    let mut literal_files = None;
     let hits = if cli.symbol || cli.refs || cli.callers {
         let mode = if cli.symbol {
             crate::symbols::SymbolSearchMode::Definitions
@@ -1914,12 +1919,18 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         };
         local_symbol_search_hits(&workspace, cli.all_indices, query, mode, &options)?
     } else if cli.literal {
+        let output = if cli.file_name_only {
+            LiteralSearchOutput::FileNames
+        } else {
+            LiteralSearchOutput::Files
+        };
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: backend_limit,
+            limit: display_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
+            output,
             include_globs: cli.include.clone(),
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
@@ -1927,7 +1938,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             skip_gitignore: cli.skip_gitignore,
         };
         let local_options = SearchOptions {
-            limit: backend_limit,
+            limit: display_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -1939,7 +1950,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             cancel_token: None,
         };
 
-        if search_via_daemon {
+        let files = if search_via_daemon {
             match daemon::request_with_id::<fn(String, usize, usize)>(
                 &request,
                 uuid::Uuid::new_v4(),
@@ -1948,26 +1959,40 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             )
             .await?
             {
-                Some(DaemonResponse::SearchResults { hits, warnings }) => {
+                Some(DaemonResponse::LiteralFiles { files, warnings }) => {
                     report_search_warnings(&warnings);
-                    hits
+                    files
                 }
                 Some(DaemonResponse::Error { message }) => {
                     tracing::warn!(
                         "daemon literal search failed ({message}), falling back to local"
                     );
-                    local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
+                    local_literal_search_files(
+                        &workspace,
+                        cli.all_indices,
+                        query,
+                        &local_options,
+                        output,
+                    )?
                 }
                 other => {
                     tracing::warn!(
                         "daemon literal search unavailable ({other:?}), falling back to local"
                     );
-                    local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
+                    local_literal_search_files(
+                        &workspace,
+                        cli.all_indices,
+                        query,
+                        &local_options,
+                        output,
+                    )?
                 }
             }
         } else {
-            local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
-        }
+            local_literal_search_files(&workspace, cli.all_indices, query, &local_options, output)?
+        };
+        literal_files = Some(files);
+        Vec::new()
     } else if cli.regex {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
@@ -2139,14 +2164,25 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         }
     };
 
-    render_hits(
-        &hits,
-        cli.json,
-        display_limit,
-        cli.first_line_only,
-        cli.file_name_only,
-        cli.verbose,
-    )?;
+    if let Some(files) = literal_files {
+        render_file_results(
+            files,
+            cli.json,
+            display_limit,
+            cli.first_line_only,
+            cli.file_name_only,
+            cli.verbose,
+        )?;
+    } else {
+        render_hits(
+            &hits,
+            cli.json,
+            display_limit,
+            cli.first_line_only,
+            cli.file_name_only,
+            cli.verbose,
+        )?;
+    }
 
     // A separate process avoids crashes during neural-model teardown. Normal
     // queries return immediately; --wait-for-enhancement waits for durable vectors.
@@ -2178,7 +2214,27 @@ fn render_hits(
     file_name_only: bool,
     verbose: bool,
 ) -> Result<()> {
-    let mut grouped = group_hits_by_file(hits, limit);
+    render_file_results(
+        group_hits_by_file(hits, limit),
+        json,
+        limit,
+        first_line_only,
+        file_name_only,
+        verbose,
+    )
+}
+
+fn render_file_results(
+    mut grouped: Vec<FileSearchResult>,
+    json: bool,
+    limit: Option<usize>,
+    first_line_only: bool,
+    file_name_only: bool,
+    verbose: bool,
+) -> Result<()> {
+    if let Some(limit) = limit {
+        grouped.truncate(limit);
+    }
     if !verbose {
         for file in &mut grouped {
             for hit in &mut file.hits {
@@ -2255,6 +2311,17 @@ fn render_hits(
             }
         }
 
+        if file.more_hits_in_file > 0 {
+            let noun = if file.more_hits_in_file == 1 {
+                "match"
+            } else {
+                "matches"
+            };
+            println!(
+                "  {} more {noun} omitted. Use --no-limit to show them.",
+                file.more_hits_in_file,
+            );
+        }
         println!();
     }
 
@@ -2287,6 +2354,10 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
         DaemonResponse::SearchResults { hits, warnings } => {
             report_search_warnings(&warnings);
             render_hits(&hits, json, None, false, false, false)
+        }
+        DaemonResponse::LiteralFiles { files, warnings } => {
+            report_search_warnings(&warnings);
+            render_file_results(files, json, None, false, false, false)
         }
         DaemonResponse::Status { workspaces, .. } => {
             if json {
@@ -2493,14 +2564,14 @@ fn local_symbol_search_hits(
     finish_local_search(batch, options.limit, HitOrdering::Score)
 }
 
-fn search_workspace_with_optional_repair<F>(
+fn search_workspace_with_optional_repair<F, T>(
     workspace: &Workspace,
     skip_gitignore: bool,
     repair: bool,
     mut search: F,
-) -> Result<Vec<SearchHit>>
+) -> Result<Vec<T>>
 where
-    F: FnMut() -> Result<Vec<SearchHit>>,
+    F: FnMut() -> Result<Vec<T>>,
 {
     let first = search();
     if !repair || first.as_ref().is_ok_and(|hits| !hits.is_empty()) {
@@ -2556,14 +2627,15 @@ fn repair_unhealthy_index_for_query(workspace: &Workspace, skip_gitignore: bool)
     Ok(true)
 }
 
-fn local_literal_search_hits(
+fn local_literal_search_files(
     workspace: &Workspace,
     all_indices: bool,
     query: &str,
     options: &SearchOptions,
-) -> Result<Vec<SearchHit>> {
+    output: LiteralSearchOutput,
+) -> Result<Vec<FileSearchResult>> {
     let workspace_set = select_search_workspaces(workspace, all_indices)?;
-    let mut batch = SearchBatch::new(workspace_set.warnings);
+    let mut batch = FileSearchBatch::new(workspace_set.warnings, options.bounded_limit());
 
     for ws in workspace_set.workspaces {
         let mut workspace_options = options.clone();
@@ -2574,11 +2646,13 @@ fn local_literal_search_hits(
             &ws,
             options.skip_gitignore,
             !all_indices,
-            || literal_search(&ws, query, &workspace_options),
+            || literal_file_search(&ws, query, &workspace_options, output, all_indices),
         );
         batch.record(&ws.root, all_indices, result);
     }
-    finish_local_search(batch, options.limit, HitOrdering::Preserve)
+    let outcome = batch.finish()?;
+    report_search_warnings(&outcome.warnings);
+    Ok(outcome.files)
 }
 
 fn local_regex_search_hits(
@@ -3226,8 +3300,17 @@ mod tests {
         };
 
         let modes = [
-            local_literal_search_hits(&first_workspace, true, "cross_workspace_marker", &options)
-                .unwrap(),
+            local_literal_search_files(
+                &first_workspace,
+                true,
+                "cross_workspace_marker",
+                &options,
+                LiteralSearchOutput::Files,
+            )
+            .unwrap()
+            .into_iter()
+            .flat_map(|file| file.hits)
+            .collect(),
             local_regex_search_hits(&first_workspace, true, "cross_workspace_marker", &options)
                 .unwrap(),
             local_fallback_search(

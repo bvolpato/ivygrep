@@ -1837,6 +1837,7 @@ fn execute_ivygrep_search(
             limit: search_limit,
             context: args.context.unwrap_or(2),
             type_filter: args.type_filter.clone(),
+            output: crate::protocol::LiteralSearchOutput::Hits,
             include_globs: include_globs.clone(),
             exclude_globs: exclude_globs.clone(),
             scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),

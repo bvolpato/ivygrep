@@ -668,6 +668,7 @@ fn build_search_request_for_path(
             limit,
             context,
             type_filter,
+            output: crate::protocol::LiteralSearchOutput::Hits,
             include_globs,
             exclude_globs,
             scope_path,

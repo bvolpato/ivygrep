@@ -28,16 +28,18 @@ use crate::indexer::{
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{
     BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
-    MIN_DAEMON_PROTOCOL_VERSION, SearchHit, WorkspaceRuntimeStatus, group_hits_by_file,
+    LiteralSearchOutput, MIN_DAEMON_PROTOCOL_VERSION, SearchHit, WorkspaceRuntimeStatus,
+    group_hits_by_file,
 };
 use crate::regex_search::regex_search_with_options;
 use crate::search::{
     DEFAULT_SEARCH_LIMIT, NeuralQueryVectorJob, SearchContext, SearchOptions,
-    hybrid_search_with_context_and_neural_job, literal_search_with_context, query_uses_neural,
-    workspace_neural_model_identity,
+    hybrid_search_with_context_and_neural_job, literal_file_search_with_context,
+    literal_search_with_context, query_uses_neural, workspace_neural_model_identity,
 };
 use crate::search_service::{
-    HitOrdering, SearchBatch, SearchOutcome, SearchWorkspaceSet, select_all_indexed_workspaces,
+    FileSearchBatch, FileSearchOutcome, HitOrdering, SearchBatch, SearchOutcome,
+    SearchWorkspaceSet, select_all_indexed_workspaces,
 };
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
@@ -177,6 +179,50 @@ fn finish_cancellable_search(
             }
             DaemonResponse::SearchResults {
                 hits: outcome.hits,
+                warnings: outcome.warnings,
+            }
+        }
+        Err(message) => DaemonResponse::Error { message },
+    }
+}
+
+enum LiteralSearchOutcome {
+    Hits(SearchOutcome),
+    Files(FileSearchOutcome),
+}
+
+fn cancelled_literal_search_outcome(
+    cancellation: Option<&SearchCancellation>,
+    warnings: Vec<String>,
+    output: LiteralSearchOutput,
+) -> DaemonResponse {
+    match (output, cancelled_search_outcome(cancellation, warnings)) {
+        (LiteralSearchOutput::Hits, response) => response,
+        (_, DaemonResponse::SearchResults { warnings, .. }) => DaemonResponse::LiteralFiles {
+            files: Vec::new(),
+            warnings,
+        },
+        (_, response) => response,
+    }
+}
+
+fn finish_cancellable_literal_search(
+    result: std::result::Result<LiteralSearchOutcome, String>,
+    cancellation: Option<&SearchCancellation>,
+) -> DaemonResponse {
+    match result {
+        Ok(LiteralSearchOutcome::Hits(outcome)) => {
+            finish_cancellable_search(Ok(outcome), cancellation)
+        }
+        Ok(LiteralSearchOutcome::Files(mut outcome)) => {
+            if cancellation.is_some_and(SearchCancellation::is_cancelled) {
+                match deadline_warning(cancellation) {
+                    Some(warning) => outcome.warnings.push(warning),
+                    None => return cancelled_search_response(),
+                }
+            }
+            DaemonResponse::LiteralFiles {
+                files: outcome.files,
                 warnings: outcome.warnings,
             }
         }
@@ -4867,6 +4913,7 @@ async fn handle_request_with_cancellation(
             limit,
             context,
             type_filter,
+            output,
             include_globs,
             exclude_globs,
             scope_path,
@@ -4930,7 +4977,11 @@ async fn handle_request_with_cancellation(
             {
                 Ok(Some(leases)) => leases,
                 Ok(None) => {
-                    return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
+                    return cancelled_literal_search_outcome(
+                        cancellation.as_ref(),
+                        workspace_warnings,
+                        output,
+                    );
                 }
                 Err(response) => return response,
             };
@@ -4944,37 +4995,70 @@ async fn handle_request_with_cancellation(
                 .acquire_search_permit(cancellation.as_ref())
                 .await
             else {
-                return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
+                return cancelled_literal_search_outcome(
+                    cancellation.as_ref(),
+                    workspace_warnings,
+                    output,
+                );
             };
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let _mode_leases = mode_leases;
-                let mut batch = SearchBatch::new(workspace_warnings);
-                if options.is_cancelled() {
-                    return Ok(batch.finish_partial(options.bounded_limit()));
+                let prepare = |workspace: &Workspace| -> Result<SearchContextLease> {
+                    if ensure_queryable_workspace(&state_clone, workspace, options.skip_gitignore)?
+                    {
+                        state_clone.clear_workspace_contexts(workspace);
+                        state_clone.refresh_workspace_watcher(workspace)?;
+                    }
+                    state_clone.cached_search_context(workspace, None, false)
+                };
+                if output == LiteralSearchOutput::Hits {
+                    let mut batch = SearchBatch::new(workspace_warnings);
+                    for workspace in &workspaces {
+                        if options.is_cancelled() {
+                            return Ok(LiteralSearchOutcome::Hits(
+                                batch.finish_partial(options.bounded_limit()),
+                            ));
+                        }
+                        let result = prepare(workspace).and_then(|context| {
+                            literal_search_with_context(&context, workspace, &query, &options)
+                        });
+                        batch.record(&workspace.root, all_indices, result);
+                    }
+                    if options.is_cancelled() {
+                        return Ok(LiteralSearchOutcome::Hits(
+                            batch.finish_partial(options.bounded_limit()),
+                        ));
+                    }
+                    return batch
+                        .finish(options.bounded_limit(), HitOrdering::Preserve)
+                        .map(LiteralSearchOutcome::Hits)
+                        .map_err(|err| err.to_string());
                 }
+
+                let mut batch = FileSearchBatch::new(workspace_warnings, options.bounded_limit());
                 for workspace in &workspaces {
                     if options.is_cancelled() {
-                        return Ok(batch.finish_partial(options.bounded_limit()));
+                        return Ok(LiteralSearchOutcome::Files(batch.finish_partial()));
                     }
-                    let result = (|| {
-                        if ensure_queryable_workspace(
-                            &state_clone,
+                    let result = prepare(workspace).and_then(|context| {
+                        literal_file_search_with_context(
+                            &context,
                             workspace,
-                            options.skip_gitignore,
-                        )? {
-                            state_clone.clear_workspace_contexts(workspace);
-                            state_clone.refresh_workspace_watcher(workspace)?;
-                        }
-                        let context = state_clone.cached_search_context(workspace, None, false)?;
-                        literal_search_with_context(&context, workspace, &query, &options)
-                    })();
+                            &query,
+                            &options,
+                            output,
+                            all_indices,
+                        )
+                    });
                     batch.record(&workspace.root, all_indices, result);
                 }
                 if options.is_cancelled() {
-                    return Ok(batch.finish_partial(options.bounded_limit()));
+                    return Ok(LiteralSearchOutcome::Files(batch.finish_partial()));
                 }
-                finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
+                batch
+                    .finish()
+                    .map(LiteralSearchOutcome::Files)
                     .map_err(|err| err.to_string())
             })
             .await
@@ -4983,7 +5067,7 @@ async fn handle_request_with_cancellation(
                 Err(join_err.to_string())
             });
 
-            finish_cancellable_search(result, cancellation.as_ref())
+            finish_cancellable_literal_search(result, cancellation.as_ref())
         }
         DaemonRequest::ContextPack {
             path,
@@ -11039,6 +11123,7 @@ mod tests {
                 limit: Some(10),
                 context: 1,
                 type_filter: Some("rust".to_string()),
+                output: LiteralSearchOutput::Hits,
                 include_globs: include.clone(),
                 exclude_globs: Vec::new(),
                 scope_path: common_scope.clone(),
@@ -11495,6 +11580,7 @@ mod tests {
             limit: Some(5),
             context: 0,
             type_filter: None,
+            output: LiteralSearchOutput::Hits,
             include_globs: Vec::new(),
             exclude_globs: Vec::new(),
             scope_path: None,
@@ -11699,11 +11785,64 @@ mod tests {
             limit: Some(5),
             context: 0,
             type_filter: None,
+            output: LiteralSearchOutput::Hits,
             include_globs: Vec::new(),
             exclude_globs: Vec::new(),
             scope_path: None,
             scope_is_file: false,
             skip_gitignore: false,
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn literal_file_output_limits_files_and_compacts_filename_results() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        for (name, count) in [("a.txt", 3), ("b.txt", 4), ("c.txt", 1)] {
+            std::fs::write(repo.path().join(name), "needle\n".repeat(count)).unwrap();
+        }
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        for output in [LiteralSearchOutput::Files, LiteralSearchOutput::FileNames] {
+            let mut request = literal_request_for(&workspace, "needle");
+            if let DaemonRequest::LiteralSearch {
+                limit,
+                output: request_output,
+                ..
+            } = &mut request
+            {
+                *limit = Some(2);
+                *request_output = output;
+            }
+            let response = handle_request(state.clone(), request).await;
+            let DaemonResponse::LiteralFiles { files, .. } = response else {
+                panic!("unexpected response: {response:?}");
+            };
+            assert_eq!(
+                files
+                    .iter()
+                    .map(|file| file.file_path.as_path())
+                    .collect::<Vec<_>>(),
+                [Path::new("b.txt"), Path::new("a.txt")]
+            );
+            assert_eq!(
+                files
+                    .iter()
+                    .map(|file| file.total_score)
+                    .collect::<Vec<_>>(),
+                [4.0, 3.0]
+            );
+            if output == LiteralSearchOutput::FileNames {
+                assert!(files.iter().all(|file| file.hits.is_empty()));
+            } else {
+                assert_eq!(files[0].hits.len(), 3);
+                assert_eq!(files[0].hit_count, 4);
+                assert_eq!(files[0].more_hits_in_file, 1);
+                assert_eq!(files[1].hits.len(), 3);
+            }
         }
     }
 
@@ -12377,35 +12516,53 @@ mod tests {
         let state = test_state();
         let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
 
-        let envelope =
-            DaemonRequestEnvelope::new(literal_request_for(&workspace, "deadline_marker"));
-        let (_client, server) = tokio::io::duplex(1024);
-        let task_state = state.clone();
-        let started = std::time::Instant::now();
-        let task = tokio::spawn(async move {
-            let mut reader = BufReader::new(server);
-            handle_client_request(task_state, envelope, &mut reader).await
-        });
-        let outcome = tokio::time::timeout(Duration::from_secs(10), task)
-            .await
-            .expect("deadline must release the parked search")
-            .unwrap();
-        unsafe { std::env::remove_var("IVYGREP_SEARCH_DEADLINE_SECS") };
-        assert!(started.elapsed() >= Duration::from_secs(1));
-        match outcome {
-            ClientRequestOutcome::Respond(DaemonResponse::SearchResults { hits, warnings }) => {
-                assert!(hits.is_empty());
-                assert_eq!(warnings.len(), 1, "{warnings:?}");
-                assert!(
-                    warnings[0].contains("deadline of 1s exceeded"),
-                    "{warnings:?}"
-                );
+        for output in [
+            LiteralSearchOutput::Hits,
+            LiteralSearchOutput::Files,
+            LiteralSearchOutput::FileNames,
+        ] {
+            let mut request = literal_request_for(&workspace, "deadline_marker");
+            if let DaemonRequest::LiteralSearch {
+                output: request_output,
+                ..
+            } = &mut request
+            {
+                *request_output = output;
             }
-            ClientRequestOutcome::Respond(other) => {
-                panic!("deadline should return partial results, got {other:?}")
-            }
-            ClientRequestOutcome::Disconnected => panic!("client stayed connected"),
+            let envelope = DaemonRequestEnvelope::new(request);
+            let (_client, server) = tokio::io::duplex(1024);
+            let task_state = state.clone();
+            let started = std::time::Instant::now();
+            let task = tokio::spawn(async move {
+                let mut reader = BufReader::new(server);
+                handle_client_request(task_state, envelope, &mut reader).await
+            });
+            let outcome = tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .expect("deadline must release the parked search")
+                .unwrap();
+            assert!(started.elapsed() >= Duration::from_secs(1));
+            let warnings = match (output, outcome) {
+                (
+                    LiteralSearchOutput::Hits,
+                    ClientRequestOutcome::Respond(DaemonResponse::SearchResults { hits, warnings }),
+                ) if hits.is_empty() => warnings,
+                (
+                    LiteralSearchOutput::Files | LiteralSearchOutput::FileNames,
+                    ClientRequestOutcome::Respond(DaemonResponse::LiteralFiles { files, warnings }),
+                ) if files.is_empty() => warnings,
+                (_, ClientRequestOutcome::Respond(other)) => {
+                    panic!("deadline should return partial results, got {other:?}")
+                }
+                (_, ClientRequestOutcome::Disconnected) => panic!("client stayed connected"),
+            };
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("deadline of 1s exceeded"),
+                "{warnings:?}"
+            );
         }
+        unsafe { std::env::remove_var("IVYGREP_SEARCH_DEADLINE_SECS") };
         drop(held);
 
         // Once the lease is free the same request completes normally.
@@ -12444,6 +12601,7 @@ mod tests {
             limit: Some(5),
             context: 0,
             type_filter: None,
+            output: LiteralSearchOutput::Hits,
             include_globs: Vec::new(),
             exclude_globs: Vec::new(),
             scope_path: None,
