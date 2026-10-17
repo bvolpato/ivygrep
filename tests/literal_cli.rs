@@ -225,6 +225,14 @@ fn literal_file_limit_ranking_and_unicode_match_locally_and_through_daemon() {
                 "needle",
             ],
         );
+        assert_eq!(
+            result_paths(&unlimited),
+            [
+                PathBuf::from("b.txt"),
+                PathBuf::from("a.txt"),
+                PathBuf::from("c.txt"),
+            ]
+        );
         assert_eq!(unlimited[0]["hits"].as_array().unwrap().len(), 4);
         assert!(unlimited[0].get("more_hits_in_file").is_none());
 
