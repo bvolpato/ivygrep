@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 from types import SimpleNamespace
 from unittest import mock
 import sys
@@ -19,6 +20,32 @@ SPEC.loader.exec_module(check_daemon_equivalence)
 
 
 class DaemonEquivalenceFixtureTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Windows daemons use TCP")
+    def test_long_socket_home_uses_short_alias_and_preserves_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ig-equivalence-test-", dir="/tmp") as temporary:
+            parent = Path(temporary).resolve()
+            long_parent = parent / ("é" * 40)
+            long_parent.mkdir()
+            home = long_parent / "bench-home"
+            home.mkdir()
+            with mock.patch.object(
+                check_daemon_equivalence.tempfile, "gettempdir", return_value=str(long_parent)
+            ):
+                self.assertEqual(
+                    check_daemon_equivalence.socket_temp_root(), Path("/tmp").resolve()
+                )
+                with check_daemon_equivalence.socket_safe_home(home) as alias:
+                    self.assertLess(len(os.fsencode(alias / "daemon.sock")), 104)
+                    self.assertTrue(alias.samefile(home))
+                    with socket.socket(socket.AF_UNIX) as daemon:
+                        daemon.bind(str(alias / "daemon.sock"))
+                        self.assertTrue((home / "daemon.sock").exists())
+                    (alias / "artifact").write_text("retained")
+                self.assertFalse(alias.exists())
+            self.assertEqual((home / "artifact").read_text(), "retained")
+            with check_daemon_equivalence.socket_safe_home(parent) as unchanged:
+                self.assertEqual(unchanged, parent)
+
     def test_lifecycle_generator_is_replayable_and_covers_each_operation(self) -> None:
         operations = check_daemon_equivalence.lifecycle_operations
         first = operations(42, 27)

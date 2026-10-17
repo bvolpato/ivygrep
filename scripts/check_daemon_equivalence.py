@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import os
 import random
@@ -19,11 +19,37 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 TMP_ROOT = Path(tempfile.gettempdir()).resolve()
 DEFAULT_HOME = TMP_ROOT / "ivygrep-daemon-equivalence-home"
+# The macOS socket path capacity includes its terminating NUL byte.
+UNIX_SOCKET_PATH_CAPACITY = 104
+
+
+def socket_temp_root() -> Path:
+    parent = Path(tempfile.gettempdir()).resolve()
+    if os.name == "nt":
+        return parent
+    suffix = "ig-e2e-sock-XXXXXXXX/home/daemon.sock"
+    if len(os.fsencode(parent / suffix)) >= UNIX_SOCKET_PATH_CAPACITY:
+        parent = Path("/tmp").resolve()
+    if len(os.fsencode(parent / suffix)) >= UNIX_SOCKET_PATH_CAPACITY:
+        raise RuntimeError(f"temporary directory is too long for a daemon socket: {parent}")
+    return parent
+
+
+@contextmanager
+def socket_safe_home(home: Path) -> Iterator[Path]:
+    if os.name == "nt" or len(os.fsencode(home / "daemon.sock")) < UNIX_SOCKET_PATH_CAPACITY:
+        yield home
+        return
+    # Keep artifacts in the requested home while shortening the socket path.
+    with tempfile.TemporaryDirectory(prefix="ig-e2e-sock-", dir=socket_temp_root()) as temporary:
+        alias = Path(temporary).resolve() / "home"
+        alias.symlink_to(home, target_is_directory=True)
+        yield alias
 
 
 @dataclass(frozen=True)
@@ -312,7 +338,7 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str], 
         branch = fixture / "branch"
         sibling = fixture / "sibling"
         # Keep IPC paths short enough for macOS's Unix socket path limit.
-        temporary_home = tempfile.TemporaryDirectory(prefix="ig-layer-")
+        temporary_home = tempfile.TemporaryDirectory(prefix="ig-layer-", dir=socket_temp_root())
         home = Path(temporary_home.name)
         main.mkdir(parents=True)
         environment = {**env, "IVYGREP_HOME": str(home), "IVYGREP_NO_AUTOSPAWN": "1"}
@@ -661,8 +687,22 @@ def main() -> int:
         raise SystemExit(f"missing binary at {binary}")
 
     shutil.rmtree(bench_home, ignore_errors=True)
+    bench_home.mkdir(parents=True)
+    with socket_safe_home(bench_home) as socket_home:
+        env["IVYGREP_HOME"] = str(socket_home)
+        return run_equivalence(args, binary, repo_root, bench_home, socket_home, env)
+
+
+def run_equivalence(
+    args: argparse.Namespace,
+    binary: Path,
+    repo_root: Path,
+    bench_home: Path,
+    socket_home: Path,
+    env: dict[str, str],
+) -> int:
     fixture = bench_home / "fixture"
-    fixture.mkdir(parents=True)
+    fixture.mkdir()
     write_fixture(fixture)
 
     run(
@@ -692,7 +732,7 @@ def main() -> int:
     }
     all_indices_local = run_all_indices_local_case(binary=binary, cwd=repo_root, env=env)
 
-    daemon = start_daemon(binary, cwd=repo_root, env=env, bench_home=bench_home)
+    daemon = start_daemon(binary, cwd=repo_root, env=env, bench_home=socket_home)
     try:
         for case in cases:
             daemon_first, daemon_second = run_daemon_case(
