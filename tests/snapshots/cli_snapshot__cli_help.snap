@@ -33,7 +33,7 @@ Options:
   -f, --force                 Rebuild workspace index from scratch when used with --add
   -y, --yes                   Index a home directory or filesystem root without asking first
       --interactive           Launch the interactive terminal UI [alias: --ui]
-  -l, --literal               Fast exact-match search backed by the index. Deterministic results
+  -l, --literal               Fast exact-match search backed by the index. Bounded searches show up to three previews per file. Use --no-limit to show every matching line
       --symbol                Find exact symbol definitions
       --refs                  Find exact symbol references
       --callers               Find functions or methods that call the named symbol

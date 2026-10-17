@@ -133,6 +133,8 @@ for language, `--include`/`--exclude` path globs, `--lexical-only`, `--hash`, an
 uses lightweight local embeddings for faster startup and no model download,
 with lower semantic quality. Run `ig --help` for full reference.
 
+Literal search ranks files by matching lines. A bounded search shows up to three previews per file and reports omitted matches. Use `--no-limit` to return every match, or `--file-name-only` to return paths without building previews.
+
 Standalone uppercase `AND`, `OR`, and `NOT` are Boolean operators.
 For example, `ig "settings NOT render"` excludes results that contain `render`.
 Short malformed expressions, such as a trailing `OR`, return an error.

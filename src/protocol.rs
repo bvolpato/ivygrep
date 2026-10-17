@@ -16,12 +16,25 @@ fn is_zero(value: &usize) -> bool {
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 9;
-/// Oldest client protocol a daemon still serves. Version 9 only added the
-/// `ContextPack` request, so a version 8 client, such as an MCP session that
-/// outlived an upgrade, keeps working against a newer daemon instead of
-/// restarting it on every call.
+pub const DAEMON_PROTOCOL_VERSION: u32 = 10;
+/// Older clients can omit the literal output mode and retain hit limits.
+/// This lets long-lived MCP sessions keep using a newer daemon.
 pub const MIN_DAEMON_PROTOCOL_VERSION: u32 = 8;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiteralSearchOutput {
+    #[default]
+    Hits,
+    Files,
+    FileNames,
+}
+
+impl LiteralSearchOutput {
+    fn is_hits(&self) -> bool {
+        *self == Self::Hits
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -112,6 +125,8 @@ pub enum DaemonRequest {
         limit: Option<usize>,
         context: usize,
         type_filter: Option<String>,
+        #[serde(default, skip_serializing_if = "LiteralSearchOutput::is_hits")]
+        output: LiteralSearchOutput,
         #[serde(default)]
         include_globs: Vec<String>,
         #[serde(default)]
@@ -222,6 +237,11 @@ pub enum DaemonResponse {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         warnings: Vec<String>,
     },
+    LiteralFiles {
+        files: Vec<FileSearchResult>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+    },
     /// Reply to `ContextPack`: the serialized `ContextBundle`. It travels as a
     /// JSON value so a client embeds exactly what an in-process build embeds.
     ContextPack {
@@ -263,19 +283,19 @@ pub struct WorkspaceRuntimeStatus {
     pub index_in_flight: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSearchResult {
     pub file_path: PathBuf,
     pub total_score: f32,
     /// Hits matched in this file before any per-file cap.
     pub hit_count: usize,
-    /// Hits dropped from `hits` by a per-file cap (MCP). Zero when no cap applied.
-    #[serde(skip_serializing_if = "is_zero")]
+    /// Hits dropped from `hits` by a per-file cap. Zero when no cap applied.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub more_hits_in_file: usize,
     /// True when retrieval stopped at its candidate budget before this file was
     /// fully enumerated, so `hit_count` and `more_hits_in_file` are lower
     /// bounds rather than exact counts (MCP).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hit_count_is_lower_bound: bool,
     pub hits: Vec<SearchHit>,
 }
@@ -326,6 +346,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_literal_requests_keep_hit_limits() {
+        let legacy = serde_json::json!({
+            "protocol_version": 9,
+            "type": "literal_search",
+            "path": null,
+            "query": "needle",
+            "limit": 2,
+            "context": 0,
+            "type_filter": null,
+            "scope_path": null
+        });
+        let request: DaemonRequestEnvelope = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(
+            request.request,
+            DaemonRequest::LiteralSearch {
+                output: LiteralSearchOutput::Hits,
+                ..
+            }
+        ));
+
+        let mut compact = legacy;
+        compact["protocol_version"] = DAEMON_PROTOCOL_VERSION.into();
+        compact["output"] = serde_json::json!("file_names");
+        let request: DaemonRequestEnvelope = serde_json::from_value(compact).unwrap();
+        assert!(matches!(
+            request.request,
+            DaemonRequest::LiteralSearch {
+                output: LiteralSearchOutput::FileNames,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn search_request_id_and_cancellation_round_trip() {
         let request_id = uuid::Uuid::new_v4();
         let search = DaemonRequestEnvelope::with_request_id(
@@ -335,6 +389,7 @@ mod tests {
                 limit: Some(10),
                 context: 0,
                 type_filter: None,
+                output: LiteralSearchOutput::Hits,
                 include_globs: Vec::new(),
                 exclude_globs: Vec::new(),
                 scope_path: None,

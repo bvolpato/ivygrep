@@ -4,7 +4,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 #[test]
-fn one_literal_hit_does_not_allocate_every_matching_preview() {
+fn bounded_literal_search_does_not_allocate_every_matching_preview() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().join("repo");
     let home = fixture.path().join("home");
@@ -31,44 +31,55 @@ fn one_literal_hit_does_not_allocate_every_matching_preview() {
         .unwrap();
     assert!(indexed.status.success(), "{indexed:?}");
 
-    let mut query = command();
-    query
-        .args([
-            "--literal",
-            "needle",
-            "--limit",
-            "1",
-            "-C",
-            "100",
-            "--hash",
-            "--json",
-        ])
-        .arg(&root);
-    // Limit this child's heap, not the test runner or file-backed index maps.
-    // The old path needs over 800 MiB of previews for a one-hit response.
-    unsafe {
-        query.pre_exec(|| {
-            let heap = libc::rlimit {
-                rlim_cur: 512 * 1024 * 1024,
-                rlim_max: 512 * 1024 * 1024,
-            };
-            let core = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            if libc::setrlimit(libc::RLIMIT_DATA, &heap) != 0
-                || libc::setrlimit(libc::RLIMIT_CORE, &core) != 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+    for names_only in [false, true] {
+        let mut query = command();
+        query
+            .args([
+                "--literal",
+                "needle",
+                "--limit",
+                "1",
+                "-C",
+                "100",
+                "--hash",
+                "--json",
+            ])
+            .arg(&root);
+        if names_only {
+            query.arg("--file-name-only");
+        }
+        // Limit this child's heap, not the test runner or file-backed index maps.
+        // The old filename-only path needs over 800 MiB for previews.
+        unsafe {
+            query.pre_exec(|| {
+                let heap = libc::rlimit {
+                    rlim_cur: 512 * 1024 * 1024,
+                    rlim_max: 512 * 1024 * 1024,
+                };
+                let core = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_DATA, &heap) != 0
+                    || libc::setrlimit(libc::RLIMIT_CORE, &core) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = query.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let files: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if names_only {
+            assert_eq!(files, serde_json::json!(["events.txt"]));
+        } else {
+            assert_eq!(files.as_array().unwrap().len(), 1);
+            assert_eq!(files[0]["hit_count"], 200_000);
+            assert_eq!(files[0]["more_hits_in_file"], 199_997);
+            assert_eq!(files[0]["hits"].as_array().unwrap().len(), 3);
+            assert_eq!(files[0]["hits"][0]["start_line"], 1);
+            assert_eq!(files[0]["hits"][0]["end_line"], 101);
+        }
     }
-    let output = query.output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let files: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(files.as_array().unwrap().len(), 1);
-    assert_eq!(files[0]["hits"].as_array().unwrap().len(), 1);
-    assert_eq!(files[0]["hits"][0]["start_line"], 1);
-    assert_eq!(files[0]["hits"][0]["end_line"], 101);
 }
