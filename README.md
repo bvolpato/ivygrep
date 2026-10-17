@@ -105,11 +105,11 @@ install -m 0755 target/release/ig ~/.local/bin/ig
 
 The first query indexes the current repository. The daemon then watches for changes and updates the index incrementally.
 
-On current `main`, search immediately excludes a file that the safe file reader
+Starting with v1.3.1, search immediately excludes a file that the safe file reader
 confirms is missing, even before watcher reconciliation. Reconciliation then
 removes entries owned by that workspace. Permission, unavailable, and symlink
-failures are not treated as deletion. This fix is not included in the released
-v1.3.0.
+failures are not treated as deletion. Earlier releases retain the indexed-text
+fallback for missing files.
 
 Linked Git worktrees share a base index. An overlay tombstone hides a
 base-backed file deleted on that branch without changing what other worktrees
@@ -294,14 +294,13 @@ ig --rm ~/notes      # remove a saved index; defaults to current directory
 ig --gc              # remove indexes whose directory has been gone past the grace period
 ```
 
-On current `main`, a CLI search or context request, `ig --interactive`, or
+Starting with v1.3.1, a CLI search or context request, `ig --interactive`, or
 `ig --add` prompts before it builds an index for your home directory, a
 directory containing it, or the filesystem root. Confirm with `y` or `yes`.
 Without an interactive terminal, the command stops unless you pass `--yes`.
 An already indexed, healthy directory does not prompt on a plain `ig --add`.
 `ig --add --force` rebuilds it, and `--skip-gitignore` may add ignored files,
-so those cases prompt too. This safeguard is not included in the released
-v1.3.0.
+so those cases prompt too.
 
 The daemon also removes the index of a directory that stays missing for seven days (`IVYGREP_INDEX_GC_GRACE_SECS`), and the overlay of a worktree removed with `git worktree remove` after ten minutes.
 

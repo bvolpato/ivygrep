@@ -21,8 +21,8 @@ use tracing::{error, info, warn};
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{
-    index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
-    indexed_skip_gitignore, reconcile_worktree_overlay, remove_workspace_index,
+    index_workspace, index_workspace_with_store_replacement, indexed_skip_gitignore,
+    reconcile_worktree_overlay_with_store_replacement, remove_workspace_index,
     workspace_index_matches_skip_gitignore,
 };
 use crate::jobs::{self, JobKind, JobUpdate};
@@ -1084,6 +1084,18 @@ impl WatchEventFilter {
         if self.workspace.has_overlay() || self.workspace.base_ref_path().exists() {
             return true;
         }
+        // Notify callbacks cannot wait for publication. Keep a shared index
+        // lock until SQLite closes, or let the worker reconcile after the writer.
+        let Ok(index_lock) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.workspace.lock_path())
+        else {
+            return true;
+        };
+        if fs2::FileExt::try_lock_shared(&index_lock).is_err() {
+            return true;
+        }
         let first = format!("{}/", crate::workspace::index_path_string(rel_dir));
         // `0` follows `/` in byte order, so this is every path with the prefix.
         let past = format!("{}0", first.trim_end_matches('/'));
@@ -1813,6 +1825,7 @@ impl DaemonState {
             .expect("uncancelled workspace mode acquisition")
     }
 
+    #[cfg(test)]
     fn acquire_workspace_modes(
         &self,
         workspaces: &[Workspace],
@@ -2625,7 +2638,11 @@ impl DaemonState {
         wants_neural: bool,
     ) -> Result<SearchContextLease> {
         let reconciliation_model = cached_hash_model();
-        if reconcile_worktree_overlay(workspace, reconciliation_model.as_ref())? {
+        if reconcile_worktree_overlay_with_store_replacement(
+            workspace,
+            reconciliation_model.as_ref(),
+            &mut |replaced| self.clear_workspace_contexts(replaced),
+        )? {
             self.clear_workspace_contexts(workspace);
         }
         let signature = search_context_signature(workspace, emb_dim, wants_neural);
@@ -2702,7 +2719,11 @@ impl DaemonState {
 
         let mut changed = ensure_queryable_workspace(self, workspace, skip_gitignore)?;
         let reconciliation_model = cached_hash_model();
-        changed |= reconcile_worktree_overlay(workspace, reconciliation_model.as_ref())?;
+        changed |= reconcile_worktree_overlay_with_store_replacement(
+            workspace,
+            reconciliation_model.as_ref(),
+            &mut |replaced| self.clear_workspace_contexts(replaced),
+        )?;
         if changed {
             self.clear_workspace_contexts(workspace);
             self.refresh_workspace_watcher(workspace)?;
@@ -3983,7 +4004,12 @@ async fn run_index_request(
         index_state.note_full_index_run_start(&index_workspace_target.id);
         // An explicit Index request must cover edits still waiting in the
         // watcher's debounce queue, not trust the presence of a live watcher.
-        let summary = index_workspace_for_watcher(&index_workspace_target, hash_model.as_ref())?;
+        let summary = index_workspace_with_store_replacement(
+            &index_workspace_target,
+            hash_model.as_ref(),
+            None,
+            &mut |replaced| index_state.clear_workspace_contexts(replaced),
+        )?;
         if summary.indexed_files > 0 || summary.deleted_files > 0 {
             index_state.clear_workspace_contexts(&index_workspace_target);
         }
@@ -5773,25 +5799,26 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 // A failed attachment can leave no external event source. Feed
                 // it through the existing bounded retry/backoff path so a full
                 // reconciliation catches changes made while the watch was down.
-                let mode_leases = match watch_reconciliation {
-                    Err(error) => Err(error),
-                    Ok(()) => tokio::task::spawn_blocking(move || {
-                        if lease_control.initial_scan_required.load(Ordering::Relaxed) {
-                            return Ok(lease_state.acquire_workspace_mutations(
+                let mode_leases =
+                    match watch_reconciliation {
+                        Err(error) => Err(error),
+                        Ok(()) => tokio::task::spawn_blocking(move || {
+                            if !lease_control.initial_scan_required.load(Ordering::Relaxed) {
+                                // Preserve the retry path for unreadable policy.
+                                // Initial reconciliation can repair old metadata.
+                                lease_workspace.read_metadata()?;
+                            }
+                            // Even a targeted update can discover damaged stores
+                            // and replace them. Drain readers before index.lock;
+                            // upgrading a shared lease there could deadlock an
+                            // indexer that is waiting on that lock.
+                            Result::<_, anyhow::Error>::Ok(lease_state.acquire_workspace_mutations(
                                 std::slice::from_ref(&lease_workspace),
-                            ));
-                        }
-                        let skip_gitignore = lease_workspace
-                            .read_metadata()?
-                            .is_some_and(|metadata| metadata.skip_gitignore);
-                        Result::<_, anyhow::Error>::Ok(lease_state.acquire_workspace_modes(
-                            std::slice::from_ref(&lease_workspace),
-                            skip_gitignore,
-                        ))
-                    })
-                    .await
-                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string()))),
-                };
+                            ))
+                        })
+                        .await
+                        .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string()))),
+                    };
                 let result = match mode_leases {
                     Err(err) => Err(err),
                     Ok(mode_leases) => {
@@ -5813,12 +5840,22 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                                 || index_control.initial_scan_required.load(Ordering::Relaxed)
                             {
                                 watcher_state.note_full_index_run_start(&workspace.id);
-                                index_workspace_for_watcher(&workspace, hash_model.as_ref())?
-                            } else {
-                                index_workspace_paths_for_watcher(
+                                index_workspace_with_store_replacement(
                                     &workspace,
                                     hash_model.as_ref(),
-                                    &changed_paths,
+                                    None,
+                                    &mut |replaced| {
+                                        watcher_state.clear_workspace_contexts(replaced)
+                                    },
+                                )?
+                            } else {
+                                index_workspace_with_store_replacement(
+                                    &workspace,
+                                    hash_model.as_ref(),
+                                    Some(&changed_paths),
+                                    &mut |replaced| {
+                                        watcher_state.clear_workspace_contexts(replaced)
+                                    },
                                 )?
                             };
                             Result::<bool, anyhow::Error>::Ok(
@@ -8581,6 +8618,100 @@ mod tests {
             unrelated_pool.upgrade().is_some(),
             "unrelated workspace cache was evicted"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_base_rebuild_releases_cached_base_and_worktree_readers() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        let unrelated = repositories.path().join("unrelated");
+        std::fs::create_dir(&main).unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn mutation_base_reader() {}\n").unwrap();
+        std::fs::write(unrelated.join("lib.rs"), "pub fn unrelated_reader() {}\n").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-qm", "base"]);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+        let base = Workspace::resolve(&main).unwrap();
+        let overlay = Workspace::resolve(&linked).unwrap();
+        let other = Workspace::resolve(&unrelated).unwrap();
+        let model = create_hash_model();
+        for workspace in [&base, &overlay, &other] {
+            index_workspace(workspace, model.as_ref()).unwrap();
+        }
+        let state = test_state();
+        let warm_reader = |workspace: &Workspace| {
+            let reader = state.cached_search_context(workspace, None, false).unwrap();
+            let pool = Arc::downgrade(&reader.pool);
+            drop(reader);
+            pool
+        };
+        let base_pool = warm_reader(&base);
+        let overlay_pool = warm_reader(&overlay);
+        let unrelated_pool = warm_reader(&other);
+
+        let unchanged = handle_request(state.clone(), index_request_for(&base, false)).await;
+        assert!(matches!(unchanged, DaemonResponse::Ack { .. }));
+        assert!(base_pool.upgrade().is_some());
+        assert!(overlay_pool.upgrade().is_some());
+
+        // A failed promotion returns before the ordinary post-index cache
+        // invalidation. Readers must already be closed before it replaces stores.
+        std::fs::write(base.indexing_incomplete_path(), "publication pending\n").unwrap();
+        let _failure = crate::indexer::fail_index_publication(&base.sqlite_path());
+        let failed = handle_request(state.clone(), index_request_for(&base, false)).await;
+        assert!(matches!(failed, DaemonResponse::Error { message }
+            if message.contains("failed to promote staged index")));
+        assert!(
+            base_pool.upgrade().is_none(),
+            "base readers retain open stores"
+        );
+        assert!(
+            overlay_pool.upgrade().is_none(),
+            "worktree readers retain open base and overlay stores"
+        );
+        assert!(
+            unrelated_pool.upgrade().is_some(),
+            "unrelated workspace cache was evicted"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn checkout_marker_lookup_defers_while_index_is_locked() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let (_root, workspace) = indexed_workspace("checkout_marker_lock");
+        let filter = WatchEventFilter::new(&workspace);
+        assert!(!filter.index_has_files_below(Path::new("nested")));
+
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(workspace.lock_path())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let lookup = std::thread::spawn(move || {
+            let result = filter.index_has_files_below(Path::new("nested"));
+            result_tx.send(result).unwrap();
+        });
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        fs2::FileExt::unlock(&lock).unwrap();
+        lookup.join().unwrap();
+        assert!(
+            result.unwrap(),
+            "a busy index must conservatively request reconciliation"
+        );
+        assert!(!WatchEventFilter::new(&workspace).index_has_files_below(Path::new("nested")));
     }
 
     #[test]

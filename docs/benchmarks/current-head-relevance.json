@@ -1,7 +1,7 @@
 {
   "binary": {
-    "sha256": "9f751dc57b1bcbc13b4e52b18a200acbfde8ca2d61694b1ae4ec0b6ffc1b52f9",
-    "version": "ivygrep 1.3.0"
+    "sha256": "81f85d2a1f2912346668d1bab0974641108c1eb952dc9b6f1b7fc2c672f4026b",
+    "version": "ivygrep 1.3.1"
   },
   "fixture": {
     "path": "tests/fixtures/ivygrep_relevance_queries.json",
@@ -11,32 +11,31 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "12b87cc58074c7478e649961ff1ead801ae5b216",
+  "ivygrep_commit": "7fe9ec205a36e5eb38f8e4efe6e03146369e9380",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 3,
+        "first_useful_low": 2,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 22
+        "satisfied": 23
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 2175.90328771621,
+      "elapsed_ms": 1943.1375960120931,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "daemon-watch",
         "doctor-health"
       ],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.98,
-      "mean_mrr": 0.9257142857142857,
-      "mean_ndcg10": 0.8982551864526611,
-      "mean_p1": 0.88,
+      "mean_mrr": 0.9457142857142857,
+      "mean_ndcg10": 0.9105145786365402,
+      "mean_p1": 0.92,
       "mean_p5": 0.2,
       "mean_recall5": 0.9,
       "mode": "foreground",
@@ -46,32 +45,31 @@
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.88
+      "satisfaction_rate": 0.92
     },
     "hash-enriched": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 3,
+        "first_useful_low": 2,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 22
+        "satisfied": 23
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 2411.44663002342,
+      "elapsed_ms": 2234.7346099850256,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "daemon-watch",
         "doctor-health"
       ],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.98,
-      "mean_mrr": 0.9257142857142857,
-      "mean_ndcg10": 0.8982551864526611,
-      "mean_p1": 0.88,
+      "mean_mrr": 0.9457142857142857,
+      "mean_ndcg10": 0.9105145786365402,
+      "mean_p1": 0.92,
       "mean_p5": 0.2,
       "mean_recall5": 0.9,
       "mode": "hash-enriched",
@@ -81,7 +79,7 @@
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.88
+      "satisfaction_rate": 0.92
     },
     "neural": {
       "audit_stage_counts": {
@@ -90,29 +88,29 @@
         "candidate_budget": 0,
         "first_useful_low": 0,
         "no_primary_judgment": 0,
-        "not_audited": 4,
-        "satisfied": 21
+        "not_audited": 2,
+        "satisfied": 23
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3302.7714900672436,
+      "elapsed_ms": 2632.617099006893,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.96,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.9057142857142857,
-      "mean_ndcg10": 0.8834923765955195,
-      "mean_p1": 0.84,
+      "mean_mrr": 0.9457142857142857,
+      "mean_ndcg10": 0.9105145786365402,
+      "mean_p1": 0.92,
       "mean_p5": 0.2,
       "mean_recall5": 0.9,
       "mode": "neural",
       "neural_queries_executed": 25,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 23,
+      "neural_queries_with_results": 22,
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.84
+      "satisfaction_rate": 0.92
     }
   },
   "runtime": {
@@ -134,6 +132,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "5b4418c92af149c8e00ed8d9ae67973539c366b1eda4718e27d6b8c0b988d19a"
+    "sha256": "7a551fa273074d46d2f60a96f7fc3214719a1b7a8db8d475ff66ea908c49f0e6"
   }
 }

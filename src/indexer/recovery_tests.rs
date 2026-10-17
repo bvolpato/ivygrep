@@ -157,6 +157,7 @@ fn corrupt_store_recovery_rebuilds_all_sources_and_preserves_settings() {
                 false,
                 false,
                 &mut false,
+                &mut |_| {},
             )
             .unwrap();
             // This test bypasses the outer entry point, which normally clears
