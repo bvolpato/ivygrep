@@ -1954,6 +1954,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     report_search_warnings(&warnings);
                     hits
                 }
+                Some(DaemonResponse::Error { message }) if cli.skip_gitignore => bail!(message),
                 Some(DaemonResponse::Error { message }) => {
                     tracing::warn!(
                         "daemon literal search failed ({message}), falling back to local"
@@ -1961,6 +1962,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
                 }
                 other => {
+                    if cli.skip_gitignore {
+                        ensure_skip_gitignore_fallback_index(&workspace, cli.all_indices)?;
+                    }
                     tracing::warn!(
                         "daemon literal search unavailable ({other:?}), falling back to local"
                     );
@@ -2084,7 +2088,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     report_search_warnings(&warnings);
                     hits
                 }
-                Some(DaemonResponse::Error { message }) if cli.force_neural => {
+                Some(DaemonResponse::Error { message })
+                    if cli.force_neural || cli.skip_gitignore =>
+                {
                     bail!(message)
                 }
                 Some(DaemonResponse::Error { message }) => {
@@ -2100,6 +2106,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     )?
                 }
                 other => {
+                    if cli.skip_gitignore {
+                        ensure_skip_gitignore_fallback_index(&workspace, cli.all_indices)?;
+                    }
                     tracing::warn!("daemon search unavailable ({other:?}), falling back to local");
                     local_fallback_search(
                         &workspace,
@@ -2413,6 +2422,19 @@ fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
 async fn restart_daemon() {
     daemon::restart_daemon_process().await;
     let _ = daemon::request::<fn(String, usize, usize)>(&DaemonRequest::Status, true, None).await;
+}
+
+fn ensure_skip_gitignore_fallback_index(workspace: &Workspace, all_indices: bool) -> Result<()> {
+    let workspace_set = select_search_workspaces(workspace, all_indices)?;
+    for workspace in workspace_set.workspaces {
+        if !workspace_index_matches_skip_gitignore(&workspace, true) {
+            bail!(
+                "cannot fall back to local search for {}: the --skip-gitignore index is incomplete; retry the query",
+                workspace.root.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Run a local hybrid search as a fallback when the daemon is unavailable or broken.
