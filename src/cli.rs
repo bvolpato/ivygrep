@@ -1877,43 +1877,61 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         // slow for every query. Users can `ig --add .` to force re-index.
     }
 
-    if cli.skip_gitignore && !cli.all_indices && (!cli.regex || cli.literal) {
-        #[allow(clippy::collapsible_if)]
-        if let Some(mut meta) = workspace.read_metadata()? {
-            if !meta.skip_gitignore || !workspace_index_matches_skip_gitignore(&workspace, true) {
-                tracing::info!(
-                    "Re-indexing workspace to include gitignore entities as requested..."
-                );
-                let search_runs_locally = context_args.is_some()
-                    || cli.symbol
-                    || cli.refs
-                    || cli.callers
-                    || cli.lexical_only;
-                if search_via_daemon && search_runs_locally {
-                    let request = crate::protocol::DaemonRequest::Index {
-                        path: workspace.root.clone(),
-                        skip_gitignore: true,
-                        watch: !cli.no_watch,
-                    };
-                    match crate::daemon::request::<fn(String, usize, usize)>(&request, false, None)
-                        .await?
-                    {
-                        Some(crate::protocol::DaemonResponse::Ack { .. }) => {}
-                        Some(crate::protocol::DaemonResponse::Error { message }) => bail!(message),
-                        Some(response) => bail!("unexpected daemon response: {response:?}"),
-                        None => search_via_daemon = false,
-                    }
+    if cli.skip_gitignore && (!cli.regex || cli.literal) {
+        let search_runs_locally =
+            context_args.is_some() || cli.symbol || cli.refs || cli.callers || cli.lexical_only;
+        let workspaces = if cli.all_indices {
+            if search_via_daemon && !search_runs_locally {
+                Vec::new()
+            } else {
+                select_search_workspaces(&workspace, true)?.workspaces
+            }
+        } else {
+            vec![workspace.clone()]
+        };
+        let mut model = None;
+        for ws in workspaces {
+            let Some(mut meta) = ws.read_metadata()? else {
+                bail!("missing workspace metadata for {}", ws.root.display());
+            };
+            if meta.skip_gitignore
+                && workspace_index_matches_skip_gitignore(&ws, true)
+                && ws.quick_index_health().is_queryable()
+            {
+                continue;
+            }
+            if cli.all_indices {
+                confirm_broad_index(&ws.root, cli.yes)?;
+            }
+            tracing::info!(
+                "Re-indexing {} to include gitignore entities as requested",
+                ws.root.display()
+            );
+            if search_via_daemon && search_runs_locally {
+                let request = crate::protocol::DaemonRequest::Index {
+                    path: ws.root.clone(),
+                    skip_gitignore: true,
+                    watch: !cli.no_watch,
+                };
+                match crate::daemon::request::<fn(String, usize, usize)>(&request, false, None)
+                    .await?
+                {
+                    Some(crate::protocol::DaemonResponse::Ack { .. }) => {}
+                    Some(crate::protocol::DaemonResponse::Error { message }) => bail!(message),
+                    Some(response) => bail!("unexpected daemon response: {response:?}"),
+                    None => search_via_daemon = false,
                 }
-                // Daemon searches reconcile mode under their per-workspace
-                // lease. Local execution must update metadata before indexing.
-                if !search_via_daemon {
-                    if !meta.skip_gitignore {
-                        meta.skip_gitignore = true;
-                        workspace.write_metadata(&meta)?;
-                    }
-                    let model = crate::embedding::create_hash_model();
-                    crate::indexer::index_workspace(&workspace, model.as_ref())?;
+            }
+            // Daemon searches reconcile mode under their per-workspace
+            // lease. Local execution must update metadata before indexing.
+            if !search_via_daemon {
+                if !meta.skip_gitignore {
+                    meta.skip_gitignore = true;
+                    ws.write_metadata(&meta)?;
                 }
+                let model = model.get_or_insert_with(crate::embedding::create_hash_model);
+                crate::indexer::index_workspace(&ws, model.as_ref())
+                    .with_context(|| format!("failed to index {}", ws.root.display()))?;
             }
         }
     }
@@ -2500,7 +2518,9 @@ async fn restart_daemon() {
 fn ensure_skip_gitignore_fallback_index(workspace: &Workspace, all_indices: bool) -> Result<()> {
     let workspace_set = select_search_workspaces(workspace, all_indices)?;
     for workspace in workspace_set.workspaces {
-        if !workspace_index_matches_skip_gitignore(&workspace, true) {
+        if !workspace_index_matches_skip_gitignore(&workspace, true)
+            || !workspace.quick_index_health().is_queryable()
+        {
             bail!(
                 "cannot fall back to local search for {}: the --skip-gitignore index is incomplete; retry the query",
                 workspace.root.display()
