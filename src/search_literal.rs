@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
-use super::{FileSearchResult, SearchOptions, literal_hits_for_file};
+use super::{FileSearchResult, SearchOptions, literal_hits_for_file, literal_hits_in_content};
 
 // A sum of 1.0f32 stops increasing at this value. Preserve that score while
 // ranking files by their exact match counts.
@@ -36,10 +36,7 @@ impl RankedFile<'_> {
 impl Ord for RankedFile<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // The heap keeps the worst selected file at the top.
-        other
-            .matches
-            .cmp(&self.matches)
-            .then_with(|| self.relative.cmp(other.relative))
+        compare_rank(self.matches, self.relative, other.matches, other.relative)
     }
 }
 
@@ -57,11 +54,46 @@ impl PartialEq for RankedFile<'_> {
 
 impl Eq for RankedFile<'_> {}
 
-fn insert_ranked<'a>(
-    heap: &mut BinaryHeap<RankedFile<'a>>,
-    file: RankedFile<'a>,
-    max_files: usize,
-) {
+#[derive(Debug)]
+struct RankedResult(FileSearchResult);
+
+impl Ord for RankedResult {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_rank(
+            self.0.hit_count,
+            &self.0.file_path,
+            other.0.hit_count,
+            &other.0.file_path,
+        )
+    }
+}
+
+impl PartialOrd for RankedResult {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RankedResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RankedResult {}
+
+fn compare_rank(
+    left_matches: usize,
+    left_path: &Path,
+    right_matches: usize,
+    right_path: &Path,
+) -> Ordering {
+    right_matches
+        .cmp(&left_matches)
+        .then_with(|| left_path.cmp(right_path))
+}
+
+fn insert_ranked<T: Ord>(heap: &mut BinaryHeap<T>, file: T, max_files: usize) {
     heap.push(file);
     if heap.len() > max_files {
         heap.pop();
@@ -80,14 +112,23 @@ pub(super) fn search_files(
     if max_files == 0 || query_lower.contains('\n') {
         return Ok(Vec::new());
     }
-    let files = crate::workspace_file::RootHandle::new(root);
+    let search = FileSearch {
+        files: crate::workspace_file::RootHandle::new(root),
+        matcher: LineMatcher::new(query_lower),
+        query_lower,
+        context,
+        max_files,
+        paths,
+        options,
+        mode,
+    };
     // An explicit unlimited request needs every preview, so one pass suffices.
     if mode == FileSearchMode::Files && max_files == usize::MAX {
-        let results = paths
+        let mut results: Vec<_> = paths
             .par_iter()
             .filter_map(|(relative, absolute)| {
                 let hits = literal_hits_for_file(
-                    &files,
+                    &search.files,
                     relative,
                     absolute,
                     query_lower,
@@ -105,6 +146,14 @@ pub(super) fn search_files(
                 })
             })
             .collect();
+        results.sort_unstable_by(|left, right| {
+            compare_rank(
+                left.hit_count,
+                &left.file_path,
+                right.hit_count,
+                &right.file_path,
+            )
+        });
         return Ok(if options.is_cancelled() {
             Vec::new()
         } else {
@@ -112,43 +161,10 @@ pub(super) fn search_files(
         });
     }
 
-    let matcher = LineMatcher::new(query_lower);
-    let candidates = paths.par_iter().filter_map(|(relative, absolute)| {
-        if options.is_cancelled() {
-            return None;
-        }
-        let file = files.open(absolute).ok()?;
-        let count = matcher
-            .count_lines(file, options, mode == FileSearchMode::SingleFileName)
-            .ok()??;
-        (count.matches > 0).then_some(RankedFile {
-            relative,
-            absolute,
-            matches: count.matches,
-            matches_are_lower_bound: count.is_lower_bound,
-        })
-    });
-
-    let mut selected = if max_files >= paths.len() {
-        candidates.collect::<Vec<_>>()
-    } else {
-        candidates
-            .fold(BinaryHeap::new, |mut heap, file| {
-                insert_ranked(&mut heap, file, max_files);
-                heap
-            })
-            .reduce(BinaryHeap::new, |mut left, right| {
-                for file in right {
-                    insert_ranked(&mut left, file, max_files);
-                }
-                left
-            })
-            .into_vec()
-    };
+    let selected = search.select_ranked_files();
     if options.is_cancelled() {
         return Ok(Vec::new());
     }
-    selected.sort_unstable();
 
     if mode != FileSearchMode::Files {
         return Ok(selected
@@ -164,37 +180,174 @@ pub(super) fn search_files(
             .collect());
     }
 
-    let results = selected
-        .into_par_iter()
-        .filter_map(|file| {
-            let hits = literal_hits_for_file(
-                &files,
-                file.relative,
-                file.absolute,
-                query_lower,
-                context,
-                DEFAULT_LITERAL_PREVIEWS_PER_FILE,
-                options,
-            );
-            if hits.is_empty() {
-                return None;
-            }
-            let match_count = file.matches.max(hits.len());
-            Some(FileSearchResult {
-                file_path: file.relative.clone(),
-                total_score: match_count.min(MAX_LITERAL_FILE_SCORE) as f32,
-                hit_count: match_count,
-                more_hits_in_file: match_count - hits.len(),
-                hit_count_is_lower_bound: false,
-                hits,
+    Ok(search.read_selected_files(selected))
+}
+
+struct FileSearch<'a> {
+    files: crate::workspace_file::RootHandle,
+    matcher: LineMatcher<'a>,
+    query_lower: &'a str,
+    context: usize,
+    max_files: usize,
+    paths: &'a [(PathBuf, PathBuf)],
+    options: &'a SearchOptions,
+    mode: FileSearchMode,
+}
+
+impl<'a> FileSearch<'a> {
+    fn select_ranked_files(&self) -> Vec<RankedFile<'a>> {
+        let paths = self.paths;
+        let candidates = paths.par_iter().filter_map(|(relative, absolute)| {
+            let count = self.count_file(absolute, self.mode == FileSearchMode::SingleFileName)?;
+            (count.matches > 0).then_some(RankedFile {
+                relative,
+                absolute,
+                matches: count.matches,
+                matches_are_lower_bound: count.is_lower_bound,
             })
-        })
-        .collect();
-    Ok(if options.is_cancelled() {
-        Vec::new()
-    } else {
+        });
+
+        let mut selected = if self.max_files >= paths.len() {
+            candidates.collect::<Vec<_>>()
+        } else {
+            candidates
+                .fold(BinaryHeap::new, |mut heap, file| {
+                    insert_ranked(&mut heap, file, self.max_files);
+                    heap
+                })
+                .reduce(BinaryHeap::new, |mut left, right| {
+                    for file in right {
+                        insert_ranked(&mut left, file, self.max_files);
+                    }
+                    left
+                })
+                .into_vec()
+        };
+        selected.sort_unstable();
+        selected
+    }
+
+    fn read_selected_files(&self, selected: Vec<RankedFile<'a>>) -> Vec<FileSearchResult> {
+        let results: Vec<_> = selected
+            .into_par_iter()
+            .map(|file| {
+                let result =
+                    self.read_matching_content(file.absolute)
+                        .and_then(|(content, count)| {
+                            self.result_for_content(file.relative, &content, count)
+                        });
+                let changed = result.as_ref().map_or(0, |result| result.hit_count) != file.matches;
+                (result, changed)
+            })
+            .collect();
+        if self.options.is_cancelled() {
+            return Vec::new();
+        }
+        if results.iter().any(|(_, changed)| *changed) {
+            drop(results);
+            return self.reselect_live_files();
+        }
         results
-    })
+            .into_iter()
+            .filter_map(|(result, _)| result)
+            .collect()
+    }
+
+    fn count_file(&self, absolute: &Path, stop_after_first_match: bool) -> Option<LineCount> {
+        if self.options.is_cancelled() {
+            return None;
+        }
+        let file = self.files.open(absolute).ok()?;
+        self.matcher
+            .count_lines(file, self.options, stop_after_first_match)
+            .ok()?
+    }
+
+    fn read_matching_content(&self, absolute: &Path) -> Option<(String, usize)> {
+        if self.options.is_cancelled() {
+            return None;
+        }
+        let content = self.files.read_to_string(absolute).ok()?;
+        let count = self
+            .matcher
+            .count_lines(content.as_bytes(), self.options, false)
+            .ok()??;
+        (count.matches > 0).then_some((content, count.matches))
+    }
+
+    fn result_for_content(
+        &self,
+        relative: &Path,
+        content: &str,
+        match_count: usize,
+    ) -> Option<FileSearchResult> {
+        let hits = literal_hits_in_content(
+            content,
+            relative,
+            self.query_lower,
+            self.context,
+            DEFAULT_LITERAL_PREVIEWS_PER_FILE,
+            self.options,
+        );
+        if hits.is_empty() {
+            return None;
+        }
+        let match_count = match_count.max(hits.len());
+        Some(FileSearchResult {
+            file_path: relative.to_path_buf(),
+            total_score: match_count.min(MAX_LITERAL_FILE_SCORE) as f32,
+            hit_count: match_count,
+            more_hits_in_file: match_count - hits.len(),
+            hit_count_is_lower_bound: false,
+            hits,
+        })
+    }
+
+    fn reselect_live_files(&self) -> Vec<FileSearchResult> {
+        // Reconsider all candidates when a selected file changes. Streaming
+        // counts gate preview reads, and retained results use one content snapshot.
+        let results = self
+            .paths
+            .par_iter()
+            .fold(
+                BinaryHeap::<RankedResult>::new,
+                |mut heap, (relative, absolute)| {
+                    let Some(count) = self.count_file(absolute, false) else {
+                        return heap;
+                    };
+                    if count.matches > 0
+                        && self.would_select(&heap, relative, count.matches)
+                        && let Some((content, count)) = self.read_matching_content(absolute)
+                        && self.would_select(&heap, relative, count)
+                        && let Some(result) = self.result_for_content(relative, &content, count)
+                    {
+                        insert_ranked(&mut heap, RankedResult(result), self.max_files);
+                    }
+                    heap
+                },
+            )
+            .reduce(BinaryHeap::new, |mut left, right| {
+                for result in right {
+                    insert_ranked(&mut left, result, self.max_files);
+                }
+                left
+            });
+        if self.options.is_cancelled() {
+            return Vec::new();
+        }
+        results
+            .into_sorted_vec()
+            .into_iter()
+            .map(|result| result.0)
+            .collect()
+    }
+
+    fn would_select(&self, heap: &BinaryHeap<RankedResult>, path: &Path, count: usize) -> bool {
+        heap.len() < self.max_files
+            || heap.peek().is_some_and(|worst| {
+                compare_rank(count, path, worst.0.hit_count, &worst.0.file_path) == Ordering::Less
+            })
+    }
 }
 
 /// Counts matching lines without retaining file contents or preview strings.
@@ -410,6 +563,89 @@ mod tests {
             );
         }
         assert_eq!(selected.pop().unwrap().relative, &second);
+    }
+
+    #[test]
+    fn unlimited_file_search_orders_results_by_match_count_and_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        for (name, count) in [("a.txt", 1), ("b.txt", 3), ("c.txt", 3)] {
+            std::fs::write(root.join(name), "needle\n".repeat(count)).unwrap();
+        }
+        let paths = ["a.txt", "b.txt", "c.txt"]
+            .into_iter()
+            .map(|name| (PathBuf::from(name), root.join(name)))
+            .collect::<Vec<_>>();
+        let results = search_files(
+            &root,
+            "needle",
+            0,
+            usize::MAX,
+            &paths,
+            &SearchOptions::default(),
+            FileSearchMode::Files,
+        )
+        .unwrap();
+        let names = results
+            .iter()
+            .map(|file| file.file_path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [Path::new("b.txt"), Path::new("c.txt"), Path::new("a.txt")]
+        );
+    }
+
+    #[test]
+    fn bounded_file_search_reselects_when_a_selected_file_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let first = root.join("a.txt");
+        let second = root.join("b.txt");
+        std::fs::write(&second, "needle\n".repeat(3)).unwrap();
+        let paths = [
+            (PathBuf::from("a.txt"), first.clone()),
+            (PathBuf::from("b.txt"), second),
+        ];
+        let options = SearchOptions::default();
+        let search = FileSearch {
+            files: crate::workspace_file::RootHandle::new(&root),
+            matcher: LineMatcher::new("needle"),
+            query_lower: "needle",
+            context: 0,
+            max_files: 1,
+            paths: &paths,
+            options: &options,
+            mode: FileSearchMode::Files,
+        };
+
+        for replacement in [
+            None,
+            Some("no match\n"),
+            Some("needle\n"),
+            Some("\0needle\n"),
+        ] {
+            std::fs::write(&first, "needle\n".repeat(5)).unwrap();
+            let selected = search.select_ranked_files();
+            assert_eq!(selected[0].relative, Path::new("a.txt"));
+            if let Some(replacement) = replacement {
+                std::fs::write(&first, replacement).unwrap();
+            } else {
+                std::fs::remove_file(&first).unwrap();
+            }
+            let results = search.read_selected_files(selected);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].file_path, Path::new("b.txt"));
+            assert_eq!(results[0].hit_count, 3);
+        }
+
+        std::fs::write(&first, "needle\n".repeat(5)).unwrap();
+        let selected = search.select_ranked_files();
+        std::fs::write(&first, "needle\n".repeat(7)).unwrap();
+        let results = search.read_selected_files(selected);
+        assert_eq!(results[0].file_path, Path::new("a.txt"));
+        assert_eq!(results[0].hit_count, 7);
+        assert_eq!(results[0].more_hits_in_file, 4);
     }
 
     struct ChunkedReader<'a> {

@@ -1144,6 +1144,17 @@ fn literal_hits_for_file(
     let Ok(content) = files.read_to_string(path) else {
         return Vec::new();
     };
+    literal_hits_in_content(&content, rel_path, query_lower, context, max_hits, options)
+}
+
+fn literal_hits_in_content(
+    content: &str,
+    rel_path: &Path,
+    query_lower: &str,
+    context: usize,
+    max_hits: usize,
+    options: &SearchOptions,
+) -> Vec<SearchHit> {
     // Lossy decoding keeps text with stray invalid bytes. Like indexing, a NUL
     // within the sniffed prefix marks the file as binary.
     if content.as_bytes()[..content.len().min(crate::chunking::TEXT_SNIFF_BYTES)].contains(&0) {
