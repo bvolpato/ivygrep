@@ -2,7 +2,7 @@
 
 use candle::{Device, Result, Storage, Tensor, WithDType};
 use std::sync::LazyLock;
-use std::{f32, iter::Sum};
+use std::iter::Sum;
 
 use rayon::prelude::*;
 use rayon::ThreadPool;

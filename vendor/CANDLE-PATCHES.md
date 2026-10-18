@@ -12,6 +12,11 @@ archive `a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87`.
 Its normalized manifest uses the maintained core. Registry markers and the
 crate-local lockfile are omitted.
 
+The core error-function and NN CPU-attention modules omit legacy `std::f64`
+and `std::f32` imports so their infinity constants resolve to the primitive
+associated constants. This preserves their values and calculations while
+supporting the repository's deny-warnings builds on current stable Rust.
+
 Both manifests use ZIP >=9.0.3 (locked to 9.0.5) instead of the yanked ZIP 7.2.0 and 8.6.0 releases,
 which are affected by RUSTSEC-2026-0367, RUSTSEC-2026-0368, and
 RUSTSEC-2026-0369. NPZ and PTH filename handling propagates ZIP 9's fallible
