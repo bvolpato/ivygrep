@@ -22,6 +22,9 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Failed `--skip-gitignore` reindexes report their errors and retry on the next query. Local `--all-indices` searches prepare each selected workspace, and daemon failures cannot silently return results from an incomplete index.
+- Literal search limits files instead of matching chunks, counts matching lines exactly, bounds previews, and preserves Unicode matches when the trigram index cannot safely narrow candidates. Files are ranked by match count and path, including unlimited output. Selected files that change during a search trigger candidate reconsideration. The daemon protocol advances to version 10 while retaining legacy limits for version 8 and 9 clients.
+- E2E daemon checks choose socket-safe temporary paths on Unix, including long or multibyte `TMPDIR` values. Standalone daemon equivalence retains its requested artifacts while using a private shorter socket alias when necessary.
 - Daemon index rebuilds release cached readers before replacing SQLite, Tantivy, or vector stores, including readers inherited by linked worktrees. Watcher updates take exclusive workspace and base leases because even a targeted update can discover stores that need rebuilding. Unchanged scans retain their caches. This fixes Windows watcher reconciliation failing with `failed to preserve live index ... metadata.sqlite3` and `os error 32`.
 - Background hash and neural enhancement close SQLite readers before model inference or resource pauses. Text is read in bounded batches under the index lock, so a rebuild can replace the database on Windows while enhancement is computing or paused. Incarnation checks still prevent an older worker from publishing into replacement stores.
 - Watcher event filtering and status polling coordinate their SQLite reads with index replacement. Status keeps workspace identity and job progress when statistics cannot be read, and the CLI, MCP tool, and Web UI report statistics as unavailable. CLI JSON omits unavailable statistics, and MCP count and readiness fields are `null` instead of placeholder values.
@@ -37,6 +40,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Security
 
+- Update Rustls to 0.23.46 and replace yanked ZIP 7.2.0 and 8.6.0 with ZIP 9.0.5, resolving the dependency audit findings without suppressions. Vendored Candle 0.10.2 and 0.11.0 retain their published model APIs and licenses, with upstream-compatible fallible archive filename handling until a compatible Candle release is available.
 - A CodeQL workflow analyzes Rust and JavaScript/TypeScript on pull requests, pushes to `main`, weekly, and manual dispatch. It complements the dependency, secret, and workflow audits. Analysis skips a full project build; coverage of generated build output is not guaranteed.
 
 ## [1.3.0] - 2026-09-26
