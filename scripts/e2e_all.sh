@@ -62,6 +62,11 @@ if [ ! -x "$ig_bin" ]; then
 fi
 [ -x "$ig_bin" ] || fail "ig binary not executable: $ig_bin"
 
+# shellcheck source=scripts/e2e_tmp.sh
+. "$script_dir/e2e_tmp.sh"
+TMPDIR=$(e2e_socket_tmp_parent) || fail "could not find a temporary directory for the daemon socket"
+export TMPDIR
+
 "$script_dir/e2e_procedures.sh" --binary "$ig_bin"
 
 bench_home="$(mktemp -d "${TMPDIR:-/tmp}/ivygrep-e2e-daemon.XXXXXX")"

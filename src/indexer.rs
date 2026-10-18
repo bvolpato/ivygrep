@@ -39,6 +39,8 @@ mod overlay_tests;
 mod recovery_tests;
 mod resources;
 mod staging;
+#[cfg(test)]
+pub(crate) use staging::test_support::fail_publication as fail_index_publication;
 mod storage;
 
 use compression::compress_text;
@@ -623,6 +625,25 @@ pub fn index_workspace_paths_for_watcher(
     )
 }
 
+/// Index while allowing the caller to close readers immediately before a store
+/// replacement. The caller must already exclude searches of this workspace and
+/// its base; the index lock alone does not cover cached daemon readers.
+pub(crate) fn index_workspace_with_store_replacement(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+    watcher_paths: Option<&[PathBuf]>,
+    before_store_replacement: &mut dyn FnMut(&Workspace),
+) -> Result<IndexingSummary> {
+    index_workspace_with_options_and_store_replacement(
+        workspace,
+        embedding_model,
+        false,
+        watcher_paths,
+        false,
+        before_store_replacement,
+    )
+}
+
 /// Rebuild a worktree overlay when its referenced base generation moved.
 ///
 /// Searches call this before opening stores so stale tombstones and shadow
@@ -630,6 +651,14 @@ pub fn index_workspace_paths_for_watcher(
 pub fn reconcile_worktree_overlay(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
+) -> Result<bool> {
+    reconcile_worktree_overlay_with_store_replacement(workspace, embedding_model, &mut |_| {})
+}
+
+pub(crate) fn reconcile_worktree_overlay_with_store_replacement(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+    before_store_replacement: &mut dyn FnMut(&Workspace),
 ) -> Result<bool> {
     let reset_overlay = match workspace.worktree_overlay_is_stale() {
         Ok(false) => return Ok(false),
@@ -644,7 +673,14 @@ pub fn reconcile_worktree_overlay(
         Err(err) => return Err(err),
     };
 
-    index_workspace_with_options(workspace, embedding_model, false, None, reset_overlay)?;
+    index_workspace_with_options_and_store_replacement(
+        workspace,
+        embedding_model,
+        false,
+        None,
+        reset_overlay,
+        before_store_replacement,
+    )?;
     if workspace.worktree_overlay_is_stale()? {
         anyhow::bail!(
             "worktree overlay remained stale after reconciliation: {}",
@@ -660,6 +696,24 @@ fn index_workspace_with_options(
     trust_live_watcher: bool,
     watcher_paths: Option<&[PathBuf]>,
     reset_worktree_overlay: bool,
+) -> Result<IndexingSummary> {
+    index_workspace_with_options_and_store_replacement(
+        workspace,
+        embedding_model,
+        trust_live_watcher,
+        watcher_paths,
+        reset_worktree_overlay,
+        &mut |_| {},
+    )
+}
+
+fn index_workspace_with_options_and_store_replacement(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+    trust_live_watcher: bool,
+    watcher_paths: Option<&[PathBuf]>,
+    reset_worktree_overlay: bool,
+    before_store_replacement: &mut dyn FnMut(&Workspace),
 ) -> Result<IndexingSummary> {
     let indexing_started = Instant::now();
     crate::workspace_file::validate_root(&workspace.root)
@@ -700,6 +754,7 @@ fn index_workspace_with_options(
     {
         // A reused path may now require the opposite store layout. Clear its
         // obsolete stores and base reference under the existing index lock.
+        before_store_replacement(workspace);
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
     }
     // The index lock serializes creation. A new incarnation survives ordinary
@@ -733,7 +788,12 @@ fn index_workspace_with_options(
         if !base.quick_index_health().is_queryable()
             || validate_existing_index_storage(&base).is_err()
         {
-            index_workspace_for_watcher(&base, embedding_model)?;
+            index_workspace_with_store_replacement(
+                &base,
+                embedding_model,
+                None,
+                before_store_replacement,
+            )?;
             reset_worktree_overlay = true;
         }
     }
@@ -833,6 +893,7 @@ fn index_workspace_with_options(
             reset_worktree_overlay || (incomplete && workspace.is_worktree()),
             rebuild_main || (incomplete && !workspace.is_worktree()),
             &mut source_vanished,
+            before_store_replacement,
         )
     });
     let result = result.and_then(|summary| {
@@ -977,6 +1038,7 @@ fn index_workspace_inner(
     rebuild_main: bool,
     // Set if a source file vanished after the scan listed it.
     source_vanished: &mut bool,
+    before_store_replacement: &mut dyn FnMut(&Workspace),
 ) -> Result<IndexingSummary> {
     let index_started = std::time::Instant::now();
 
@@ -1059,7 +1121,12 @@ fn index_workspace_inner(
                 base_ws.write_metadata(&base_meta)?;
                 if base_sqlite.exists() {
                     eprintln!("  ⚡ enabling ignored files in base index before overlay...");
-                    if let Err(err) = index_workspace_for_watcher(&base_ws, embedding_model) {
+                    if let Err(err) = index_workspace_with_store_replacement(
+                        &base_ws,
+                        embedding_model,
+                        None,
+                        before_store_replacement,
+                    ) {
                         base_meta.skip_gitignore = false;
                         let _ = base_ws.write_metadata(&base_meta);
                         return Err(err);
@@ -1084,7 +1151,14 @@ fn index_workspace_inner(
             && let Ok(base_ws) = crate::workspace::Workspace::resolve(&main_root)
         {
             eprintln!("  ⚡ base index format incompatible — rebuilding base before overlay...");
-            let _ = index_workspace(&base_ws, embedding_model)?;
+            let _ = index_workspace_with_options_and_store_replacement(
+                &base_ws,
+                embedding_model,
+                true,
+                None,
+                false,
+                before_store_replacement,
+            )?;
             base_refreshed = true;
             recreate_overlay |= workspace.has_overlay();
         }
@@ -1095,7 +1169,14 @@ fn index_workspace_inner(
         {
             eprintln!("  ⚡ base workspace is not indexed, running full base indexing first...");
             let base_workspace = crate::workspace::Workspace::resolve(&main_root)?;
-            let _ = index_workspace(&base_workspace, embedding_model)?;
+            let _ = index_workspace_with_options_and_store_replacement(
+                &base_workspace,
+                embedding_model,
+                true,
+                None,
+                false,
+                before_store_replacement,
+            )?;
             base_refreshed = true;
             eprintln!("  ⚡ base indexing complete, proceeding with overlay...");
         }
@@ -1119,7 +1200,12 @@ fn index_workspace_inner(
             if base_ws.read_index_incarnation()?.is_none()
                 || (!base_refreshed && !refresh_clean_base_metadata(&base_ws)?)
             {
-                let _ = index_workspace_for_watcher(&base_ws, embedding_model)?;
+                let _ = index_workspace_with_store_replacement(
+                    &base_ws,
+                    embedding_model,
+                    None,
+                    before_store_replacement,
+                )?;
             }
             let (base_generation, base_incarnation, indexed_base) =
                 capture_base_overlay_state(&base_ws)?;
@@ -1800,6 +1886,7 @@ fn index_workspace_inner(
 
     let staging_publish_started = Instant::now();
     let staging_publish_ms = if let Some(staging) = fresh_staging {
+        before_store_replacement(workspace);
         if initializing_overlay {
             staging.promote_overlay(workspace)?;
         } else {
@@ -2579,27 +2666,92 @@ fn sparse_missing_vector_keys(
     Ok(Some(missing))
 }
 
-fn visit_embedding_rows(
-    sqlite: &Connection,
-    missing_keys: Option<Vec<u64>>,
-    mut visit: impl FnMut(u64, Vec<u8>) -> Result<()>,
-) -> Result<()> {
-    if let Some(keys) = missing_keys {
-        let mut stmt = sqlite.prepare("SELECT text FROM chunks WHERE vector_key = ?1 LIMIT 1")?;
-        for key in keys {
-            match stmt.query_row(params![key as i64], |row| row.get(0)) {
-                Ok(raw) => visit(key, raw)?,
-                // Indexing can delete a pending key after the covering-index
-                // scan. The generation check schedules any new work afterward.
-                Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                Err(error) => return Err(error.into()),
+enum EmbeddingRows {
+    Sparse(std::vec::IntoIter<u64>),
+    Sequential { after_rowid: i64, max_rowid: i64 },
+}
+
+impl EmbeddingRows {
+    fn new(sqlite: &Connection, missing_keys: Option<Vec<u64>>) -> Result<Self> {
+        Ok(if let Some(keys) = missing_keys {
+            Self::Sparse(keys.into_iter())
+        } else {
+            Self::Sequential {
+                after_rowid: 0,
+                max_rowid: sqlite.query_row(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM chunks",
+                    [],
+                    |row| row.get(0),
+                )?,
+            }
+        })
+    }
+
+    fn is_exhausted(&self) -> bool {
+        match self {
+            Self::Sparse(keys) => keys.len() == 0,
+            Self::Sequential {
+                after_rowid,
+                max_rowid,
+            } => after_rowid >= max_rowid,
+        }
+    }
+
+    fn read_batch(&mut self, sqlite: &Connection, limit: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+        let mut batch = Vec::with_capacity(limit);
+        match self {
+            Self::Sparse(keys) => {
+                let mut stmt =
+                    sqlite.prepare("SELECT text FROM chunks WHERE vector_key = ?1 LIMIT 1")?;
+                for key in keys.by_ref().take(limit) {
+                    match stmt.query_row(params![key as i64], |row| row.get(0)) {
+                        Ok(raw) => batch.push((key, raw)),
+                        // Incremental indexing can delete a pending key. Its
+                        // changed generation schedules any new work afterward.
+                        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            Self::Sequential {
+                after_rowid,
+                max_rowid,
+            } => {
+                let mut stmt = sqlite.prepare(
+                    "SELECT rowid, vector_key, text FROM chunks
+                     WHERE rowid > ?1 AND rowid <= ?2 ORDER BY rowid LIMIT ?3",
+                )?;
+                let mut rows = stmt.query(params![*after_rowid, *max_rowid, limit as i64])?;
+                while let Some(row) = rows.next()? {
+                    *after_rowid = row.get(0)?;
+                    batch.push((row.get::<_, i64>(1)? as u64, row.get(2)?));
+                }
+                if batch.len() < limit {
+                    *after_rowid = *max_rowid;
+                }
             }
         }
-    } else {
-        let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))?;
-        for row in rows {
-            let (key, raw) = row?;
+        Ok(batch)
+    }
+}
+
+fn visit_embedding_rows(
+    workspace: &Workspace,
+    snapshot: &EnhancementSnapshot,
+    sqlite_path: &Path,
+    mut rows: EmbeddingRows,
+    batch_size: usize,
+    mut visit: impl FnMut(u64, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    while !rows.is_exhausted() {
+        let batch = {
+            let _read_lock = snapshot.lock_current(workspace)?;
+            let sqlite = open_sqlite_readonly(sqlite_path)?;
+            rows.read_batch(&sqlite, batch_size)?
+        };
+        // Close SQLite before inference or a resource pause so a concurrent
+        // full rebuild can replace its files on Windows.
+        for (key, raw) in batch {
             visit(key, raw)?;
         }
     }
@@ -2725,36 +2877,45 @@ fn enhance_workspace_hash_with_snapshot(
         Ok(())
     };
 
-    drop(initial_lock);
     let missing_keys = sparse_missing_vector_keys(&sqlite, &vector_index, total_chunks)?;
-    visit_embedding_rows(&sqlite, missing_keys, |key, raw| {
-        if vector_index.contains(key) || !batch_keys.insert(key) {
-            return Ok(());
-        }
+    let rows = EmbeddingRows::new(&sqlite, missing_keys)?;
+    drop(sqlite);
+    drop(initial_lock);
+    visit_embedding_rows(
+        workspace,
+        &snapshot,
+        &sqlite_path,
+        rows,
+        BATCH_SIZE,
+        |key, raw| {
+            if vector_index.contains(key) || !batch_keys.insert(key) {
+                return Ok(());
+            }
 
-        let text = try_decompress_text(raw)
-            .with_context(|| format!("failed to read stored text for vector key {key}"))?;
-        batch.push((key, text));
-        if batch.len() >= BATCH_SIZE {
-            while let Some(reason) = check_system_constraints(EnhancementTier::Hash) {
-                {
-                    let _publication = snapshot.lock_current(workspace)?;
-                    let _ = fs::write(&paused_path, &reason);
+            let text = try_decompress_text(raw)
+                .with_context(|| format!("failed to read stored text for vector key {key}"))?;
+            batch.push((key, text));
+            if batch.len() >= BATCH_SIZE {
+                while let Some(reason) = check_system_constraints(EnhancementTier::Hash) {
+                    {
+                        let _publication = snapshot.lock_current(workspace)?;
+                        let _ = fs::write(&paused_path, &reason);
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(10));
                 }
-                std::thread::sleep(std::time::Duration::from_secs(10));
+                process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+                batch_keys.clear();
+                let _publication = snapshot.lock_current(workspace)?;
+                let _ = fs::remove_file(&paused_path);
+                progress_count += BATCH_SIZE;
+                let _ = fs::write(&progress_path, progress_count.to_string());
+                if newly_processed.is_multiple_of(CHECKPOINT_INTERVAL) {
+                    vector_index.save()?;
+                }
             }
-            process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
-            batch_keys.clear();
-            let _publication = snapshot.lock_current(workspace)?;
-            let _ = fs::remove_file(&paused_path);
-            progress_count += BATCH_SIZE;
-            let _ = fs::write(&progress_path, progress_count.to_string());
-            if newly_processed.is_multiple_of(CHECKPOINT_INTERVAL) {
-                vector_index.save()?;
-            }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
 
     let tail_len = batch.len();
     while !batch.is_empty()
@@ -2937,8 +3098,10 @@ fn enhance_workspace_neural_with_snapshot(
     // Discover missing keys from the covering index, then point-fetch text for
     // those keys. Keep the sequential scan for fresh or incomplete stores,
     // where indexed point lookups cost more than one table pass.
-    drop(initial_lock);
     let sparse_missing_keys = sparse_missing_vector_keys(&sqlite, &vector_index, total_chunks)?;
+    let rows = EmbeddingRows::new(&sqlite, sparse_missing_keys)?;
+    drop(sqlite);
+    drop(initial_lock);
 
     let document_character_limit = neural_model.document_character_limit();
     let process_batch = |batch: &mut Vec<(u64, String)>,
@@ -2972,44 +3135,51 @@ fn enhance_workspace_neural_with_snapshot(
     };
 
     {
-        visit_embedding_rows(&sqlite, sparse_missing_keys, |key, raw| {
-            if vector_index.contains(key) || !batch_keys.insert(key) {
-                return Ok(());
-            }
+        visit_embedding_rows(
+            workspace,
+            &snapshot,
+            &sqlite_path,
+            rows,
+            initial_batch_size,
+            |key, raw| {
+                if vector_index.contains(key) || !batch_keys.insert(key) {
+                    return Ok(());
+                }
 
-            let text = try_decompress_text(raw)
-                .with_context(|| format!("failed to read stored text for vector key {key}"))?;
-            batch.push((key, text));
+                let text = try_decompress_text(raw)
+                    .with_context(|| format!("failed to read stored text for vector key {key}"))?;
+                batch.push((key, text));
 
-            if batch.len() >= current_batch_size {
-                while neural_model.respects_system_constraints()
-                    && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
-                {
+                if batch.len() >= current_batch_size {
+                    while neural_model.respects_system_constraints()
+                        && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
                     {
-                        let _publication = snapshot.lock_current(workspace)?;
-                        let _ = std::fs::write(&paused_path, &reason);
+                        {
+                            let _publication = snapshot.lock_current(workspace)?;
+                            let _ = std::fs::write(&paused_path, &reason);
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(10));
                     }
-                    std::thread::sleep(std::time::Duration::from_secs(10));
-                }
-                let processed_len = batch.len();
-                process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
-                batch_keys.clear();
-                let _publication = snapshot.lock_current(workspace)?;
-                let _ = fs::remove_file(&paused_path);
-                progress_count += processed_len;
-                let _ = std::fs::write(&progress_path, progress_count.to_string());
-                if last_batch_size_refresh.elapsed() >= NEURAL_BATCH_SIZE_REFRESH_INTERVAL {
-                    current_batch_size = neural_enhance_batch_size(neural_model);
-                    last_batch_size_refresh = Instant::now();
-                }
+                    let processed_len = batch.len();
+                    process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+                    batch_keys.clear();
+                    let _publication = snapshot.lock_current(workspace)?;
+                    let _ = fs::remove_file(&paused_path);
+                    progress_count += processed_len;
+                    let _ = std::fs::write(&progress_path, progress_count.to_string());
+                    if last_batch_size_refresh.elapsed() >= NEURAL_BATCH_SIZE_REFRESH_INTERVAL {
+                        current_batch_size = neural_enhance_batch_size(neural_model);
+                        last_batch_size_refresh = Instant::now();
+                    }
 
-                if newly_processed.saturating_sub(checkpointed) >= 16_384 {
-                    vector_index.save()?;
-                    checkpointed = newly_processed;
+                    if newly_processed.saturating_sub(checkpointed) >= 16_384 {
+                        vector_index.save()?;
+                        checkpointed = newly_processed;
+                    }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
     }
 
     // Process any remaining tail
@@ -4206,13 +4376,10 @@ mod tests {
         }
         let missing = sparse_missing_vector_keys(&sqlite, &store, 5).unwrap();
         assert_eq!(missing, Some(vec![5]));
-        let mut loaded = Vec::new();
-        visit_embedding_rows(&sqlite, missing, |key, text| {
-            loaded.push((key, text));
-            Ok(())
-        })
-        .unwrap();
+        let mut rows = EmbeddingRows::new(&sqlite, missing).unwrap();
+        let loaded = rows.read_batch(&sqlite, 2).unwrap();
         assert_eq!(loaded, vec![(5, b"payload".to_vec())]);
+        assert!(rows.is_exhausted());
         store.upsert(5, vec![1.0; 256]).unwrap();
         assert_eq!(
             sparse_missing_vector_keys(&sqlite, &store, 5).unwrap(),
@@ -4225,10 +4392,29 @@ mod tests {
         sqlite
             .execute("DELETE FROM chunks WHERE vector_key = 5", [])
             .unwrap();
-        visit_embedding_rows(&sqlite, Some(vec![5]), |_, _| {
-            panic!("a concurrently deleted chunk must not be embedded")
-        })
-        .unwrap();
+        let mut rows = EmbeddingRows::new(&sqlite, Some(vec![5])).unwrap();
+        assert!(rows.read_batch(&sqlite, 2).unwrap().is_empty());
+        assert!(rows.is_exhausted());
+
+        let mut rows = EmbeddingRows::new(&sqlite, None).unwrap();
+        assert_eq!(rows.read_batch(&sqlite, 2).unwrap().len(), 2);
+        sqlite
+            .execute("DELETE FROM chunks WHERE vector_key = 3", [])
+            .unwrap();
+        sqlite
+            .execute(
+                "INSERT INTO chunks VALUES (6, ?1)",
+                [b"new payload".as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            rows.read_batch(&sqlite, 2).unwrap(),
+            vec![(4, b"payload".to_vec())]
+        );
+        assert!(
+            rows.is_exhausted(),
+            "later rows belong to the next generation"
+        );
     }
 
     fn indexed_texts_for_file(workspace: &Workspace, file_path: &str) -> Vec<String> {

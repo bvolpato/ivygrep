@@ -1,8 +1,14 @@
+#[expect(dead_code, reason = "Keep the upstream BERT implementation intact.")]
+mod bert;
+#[expect(dead_code, reason = "Keep the upstream tracing helpers intact.")]
+mod bert_tracing;
 pub mod models;
+#[expect(dead_code, reason = "Keep the upstream tracing dependencies intact.")]
+mod quantized_var_builder;
 use anyhow::{Error, Result};
+use bert::{BertModel, Config, HiddenAct, DTYPE};
 use candle::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::bert::{BertModel, Config, HiddenAct, DTYPE};
 use hf_hub::{api::sync::Api, Repo, RepoType};
 pub use models::WithModel;
 use std::{

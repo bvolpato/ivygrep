@@ -24,7 +24,7 @@ use crate::indexer::{
     reconcile_worktree_overlay,
 };
 use crate::path_glob::PathGlobMatcher;
-use crate::protocol::SearchHit;
+use crate::protocol::{FileSearchResult, LiteralSearchOutput, SearchHit};
 #[path = "search_boolean.rs"]
 mod boolean;
 #[path = "search_eligibility.rs"]
@@ -37,6 +37,8 @@ mod execution;
 mod file_cache;
 #[path = "search_fusion.rs"]
 mod fusion;
+#[path = "search_literal.rs"]
+mod literal;
 #[path = "search_presentation.rs"]
 mod presentation;
 #[path = "search_semantic_visibility.rs"]
@@ -860,6 +862,22 @@ pub fn literal_search(
     literal_search_with_context(&ctx, workspace, query_text, options)
 }
 
+pub(crate) fn literal_file_search(
+    workspace: &Workspace,
+    query_text: &str,
+    options: &SearchOptions,
+    output: LiteralSearchOutput,
+    all_indices: bool,
+) -> Result<Vec<FileSearchResult>> {
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
+    let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    reconcile_worktree_overlay(workspace, &model)?;
+    let ctx = SearchContext::load(workspace, None, false)?;
+    literal_file_search_with_context(&ctx, workspace, query_text, options, output, all_indices)
+}
+
 pub fn literal_search_with_context(
     ctx: &SearchContext,
     workspace: &Workspace,
@@ -867,43 +885,90 @@ pub fn literal_search_with_context(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
-    if options.is_cancelled() {
+    let Some(LiteralCandidates { query_lower, paths }) =
+        literal_search_candidates(ctx, workspace, query_text, options)?
+    else {
         return Ok(Vec::new());
+    };
+    let hits = literal_search_paths(
+        &workspace.root,
+        &query_lower,
+        options.bounded_context(),
+        options.bounded_limit().unwrap_or(500),
+        &paths,
+        options,
+    )?;
+    tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
+    Ok(hits)
+}
+
+pub(crate) fn literal_file_search_with_context(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    options: &SearchOptions,
+    output: LiteralSearchOutput,
+    all_indices: bool,
+) -> Result<Vec<FileSearchResult>> {
+    debug_assert_ne!(output, LiteralSearchOutput::Hits);
+    let t0 = std::time::Instant::now();
+    let Some(LiteralCandidates { query_lower, paths }) =
+        literal_search_candidates(ctx, workspace, query_text, options)?
+    else {
+        return Ok(Vec::new());
+    };
+    let mode = match (output, all_indices, paths.len()) {
+        (LiteralSearchOutput::FileNames, false, 1) => literal::FileSearchMode::SingleFileName,
+        (LiteralSearchOutput::FileNames, _, _) => literal::FileSearchMode::FileNames,
+        _ => literal::FileSearchMode::Files,
+    };
+    let files = literal::search_files(
+        &workspace.root,
+        &query_lower,
+        options.bounded_context(),
+        options.bounded_limit().unwrap_or(500),
+        &paths,
+        options,
+        mode,
+    )?;
+    tracing::trace!("literal_total={:?} files={}", t0.elapsed(), files.len());
+    Ok(files)
+}
+
+struct LiteralCandidates {
+    query_lower: String,
+    paths: Vec<(PathBuf, PathBuf)>,
+}
+
+fn literal_search_candidates(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    options: &SearchOptions,
+) -> Result<Option<LiteralCandidates>> {
+    if options.is_cancelled() {
+        return Ok(None);
     }
     let query = query_text.trim();
-    if query.is_empty() {
-        return Ok(vec![]);
-    }
-    if options.bounded_limit() == Some(0) {
-        return Ok(vec![]);
+    if query.is_empty() || options.bounded_limit() == Some(0) {
+        return Ok(None);
     }
 
     let query_lower = fold_literal_case(query);
-    let max_hits = options.bounded_limit().unwrap_or(500);
-    let context = options.bounded_context();
-    let runs = substring_candidate_runs(query);
-    let hits = if runs.is_empty() {
-        literal_search_walk(workspace, &query_lower, options, max_hits)?
+    let runs = substring_candidate_runs(&query_lower);
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let paths = if runs.is_empty() {
+        literal_search_walk_paths(workspace, options, &path_matcher)?
     } else {
-        let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
         match substring_candidate_files(workspace, ctx, &runs, options, &path_matcher)? {
-            Some(candidate_paths) => literal_search_paths(
-                &workspace.root,
-                &query_lower,
-                context,
-                max_hits,
-                &candidate_paths,
-                options,
-            )?,
-            None => literal_search_walk(workspace, &query_lower, options, max_hits)?,
+            Some(paths) => paths,
+            None => literal_search_walk_paths(workspace, options, &path_matcher)?,
         }
     };
-
     if options.is_cancelled() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
-    Ok(hits)
+    Ok(Some(LiteralCandidates { query_lower, paths }))
 }
 
 /// Case-insensitive literal matching folds each character independently.
@@ -976,13 +1041,11 @@ fn literal_preview(
         .join("\n")
 }
 
-fn literal_search_walk(
+fn literal_search_walk_paths(
     workspace: &Workspace,
-    query_lower: &str,
     options: &SearchOptions,
-    max_hits: usize,
-) -> Result<Vec<SearchHit>> {
-    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    path_matcher: &PathGlobMatcher,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
     let mut paths = Vec::new();
     for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
         if options.is_cancelled() {
@@ -1012,14 +1075,7 @@ fn literal_search_walk(
         paths.push((rel_path.to_path_buf(), path.to_path_buf()));
     }
 
-    literal_search_paths(
-        &workspace.root,
-        query_lower,
-        options.bounded_context(),
-        max_hits,
-        &paths,
-        options,
-    )
+    Ok(paths)
 }
 
 fn literal_search_paths(
@@ -1044,48 +1100,15 @@ fn literal_search_paths(
     // The first read walks the root. Every other candidate file reuses that walk.
     let files = crate::workspace_file::RootHandle::new(root);
     let per_file = paths.par_iter().map(|(rel_path, path)| {
-        if options.is_cancelled() {
-            return Vec::new();
-        }
-        let Ok(content) = files.read_to_string(path) else {
-            return Vec::new();
-        };
-        // Lossy decoding keeps text with stray invalid bytes. Like indexing, a NUL
-        // within the sniffed prefix marks the file as binary.
-        if content.as_bytes()[..content.len().min(crate::chunking::TEXT_SNIFF_BYTES)].contains(&0) {
-            return Vec::new();
-        }
-        let lines = content.lines().collect::<Vec<_>>();
-        lines
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| {
-                !options.is_cancelled() && fold_literal_case(line).contains(query_lower)
-            })
-            // File order and snippet bounds are monotonic in source order.
-            // Later matches cannot enter the final bounded result set.
-            .take(max_hits)
-            .map(|(index, line)| {
-                let line_number = index.saturating_add(1);
-                let (start_line, end_line) = snippet_bounds(line_number, context, lines.len());
-                SearchHit {
-                    file_path: rel_path.clone(),
-                    start_line,
-                    end_line,
-                    preview: literal_preview(
-                        &lines[start_line.saturating_sub(1)..end_line],
-                        start_line,
-                        line_number,
-                        query_lower,
-                    ),
-                    reason: format!("literal match: {}", truncate_for_reason(line.trim())),
-                    score: 1.0,
-                    sources: vec!["literal".to_string()],
-                    neural_requested: false,
-                    neural_executed: false,
-                }
-            })
-            .collect::<Vec<_>>()
+        literal_hits_for_file(
+            &files,
+            rel_path,
+            path,
+            query_lower,
+            context,
+            max_hits,
+            options,
+        )
     });
     let hits = if max_hits == usize::MAX {
         let hits = per_file.flatten_iter().collect();
@@ -1104,6 +1127,70 @@ fn literal_search_paths(
         return Ok(Vec::new());
     }
     Ok(hits)
+}
+
+fn literal_hits_for_file(
+    files: &crate::workspace_file::RootHandle,
+    rel_path: &Path,
+    path: &Path,
+    query_lower: &str,
+    context: usize,
+    max_hits: usize,
+    options: &SearchOptions,
+) -> Vec<SearchHit> {
+    if options.is_cancelled() {
+        return Vec::new();
+    }
+    let Ok(content) = files.read_to_string(path) else {
+        return Vec::new();
+    };
+    literal_hits_in_content(&content, rel_path, query_lower, context, max_hits, options)
+}
+
+fn literal_hits_in_content(
+    content: &str,
+    rel_path: &Path,
+    query_lower: &str,
+    context: usize,
+    max_hits: usize,
+    options: &SearchOptions,
+) -> Vec<SearchHit> {
+    // Lossy decoding keeps text with stray invalid bytes. Like indexing, a NUL
+    // within the sniffed prefix marks the file as binary.
+    if content.as_bytes()[..content.len().min(crate::chunking::TEXT_SNIFF_BYTES)].contains(&0) {
+        return Vec::new();
+    }
+    let lines = content.lines().collect::<Vec<_>>();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            !options.is_cancelled() && fold_literal_case(line).contains(query_lower)
+        })
+        // File order and snippet bounds are monotonic in source order.
+        // Later matches cannot enter the final bounded result set.
+        .take(max_hits)
+        .map(|(index, line)| {
+            let line_number = index.saturating_add(1);
+            let (start_line, end_line) = snippet_bounds(line_number, context, lines.len());
+            SearchHit {
+                file_path: rel_path.to_path_buf(),
+                start_line,
+                end_line,
+                preview: literal_preview(
+                    &lines[start_line.saturating_sub(1)..end_line],
+                    start_line,
+                    line_number,
+                    query_lower,
+                ),
+                reason: format!("literal match: {}", truncate_for_reason(line.trim())),
+                score: 1.0,
+                sources: vec!["literal".to_string()],
+                neural_requested: false,
+                neural_executed: false,
+            }
+        })
+        .collect()
 }
 
 fn substring_candidate_files(
@@ -1602,13 +1689,29 @@ pub(crate) fn substring_candidate_query(
     (!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
 }
 
-fn substring_candidate_runs(query: &str) -> Vec<String> {
-    query
-        .as_bytes()
-        .split(|byte| !byte.is_ascii_alphanumeric())
-        .filter(|run| run.len() >= 3 && run.is_ascii())
-        .map(|run| String::from_utf8_lossy(run).to_ascii_lowercase())
-        .collect()
+fn substring_candidate_runs(query_lower: &str) -> Vec<String> {
+    let bytes = query_lower.as_bytes();
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for index in 0..=bytes.len() {
+        // Kelvin sign lowercases to `k`. Capital I with dot lowercases to
+        // `i` followed by a combining dot, so its `i` is unsafe when the
+        // query ends there or also contains that dot.
+        let safe = bytes.get(index).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric()
+                && *byte != b'k'
+                && (*byte != b'i'
+                    || (index + 1 < bytes.len()
+                        && !bytes[index + 1..].starts_with("\u{307}".as_bytes())))
+        });
+        if !safe {
+            if index.saturating_sub(start) >= 3 {
+                runs.push(query_lower[start..index].to_string());
+            }
+            start = index + 1;
+        }
+    }
+    runs
 }
 
 fn literal_candidate_term_query(

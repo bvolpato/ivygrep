@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -60,7 +59,6 @@ fn enhance(workspace: &Workspace, model: &dyn EmbeddingModel, neural: bool) -> R
     }
 }
 
-#[cfg(unix)]
 fn derived_artifacts(workspace: &Workspace) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     [
         workspace.vector_path(),
@@ -88,7 +86,6 @@ fn derived_artifacts(workspace: &Workspace) -> BTreeMap<PathBuf, Option<Vec<u8>>
 }
 
 #[test]
-#[cfg(unix)]
 #[serial]
 fn enhancement_rejects_recreated_index_even_when_generation_repeats() {
     let home = tempdir().unwrap();
@@ -232,7 +229,37 @@ fn enhancement_allows_incremental_indexing_and_drains_its_tombstones() {
 }
 
 #[test]
-#[cfg(unix)]
+#[serial]
+fn enhancement_releases_sqlite_readers_before_model_inference() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    for neural in [false, true] {
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("lib.rs"),
+            (0..2050)
+                .map(|row| format!("pub fn checkpoint_reader_{row}() {{}}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &hash).unwrap();
+        let model = model_with_mutation(|| {
+            let sqlite = open_sqlite(&workspace.sqlite_path()).unwrap();
+            sqlite.busy_timeout(std::time::Duration::ZERO).unwrap();
+            sqlite.pragma_update(None, "user_version", 1).unwrap();
+            let busy: i64 = sqlite
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(busy, 0, "model inference must not retain a SQLite reader");
+        });
+        assert_eq!(enhance(&workspace, &model, neural).unwrap(), 2050);
+        assert_current_vector_keys(&workspace, neural);
+    }
+}
+
+#[test]
 #[serial]
 fn enhancement_rejects_recreated_overlay() {
     let home = tempdir().unwrap();
@@ -267,7 +294,6 @@ fn enhancement_rejects_recreated_overlay() {
 }
 
 #[test]
-#[cfg(unix)]
 #[serial]
 fn enhancement_rejects_staged_main_recovery() {
     let home = tempdir().unwrap();
@@ -303,7 +329,6 @@ fn enhancement_rejects_staged_main_recovery() {
 }
 
 #[test]
-#[cfg(unix)]
 #[serial]
 fn enhancement_rejects_neural_checkpoint_after_replacement() {
     let home = tempdir().unwrap();

@@ -18,14 +18,17 @@ use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::{
-    BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
+    BUILD_VERSION, DaemonRequest, DaemonResponse, FileSearchResult, LiteralSearchOutput, SearchHit,
+    group_hits_by_file,
 };
 use crate::regex_search::{expand_regex_context_absolute, regex_search_with_options};
+#[cfg(test)]
+use crate::search::literal_search;
 use crate::search::{
     BOOLEAN_NOT_APPLIED_WARNING, MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_RESULT_LIMIT, SearchOptions,
-    hybrid_search_outcome, literal_search, validate_forced_neural_workspaces,
+    hybrid_search_outcome, literal_file_search, validate_forced_neural_workspaces,
 };
-use crate::search_service::{HitOrdering, SearchBatch, select_search_workspaces};
+use crate::search_service::{FileSearchBatch, HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
     resolve_workspace_and_scope,
@@ -139,7 +142,8 @@ pub struct Cli {
     #[arg(long = "interactive", visible_alias = "ui")]
     pub ui: bool,
 
-    /// Fast exact-match search backed by the index. Deterministic results.
+    /// Fast exact-match search backed by the index. Bounded searches show up to
+    /// three previews per file. Use --no-limit to show every matching line.
     #[arg(long, short = 'l')]
     pub literal: bool,
 
@@ -840,7 +844,9 @@ async fn run_status(json: bool) -> Result<()> {
     let workspaces = list_workspaces()?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&workspaces)?);
+        let mut payload = serde_json::to_value(&workspaces)?;
+        omit_unavailable_workspace_statistics(&mut payload);
+        println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if workspaces.is_empty() {
         println!("No indexed workspaces.");
         println!(
@@ -932,7 +938,9 @@ async fn run_status(json: bool) -> Result<()> {
                 }
 
                 // Chunk stats
-                if is_overlay {
+                if ws.statistics_unavailable {
+                    println!("{prefix}  Files:  Statistics temporarily unavailable");
+                } else if is_overlay {
                     println!(
                         "{prefix}  Files:  {} files, {} chunks (overlaid delta)",
                         ws.file_count, ws.chunk_count
@@ -947,35 +955,43 @@ async fn run_status(json: bool) -> Result<()> {
                 // Index size
                 let size = format_bytes(ws.index_size_bytes);
                 println!("{prefix}  Size:   {size}");
-                println!(
-                    "{prefix}          {}, lexical {}, hash {}, neural {}",
-                    format_sqlite_tiers(&ws.index_components),
-                    format_bytes(ws.index_components.lexical_bytes),
-                    format_bytes(ws.index_components.hash_vectors_bytes),
-                    format_bytes(ws.index_components.neural_vectors_bytes),
-                );
-                println!(
-                    "{prefix}          compaction {} ({:.1}% free, format v{}/{})",
-                    if ws.compaction.healthy {
-                        "healthy"
-                    } else {
-                        "attention"
-                    },
-                    ws.compaction.sqlite_free_percent,
-                    ws.compaction.format_version,
-                    ws.compaction.current_format_version,
-                );
+                if ws.statistics_unavailable {
+                    println!("{prefix}          Statistics temporarily unavailable");
+                } else {
+                    println!(
+                        "{prefix}          {}, lexical {}, hash {}, neural {}",
+                        format_sqlite_tiers(&ws.index_components),
+                        format_bytes(ws.index_components.lexical_bytes),
+                        format_bytes(ws.index_components.hash_vectors_bytes),
+                        format_bytes(ws.index_components.neural_vectors_bytes),
+                    );
+                    println!(
+                        "{prefix}          compaction {} ({:.1}% free, format v{}/{})",
+                        if ws.compaction.healthy {
+                            "healthy"
+                        } else {
+                            "attention"
+                        },
+                        ws.compaction.sqlite_free_percent,
+                        ws.compaction.format_version,
+                        ws.compaction.current_format_version,
+                    );
+                }
 
                 // Embedding status
                 if ws.enhancing_in_progress {
                     let phase = ws.enhancing_phase.as_deref().unwrap_or("background");
                     let progress_str = if let Some(count) = ws.enhancing_progress_count {
-                        let pct = if ws.chunk_count > 0 {
-                            (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
+                        if ws.statistics_unavailable {
+                            format!("({count} chunks processed), ")
                         } else {
-                            100
-                        };
-                        format!("({count} / {} chunks, ~{pct}%), ", ws.chunk_count)
+                            let pct = if ws.chunk_count > 0 {
+                                (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
+                            } else {
+                                100
+                            };
+                            format!("({count} / {} chunks, ~{pct}%), ", ws.chunk_count)
+                        }
                     } else {
                         String::new()
                     };
@@ -996,7 +1012,7 @@ async fn run_status(json: bool) -> Result<()> {
                         "{prefix}  Search: {} (run `ig --doctor` or retry a query)",
                         "⚠ stalled neural upgrade".red().bold()
                     );
-                } else if ws.has_neural_vectors {
+                } else if !ws.statistics_unavailable && ws.has_neural_vectors {
                     let pct = format!("{:.0}%", ws.neural_coverage_percent);
                     let backend = ws
                         .neural_backend
@@ -1028,7 +1044,7 @@ async fn run_status(json: bool) -> Result<()> {
                         "{prefix}  Search: {} (run `ig --doctor --fix`)",
                         "⚠ stalled indexing".red().bold()
                     );
-                } else if is_overlay {
+                } else if !ws.statistics_unavailable && is_overlay {
                     if ws.chunk_count > 0 {
                         println!(
                             "{prefix}  Search: {} (+ base neural/hash delegation)",
@@ -1056,6 +1072,11 @@ async fn run_status(json: bool) -> Result<()> {
                         );
                         println!("{prefix}          Error: {}", err_line.red());
                     }
+                } else if ws.statistics_unavailable {
+                    println!(
+                        "{prefix}  Search: {}",
+                        "Statistics temporarily unavailable".bright_black()
+                    );
                 } else if ws.chunk_count > 0 {
                     let pct = format!("{:.0}%", ws.hash_coverage_percent);
                     println!(
@@ -1085,26 +1106,73 @@ async fn run_status(json: bool) -> Result<()> {
         }
 
         // Summary
-        let total_files: u64 = workspaces.iter().map(|w| w.file_count).sum();
-        let total_chunks: u64 = workspaces.iter().map(|w| w.chunk_count).sum();
         let total_size: u64 = workspaces.iter().map(|w| w.index_size_bytes).sum();
-        let neural_count = workspaces.iter().filter(|w| w.has_neural_vectors).count();
-        println!(
-            "{}",
-            format!(
-                "{} workspace(s), {} files, {} chunks, {} on disk, {}/{} neural",
-                workspaces.len(),
-                total_files,
-                total_chunks,
-                format_bytes(total_size),
-                neural_count,
-                workspaces.len(),
-            )
-            .bright_black()
-        );
+        let unavailable = workspaces
+            .iter()
+            .filter(|ws| ws.statistics_unavailable)
+            .count();
+        if unavailable > 0 {
+            println!(
+                "{}",
+                format!(
+                    "{} workspace(s), statistics temporarily unavailable for {unavailable} workspace(s), {} on disk",
+                    workspaces.len(),
+                    format_bytes(total_size),
+                )
+                .bright_black()
+            );
+        } else {
+            let total_files: u64 = workspaces.iter().map(|w| w.file_count).sum();
+            let total_chunks: u64 = workspaces.iter().map(|w| w.chunk_count).sum();
+            let neural_count = workspaces.iter().filter(|w| w.has_neural_vectors).count();
+            println!(
+                "{}",
+                format!(
+                    "{} workspace(s), {} files, {} chunks, {} on disk, {}/{} neural",
+                    workspaces.len(),
+                    total_files,
+                    total_chunks,
+                    format_bytes(total_size),
+                    neural_count,
+                    workspaces.len(),
+                )
+                .bright_black()
+            );
+        }
     }
 
     Ok(())
+}
+
+fn omit_unavailable_workspace_statistics(payload: &mut serde_json::Value) {
+    let Some(workspaces) = payload.as_array_mut() else {
+        return;
+    };
+
+    const UNAVAILABLE_STATISTICS: [&str; 10] = [
+        "chunk_count",
+        "file_count",
+        "index_components",
+        "compaction",
+        "vector_key_count",
+        "hash_vector_count",
+        "hash_coverage_percent",
+        "has_neural_vectors",
+        "neural_vector_count",
+        "neural_coverage_percent",
+    ];
+
+    for workspace in workspaces {
+        if workspace["statistics_unavailable"] != true {
+            continue;
+        }
+        let Some(fields) = workspace.as_object_mut() else {
+            continue;
+        };
+        for key in UNAVAILABLE_STATISTICS {
+            fields.remove(key);
+        }
+    }
 }
 
 /// The SQLite part of an index size line. A status listing does not measure
@@ -1347,15 +1415,19 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
         } else if std::io::stderr().is_terminal() {
             let phase = status.enhancing_phase.as_deref().unwrap_or("background");
             let progress = if let Some(count) = status.enhancing_progress_count {
-                let percent = if status.chunk_count > 0 {
-                    (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
+                if status.statistics_unavailable {
+                    format!(" ({count} chunks processed)")
                 } else {
-                    100
-                };
-                format!(
-                    " ({} / {} chunks, ~{}%)",
-                    count, status.chunk_count, percent
-                )
+                    let percent = if status.chunk_count > 0 {
+                        (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
+                    } else {
+                        100
+                    };
+                    format!(
+                        " ({} / {} chunks, ~{}%)",
+                        count, status.chunk_count, percent
+                    )
+                }
             } else {
                 String::new()
             };
@@ -1593,9 +1665,14 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                                         } else {
                                             cached_msg = format!("indexing {progress} files...");
                                         }
+                                    } else if status.statistics_unavailable {
+                                        cached_msg = "indexing; statistics temporarily unavailable"
+                                            .to_string();
                                     } else {
                                         cached_msg = "indexing...".to_string();
                                     }
+                                } else if status.statistics_unavailable {
+                                    cached_msg = "statistics temporarily unavailable".to_string();
                                 } else {
                                     cached_msg = format!(
                                         "{} files, {} chunks indexed",
@@ -1804,41 +1881,61 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         // slow for every query. Users can `ig --add .` to force re-index.
     }
 
-    if cli.skip_gitignore && !cli.all_indices && (!cli.regex || cli.literal) {
-        #[allow(clippy::collapsible_if)]
-        if let Ok(Some(mut meta)) = workspace.read_metadata() {
-            if !meta.skip_gitignore {
-                tracing::info!(
-                    "Re-indexing workspace to include gitignore entities as requested..."
-                );
-                let search_runs_locally = context_args.is_some()
-                    || cli.symbol
-                    || cli.refs
-                    || cli.callers
-                    || cli.lexical_only;
-                if search_via_daemon && search_runs_locally {
-                    let request = crate::protocol::DaemonRequest::Index {
-                        path: workspace.root.clone(),
-                        skip_gitignore: true,
-                        watch: !cli.no_watch,
-                    };
-                    match crate::daemon::request::<fn(String, usize, usize)>(&request, false, None)
-                        .await?
-                    {
-                        Some(crate::protocol::DaemonResponse::Ack { .. }) => {}
-                        Some(crate::protocol::DaemonResponse::Error { message }) => bail!(message),
-                        Some(response) => bail!("unexpected daemon response: {response:?}"),
-                        None => search_via_daemon = false,
-                    }
+    if cli.skip_gitignore && (!cli.regex || cli.literal) {
+        let search_runs_locally =
+            context_args.is_some() || cli.symbol || cli.refs || cli.callers || cli.lexical_only;
+        let workspaces = if cli.all_indices {
+            if search_via_daemon && !search_runs_locally {
+                Vec::new()
+            } else {
+                select_search_workspaces(&workspace, true)?.workspaces
+            }
+        } else {
+            vec![workspace.clone()]
+        };
+        let mut model = None;
+        for ws in workspaces {
+            let Some(mut meta) = ws.read_metadata()? else {
+                bail!("missing workspace metadata for {}", ws.root.display());
+            };
+            if meta.skip_gitignore
+                && workspace_index_matches_skip_gitignore(&ws, true)
+                && ws.quick_index_health().is_queryable()
+            {
+                continue;
+            }
+            if cli.all_indices {
+                confirm_broad_index(&ws.root, cli.yes)?;
+            }
+            tracing::info!(
+                "Re-indexing {} to include gitignore entities as requested",
+                ws.root.display()
+            );
+            if search_via_daemon && search_runs_locally {
+                let request = crate::protocol::DaemonRequest::Index {
+                    path: ws.root.clone(),
+                    skip_gitignore: true,
+                    watch: !cli.no_watch,
+                };
+                match crate::daemon::request::<fn(String, usize, usize)>(&request, false, None)
+                    .await?
+                {
+                    Some(crate::protocol::DaemonResponse::Ack { .. }) => {}
+                    Some(crate::protocol::DaemonResponse::Error { message }) => bail!(message),
+                    Some(response) => bail!("unexpected daemon response: {response:?}"),
+                    None => search_via_daemon = false,
                 }
-                // Daemon searches reconcile mode under their per-workspace
-                // lease. Local execution must update metadata before indexing.
-                if !search_via_daemon {
+            }
+            // Daemon searches reconcile mode under their per-workspace
+            // lease. Local execution must update metadata before indexing.
+            if !search_via_daemon {
+                if !meta.skip_gitignore {
                     meta.skip_gitignore = true;
-                    let _ = workspace.write_metadata(&meta);
-                    let model = crate::embedding::create_hash_model();
-                    let _ = crate::indexer::index_workspace(&workspace, model.as_ref());
+                    ws.write_metadata(&meta)?;
                 }
+                let model = model.get_or_insert_with(crate::embedding::create_hash_model);
+                crate::indexer::index_workspace(&ws, model.as_ref())
+                    .with_context(|| format!("failed to index {}", ws.root.display()))?;
             }
         }
     }
@@ -1892,6 +1989,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         std::process::exit(0);
     }
 
+    let mut literal_files = None;
     let hits = if cli.symbol || cli.refs || cli.callers {
         let mode = if cli.symbol {
             crate::symbols::SymbolSearchMode::Definitions
@@ -1914,12 +2012,18 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         };
         local_symbol_search_hits(&workspace, cli.all_indices, query, mode, &options)?
     } else if cli.literal {
+        let output = if cli.file_name_only {
+            LiteralSearchOutput::FileNames
+        } else {
+            LiteralSearchOutput::Files
+        };
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: backend_limit,
+            limit: display_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
+            output,
             include_globs: cli.include.clone(),
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
@@ -1927,7 +2031,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             skip_gitignore: cli.skip_gitignore,
         };
         let local_options = SearchOptions {
-            limit: backend_limit,
+            limit: display_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -1939,7 +2043,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             cancel_token: None,
         };
 
-        if search_via_daemon {
+        let files = if search_via_daemon {
             match daemon::request_with_id::<fn(String, usize, usize)>(
                 &request,
                 uuid::Uuid::new_v4(),
@@ -1948,26 +2052,44 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             )
             .await?
             {
-                Some(DaemonResponse::SearchResults { hits, warnings }) => {
+                Some(DaemonResponse::LiteralFiles { files, warnings }) => {
                     report_search_warnings(&warnings);
-                    hits
+                    files
                 }
+                Some(DaemonResponse::Error { message }) if cli.skip_gitignore => bail!(message),
                 Some(DaemonResponse::Error { message }) => {
                     tracing::warn!(
                         "daemon literal search failed ({message}), falling back to local"
                     );
-                    local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
+                    local_literal_search_files(
+                        &workspace,
+                        cli.all_indices,
+                        query,
+                        &local_options,
+                        output,
+                    )?
                 }
                 other => {
+                    if cli.skip_gitignore {
+                        ensure_skip_gitignore_fallback_index(&workspace, cli.all_indices)?;
+                    }
                     tracing::warn!(
                         "daemon literal search unavailable ({other:?}), falling back to local"
                     );
-                    local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
+                    local_literal_search_files(
+                        &workspace,
+                        cli.all_indices,
+                        query,
+                        &local_options,
+                        output,
+                    )?
                 }
             }
         } else {
-            local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
-        }
+            local_literal_search_files(&workspace, cli.all_indices, query, &local_options, output)?
+        };
+        literal_files = Some(files);
+        Vec::new()
     } else if cli.regex {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
@@ -2082,7 +2204,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     report_search_warnings(&warnings);
                     hits
                 }
-                Some(DaemonResponse::Error { message }) if cli.force_neural => {
+                Some(DaemonResponse::Error { message })
+                    if cli.force_neural || cli.skip_gitignore =>
+                {
                     bail!(message)
                 }
                 Some(DaemonResponse::Error { message }) => {
@@ -2098,6 +2222,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     )?
                 }
                 other => {
+                    if cli.skip_gitignore {
+                        ensure_skip_gitignore_fallback_index(&workspace, cli.all_indices)?;
+                    }
                     tracing::warn!("daemon search unavailable ({other:?}), falling back to local");
                     local_fallback_search(
                         &workspace,
@@ -2139,14 +2266,25 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         }
     };
 
-    render_hits(
-        &hits,
-        cli.json,
-        display_limit,
-        cli.first_line_only,
-        cli.file_name_only,
-        cli.verbose,
-    )?;
+    if let Some(files) = literal_files {
+        render_file_results(
+            files,
+            cli.json,
+            display_limit,
+            cli.first_line_only,
+            cli.file_name_only,
+            cli.verbose,
+        )?;
+    } else {
+        render_hits(
+            &hits,
+            cli.json,
+            display_limit,
+            cli.first_line_only,
+            cli.file_name_only,
+            cli.verbose,
+        )?;
+    }
 
     // A separate process avoids crashes during neural-model teardown. Normal
     // queries return immediately; --wait-for-enhancement waits for durable vectors.
@@ -2178,7 +2316,27 @@ fn render_hits(
     file_name_only: bool,
     verbose: bool,
 ) -> Result<()> {
-    let mut grouped = group_hits_by_file(hits, limit);
+    render_file_results(
+        group_hits_by_file(hits, limit),
+        json,
+        limit,
+        first_line_only,
+        file_name_only,
+        verbose,
+    )
+}
+
+fn render_file_results(
+    mut grouped: Vec<FileSearchResult>,
+    json: bool,
+    limit: Option<usize>,
+    first_line_only: bool,
+    file_name_only: bool,
+    verbose: bool,
+) -> Result<()> {
+    if let Some(limit) = limit {
+        grouped.truncate(limit);
+    }
     if !verbose {
         for file in &mut grouped {
             for hit in &mut file.hits {
@@ -2255,6 +2413,17 @@ fn render_hits(
             }
         }
 
+        if file.more_hits_in_file > 0 {
+            let noun = if file.more_hits_in_file == 1 {
+                "match"
+            } else {
+                "matches"
+            };
+            println!(
+                "  {} more {noun} omitted. Use --no-limit to show them.",
+                file.more_hits_in_file,
+            );
+        }
         println!();
     }
 
@@ -2287,6 +2456,10 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
         DaemonResponse::SearchResults { hits, warnings } => {
             report_search_warnings(&warnings);
             render_hits(&hits, json, None, false, false, false)
+        }
+        DaemonResponse::LiteralFiles { files, warnings } => {
+            report_search_warnings(&warnings);
+            render_file_results(files, json, None, false, false, false)
         }
         DaemonResponse::Status { workspaces, .. } => {
             if json {
@@ -2413,6 +2586,21 @@ async fn restart_daemon() {
     let _ = daemon::request::<fn(String, usize, usize)>(&DaemonRequest::Status, true, None).await;
 }
 
+fn ensure_skip_gitignore_fallback_index(workspace: &Workspace, all_indices: bool) -> Result<()> {
+    let workspace_set = select_search_workspaces(workspace, all_indices)?;
+    for workspace in workspace_set.workspaces {
+        if !workspace_index_matches_skip_gitignore(&workspace, true)
+            || !workspace.quick_index_health().is_queryable()
+        {
+            bail!(
+                "cannot fall back to local search for {}: the --skip-gitignore index is incomplete; retry the query",
+                workspace.root.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Run a local hybrid search as a fallback when the daemon is unavailable or broken.
 fn local_fallback_search(
     workspace: &Workspace,
@@ -2493,14 +2681,14 @@ fn local_symbol_search_hits(
     finish_local_search(batch, options.limit, HitOrdering::Score)
 }
 
-fn search_workspace_with_optional_repair<F>(
+fn search_workspace_with_optional_repair<F, T>(
     workspace: &Workspace,
     skip_gitignore: bool,
     repair: bool,
     mut search: F,
-) -> Result<Vec<SearchHit>>
+) -> Result<Vec<T>>
 where
-    F: FnMut() -> Result<Vec<SearchHit>>,
+    F: FnMut() -> Result<Vec<T>>,
 {
     let first = search();
     if !repair || first.as_ref().is_ok_and(|hits| !hits.is_empty()) {
@@ -2556,14 +2744,15 @@ fn repair_unhealthy_index_for_query(workspace: &Workspace, skip_gitignore: bool)
     Ok(true)
 }
 
-fn local_literal_search_hits(
+fn local_literal_search_files(
     workspace: &Workspace,
     all_indices: bool,
     query: &str,
     options: &SearchOptions,
-) -> Result<Vec<SearchHit>> {
+    output: LiteralSearchOutput,
+) -> Result<Vec<FileSearchResult>> {
     let workspace_set = select_search_workspaces(workspace, all_indices)?;
-    let mut batch = SearchBatch::new(workspace_set.warnings);
+    let mut batch = FileSearchBatch::new(workspace_set.warnings, options.bounded_limit());
 
     for ws in workspace_set.workspaces {
         let mut workspace_options = options.clone();
@@ -2574,11 +2763,13 @@ fn local_literal_search_hits(
             &ws,
             options.skip_gitignore,
             !all_indices,
-            || literal_search(&ws, query, &workspace_options),
+            || literal_file_search(&ws, query, &workspace_options, output, all_indices),
         );
         batch.record(&ws.root, all_indices, result);
     }
-    finish_local_search(batch, options.limit, HitOrdering::Preserve)
+    let outcome = batch.finish()?;
+    report_search_warnings(&outcome.warnings);
+    Ok(outcome.files)
 }
 
 fn local_regex_search_hits(
@@ -2885,6 +3076,47 @@ mod tests {
         // A root that is not a Git checkout keeps everything below it.
         std::fs::remove_dir_all(root.join(".git")).unwrap();
         assert_eq!(nested_workspace_conflicts(&root, registered), below);
+    }
+
+    #[test]
+    fn status_json_omits_unavailable_statistics_and_keeps_progress() {
+        let mut payload = serde_json::json!([
+            {
+                "statistics_unavailable": true,
+                "chunk_count": 0,
+                "file_count": 0,
+                "index_components": {},
+                "compaction": {},
+                "vector_key_count": 0,
+                "hash_vector_count": 0,
+                "hash_coverage_percent": 0.0,
+                "has_neural_vectors": false,
+                "neural_vector_count": 0,
+                "neural_coverage_percent": 0.0,
+                "index_size_bytes": 4096,
+                "indexing_in_progress": true,
+                "indexing_progress": "120/300"
+            },
+            {
+                "statistics_unavailable": false,
+                "chunk_count": 10,
+                "file_count": 2
+            }
+        ]);
+
+        omit_unavailable_workspace_statistics(&mut payload);
+
+        assert!(payload[0].get("chunk_count").is_none());
+        assert!(payload[0].get("file_count").is_none());
+        assert!(payload[0].get("compaction").is_none());
+        assert!(payload[0].get("hash_coverage_percent").is_none());
+        assert!(payload[0].get("neural_coverage_percent").is_none());
+        assert!(payload[0].get("has_neural_vectors").is_none());
+        assert_eq!(payload[0]["statistics_unavailable"], true);
+        assert_eq!(payload[0]["index_size_bytes"], 4096);
+        assert_eq!(payload[0]["indexing_progress"], "120/300");
+        assert_eq!(payload[1]["chunk_count"], 10);
+        assert_eq!(payload[1]["file_count"], 2);
     }
 
     #[test]
@@ -3226,8 +3458,17 @@ mod tests {
         };
 
         let modes = [
-            local_literal_search_hits(&first_workspace, true, "cross_workspace_marker", &options)
-                .unwrap(),
+            local_literal_search_files(
+                &first_workspace,
+                true,
+                "cross_workspace_marker",
+                &options,
+                LiteralSearchOutput::Files,
+            )
+            .unwrap()
+            .into_iter()
+            .flat_map(|file| file.hits)
+            .collect(),
             local_regex_search_hits(&first_workspace, true, "cross_workspace_marker", &options)
                 .unwrap(),
             local_fallback_search(

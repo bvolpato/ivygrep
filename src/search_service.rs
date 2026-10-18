@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::protocol::SearchHit;
+use crate::protocol::{FileSearchResult, SearchHit};
 use crate::workspace::{Workspace, list_indexed_workspace_roots};
 
 pub(crate) struct SearchWorkspaceSet {
@@ -215,6 +215,86 @@ impl SearchBatch {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct FileSearchOutcome {
+    pub(crate) files: Vec<FileSearchResult>,
+    pub(crate) warnings: Vec<String>,
+}
+
+pub(crate) struct FileSearchBatch {
+    files: Vec<FileSearchResult>,
+    warnings: Vec<String>,
+    successful_workspaces: usize,
+    limit: Option<usize>,
+}
+
+impl FileSearchBatch {
+    pub(crate) fn new(warnings: Vec<String>, limit: Option<usize>) -> Self {
+        Self {
+            files: Vec::new(),
+            warnings,
+            successful_workspaces: 0,
+            limit,
+        }
+    }
+
+    pub(crate) fn record(
+        &mut self,
+        workspace_root: &Path,
+        absolute_paths: bool,
+        result: Result<Vec<FileSearchResult>>,
+    ) {
+        match result {
+            Ok(mut files) => {
+                self.successful_workspaces += 1;
+                if absolute_paths {
+                    for file in &mut files {
+                        file.file_path = workspace_root.join(&file.file_path);
+                        for hit in &mut file.hits {
+                            hit.file_path = workspace_root.join(&hit.file_path);
+                        }
+                    }
+                }
+                self.files.append(&mut files);
+                self.files.sort_by(|left, right| {
+                    right
+                        .hit_count
+                        .cmp(&left.hit_count)
+                        .then_with(|| left.file_path.cmp(&right.file_path))
+                });
+                if absolute_paths {
+                    // Overlapping workspaces can return the same live file.
+                    // Keep its highest-ranked result before applying the limit.
+                    let mut seen = std::collections::HashSet::new();
+                    self.files
+                        .retain(|file| seen.insert(file.file_path.clone()));
+                }
+                if let Some(limit) = self.limit {
+                    self.files.truncate(limit);
+                }
+            }
+            Err(err) => self.warnings.push(format!(
+                "search failed for {}: {err:#}",
+                workspace_root.display()
+            )),
+        }
+    }
+
+    pub(crate) fn finish(self) -> Result<FileSearchOutcome> {
+        if self.successful_workspaces == 0 && !self.warnings.is_empty() {
+            bail!("search failed: {}", self.warnings.join("; "));
+        }
+        Ok(self.finish_partial())
+    }
+
+    pub(crate) fn finish_partial(self) -> FileSearchOutcome {
+        FileSearchOutcome {
+            files: self.files,
+            warnings: self.warnings,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -273,6 +353,31 @@ mod tests {
         let outcome = batch.finish(Some(2), HitOrdering::Score).unwrap();
         assert_eq!(outcome.hits[0].file_path, PathBuf::from("c.rs"));
         assert_eq!(outcome.hits[1].file_path, PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn literal_file_batch_uses_exact_large_match_counts() {
+        let result = |path: &str, hit_count: usize| FileSearchResult {
+            file_path: PathBuf::from(path),
+            total_score: hit_count as f32,
+            hit_count,
+            more_hits_in_file: 0,
+            hit_count_is_lower_bound: false,
+            hits: Vec::new(),
+        };
+        let mut batch = FileSearchBatch::new(Vec::new(), Some(1));
+        batch.record(
+            Path::new("/repo"),
+            false,
+            Ok(vec![
+                result("a.txt", 1 << 24),
+                result("b.txt", (1 << 24) + 1),
+            ]),
+        );
+        assert_eq!(
+            batch.finish().unwrap().files[0].file_path,
+            PathBuf::from("b.txt")
+        );
     }
 
     #[test]

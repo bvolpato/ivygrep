@@ -51,7 +51,8 @@ class DistributionPackagesTest(unittest.TestCase):
         root = tomllib.loads((ROOT / "Cargo.toml").read_text())
         self.assertNotIn("patch", root)
         expected = {
-            "candle_embed": ("ivygrep-candle-embed", "=0.1.4-ivygrep.2"),
+            "candle_embed": ("ivygrep-candle-embed", "=0.1.4-ivygrep.3"),
+            "candle-core": ("ivygrep-candle-core", "=0.11.0-ivygrep.1"),
             "hf-hub": ("ivygrep-hf-hub", "=0.3.2-ivygrep.2"),
             "usearch": ("ivygrep-usearch", "=2.24.0-ivygrep.2"),
             "tree-sitter-haskell": (
@@ -65,6 +66,24 @@ class DistributionPackagesTest(unittest.TestCase):
                 self.assertEqual(config["package"], package)
                 self.assertEqual(config["version"], version)
                 self.assertTrue((ROOT / config["path"]).is_dir())
+
+        # Each published layer must refer to the same maintained tensor types.
+        forks = {
+            "candle-core-0.10.2": ("ivygrep-candle-core", "0.10.2-ivygrep.1", "candle_core"),
+            "candle-core-0.11.0": ("ivygrep-candle-core", "0.11.0-ivygrep.1", "candle_core"),
+            "candle-nn-0.10.2": ("ivygrep-candle-nn", "0.10.2-ivygrep.1", "candle_nn"),
+        }
+        for directory, (package, version, library) in forks.items():
+            with self.subTest(fork=directory):
+                manifest = tomllib.loads((ROOT / "vendor" / directory / "Cargo.toml").read_text())
+                self.assertNotIn("patch", manifest)
+                self.assertEqual(manifest["package"]["name"], package)
+                self.assertEqual(manifest["package"]["version"], version)
+                self.assertEqual(manifest["lib"]["name"], library)
+                for dependency in manifest["dependencies"].values():
+                    if isinstance(dependency, dict) and dependency.get("package", "").startswith("ivygrep-candle-"):
+                        self.assertTrue(dependency["version"].startswith("="))
+                        self.assertTrue((ROOT / "vendor" / directory / dependency["path"]).is_dir())
 
     def test_mcpb_builder_packages_each_target_and_pins_bundle_hash(self) -> None:
         package_mcpb = load_package_module()
@@ -150,10 +169,13 @@ class DistributionPackagesTest(unittest.TestCase):
         self.assertIn("mcp-publisher login github-oidc", release)
         self.assertIn("id-token: write", release)
         order = [
-            "ivygrep-hf-hub",
-            "ivygrep-candle-embed",
-            "ivygrep-usearch",
-            "ivygrep-tree-sitter-haskell",
+            "publish vendor/hf-hub/Cargo.toml ivygrep-hf-hub",
+            "publish vendor/candle-core-0.10.2/Cargo.toml ivygrep-candle-core",
+            "publish vendor/candle-core-0.11.0/Cargo.toml ivygrep-candle-core",
+            "publish vendor/candle-nn-0.10.2/Cargo.toml ivygrep-candle-nn",
+            "publish vendor/candle_embed/Cargo.toml ivygrep-candle-embed",
+            "publish vendor/usearch/Cargo.toml ivygrep-usearch",
+            "publish vendor/tree-sitter-haskell/Cargo.toml ivygrep-tree-sitter-haskell",
             'publish Cargo.toml ivygrep "$MAIN_VERSION"',
         ]
         positions = [crates.index(package) for package in order]

@@ -28,4 +28,12 @@ storage, installers, update path, and published release artifacts. Vulnerabiliti
 in upstream models or dependencies remain useful when ivygrep exposes or
 amplifies their impact.
 
+## Automated checks
+
+The Security workflow audits locked Rust dependencies, secrets in the current
+checkout, and GitHub Actions workflows. The CodeQL workflow analyzes Rust and
+JavaScript/TypeScript on pull requests, pushes to `main`, and weekly. CodeQL uses
+source analysis without a full project build. Rust extraction may run build
+scripts, and coverage of generated build output is not guaranteed.
+
 [report]: https://github.com/bvolpato/ivygrep/security/advisories/new
