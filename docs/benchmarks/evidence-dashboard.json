@@ -8,10 +8,10 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "9aa7555e0725ac8f6328431a8712f783c2352f512e9c708d4e7e15026e5f99f9",
-      "source_commit": "fdceb0b4a2836c1798e2215c3869568a623c0a43",
+      "sha256": "e4400951ba13501a6f8eb85e2247b2c89c98388f3360ea54e76b908cabd4d0aa",
+      "source_commit": "243cd0b3b7370ccc29f15cfe53cbd0b7e7ab9f15",
       "summary": {
-        "binary_sha256": "6836b50675da1b47bd3caa43d3a4200b209b1c9bf61636e367814f4a497bf980",
+        "binary_sha256": "826d49acf3b309cc0738116f9956219af6b56872ccaebfd895f15ce023da77c2",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "6b877037ff957ca5ee5093e0aa55472a5cd40163c50741f37664e1daabeb8654"
@@ -33,7 +33,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 3227.7598710206803,
+            "elapsed_ms": 2169.2284340097103,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -68,7 +68,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 3755.1076159870718,
+            "elapsed_ms": 2518.915733002359,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -103,7 +103,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 3390.111215005163,
+            "elapsed_ms": 2471.8566020019352,
             "filter_misses": [],
             "low_rank_misses": [],
             "mean_candidate_recall": 0.96,
