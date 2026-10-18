@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "81f85d2a1f2912346668d1bab0974641108c1eb952dc9b6f1b7fc2c672f4026b",
+    "sha256": "6836b50675da1b47bd3caa43d3a4200b209b1c9bf61636e367814f4a497bf980",
     "version": "ivygrep 1.3.1"
   },
   "fixture": {
@@ -11,31 +11,32 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "7fe9ec205a36e5eb38f8e4efe6e03146369e9380",
+  "ivygrep_commit": "ef8a6b2407795bdb72b37931e6634fa1d4e77593",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 3,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 23
+        "satisfied": 22
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 1943.1375960120931,
+      "elapsed_ms": 11315.515444002813,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "doctor-health"
+        "doctor-health",
+        "indexing-pipeline"
       ],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.98,
-      "mean_mrr": 0.9457142857142857,
-      "mean_ndcg10": 0.9105145786365402,
-      "mean_p1": 0.92,
+      "mean_mrr": 0.9257142857142857,
+      "mean_ndcg10": 0.8975349760811856,
+      "mean_p1": 0.88,
       "mean_p5": 0.2,
       "mean_recall5": 0.9,
       "mode": "foreground",
@@ -45,31 +46,32 @@
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.92
+      "satisfaction_rate": 0.88
     },
     "hash-enriched": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 3,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 23
+        "satisfied": 22
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 2234.7346099850256,
+      "elapsed_ms": 12383.369473012863,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "doctor-health"
+        "doctor-health",
+        "indexing-pipeline"
       ],
       "mean_candidate_recall": 0.98,
       "mean_hybrid_deep_recall": 0.98,
-      "mean_mrr": 0.9457142857142857,
-      "mean_ndcg10": 0.9105145786365402,
-      "mean_p1": 0.92,
+      "mean_mrr": 0.9257142857142857,
+      "mean_ndcg10": 0.8975349760811856,
+      "mean_p1": 0.88,
       "mean_p5": 0.2,
       "mean_recall5": 0.9,
       "mode": "hash-enriched",
@@ -79,7 +81,7 @@
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.92
+      "satisfaction_rate": 0.88
     },
     "neural": {
       "audit_stage_counts": {
@@ -88,29 +90,29 @@
         "candidate_budget": 0,
         "first_useful_low": 0,
         "no_primary_judgment": 0,
-        "not_audited": 2,
-        "satisfied": 23
+        "not_audited": 3,
+        "satisfied": 22
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 2632.617099006893,
+      "elapsed_ms": 4175.000657007331,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.96,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.9457142857142857,
-      "mean_ndcg10": 0.9105145786365402,
-      "mean_p1": 0.92,
+      "mean_mrr": 0.9257142857142857,
+      "mean_ndcg10": 0.8975349760811856,
+      "mean_p1": 0.88,
       "mean_p5": 0.2,
       "mean_recall5": 0.9,
       "mode": "neural",
       "neural_queries_executed": 25,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 22,
+      "neural_queries_with_results": 21,
       "no_hit_queries": 0,
       "queries": 25,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.92
+      "satisfaction_rate": 0.88
     }
   },
   "runtime": {
@@ -132,6 +134,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "7a551fa273074d46d2f60a96f7fc3214719a1b7a8db8d475ff66ea908c49f0e6"
+    "sha256": "901fab8408205201ef88e7b424e3c8de14f62922bcecc5af815b27790908cd50"
   }
 }
