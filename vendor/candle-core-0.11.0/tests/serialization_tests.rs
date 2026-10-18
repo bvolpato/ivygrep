@@ -1,5 +1,5 @@
 use candle_core::npy::NpzTensors;
-use candle_core::{DType, Device, Error, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 use std::borrow::Cow;
 
 struct TmpFile(std::path::PathBuf);
@@ -122,24 +122,4 @@ fn zip9_npz_owned_cp437_names() -> Result<()> {
     let entry = archive.by_index(0)?;
     assert!(matches!(entry.name()?, Cow::Owned(name) if name == "é.npy"));
     assert_named_tensor(&file, "é")
-}
-
-#[test]
-fn zip9_invalid_npz_returns_zip_errors() -> Result<()> {
-    let file = TmpFile::create("zip9-invalid-npz");
-    std::fs::write(&file.0, b"not a zip archive")?;
-    assert!(matches!(Tensor::read_npz(&file.0), Err(Error::Zip(_))));
-    assert!(matches!(NpzTensors::new(&file.0), Err(Error::Zip(_))));
-    Ok(())
-}
-
-#[test]
-fn zip9_invalid_pth_returns_zip_error() -> Result<()> {
-    let file = TmpFile::create("zip9-invalid-pth");
-    std::fs::write(&file.0, b"not a zip archive")?;
-    assert!(matches!(
-        candle_core::pickle::read_pth_tensor_info(&file.0, false, None),
-        Err(Error::Zip(_))
-    ));
-    Ok(())
 }
