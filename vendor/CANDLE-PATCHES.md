@@ -16,6 +16,8 @@ The core error-function and NN CPU-attention modules omit legacy `std::f64`
 and `std::f32` imports so their infinity constants resolve to the primitive
 associated constants. This preserves their values and calculations while
 supporting the repository's deny-warnings builds on current stable Rust.
+The 0.11 core also omits an unused Metal binary-kernel import; individual
+operations retain their existing locally scoped kernel imports.
 
 Both manifests use ZIP >=9.0.3 (locked to 9.0.5) instead of the yanked ZIP 7.2.0 and 8.6.0 releases,
 which are affected by RUSTSEC-2026-0367, RUSTSEC-2026-0368, and
