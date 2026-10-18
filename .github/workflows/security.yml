@@ -32,27 +32,80 @@ jobs:
         run: cargo install cargo-audit --version 0.22.1 --locked
 
       - name: Audit locked dependencies
+        id: audit
         run: |
           set -Eeuo pipefail
           audit_report="$RUNNER_TEMP/cargo-audit.json"
+          audit_summary="$RUNNER_TEMP/cargo-audit-summary.md"
           audit_status=0
-          cargo audit --deny yanked --deny unsound --json > "$audit_report" || audit_status=$?
-          if [[ -s "$audit_report" ]]; then
-            unmaintained_count="$(jq '.warnings.unmaintained | length' "$audit_report")"
+          if cargo audit --deny yanked --deny unsound --json > "$audit_report"; then
+            :
+          else
+            audit_status=$?
+          fi
+
+          if [[ ! -s "$audit_report" ]] || ! jq -e 'type == "object"' "$audit_report" >/dev/null; then
+            echo "report_created=false" >> "$GITHUB_OUTPUT"
+            echo "cargo audit did not produce JSON output" >&2
             {
               echo "### Rust dependency audit"
               echo
-              echo "Denied classes: yanked and unsound. Unmaintained dependencies remain informational until a safe replacement exists."
-              echo
-              echo "Unmaintained warnings: $unmaintained_count"
-              if ((unmaintained_count > 0)); then
-                jq -r '.warnings.unmaintained[] | "- `\(.package.name) \(.package.version)` (\(.advisory.id)): \(.advisory.title)"' "$audit_report"
-              fi
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "cargo audit did not produce JSON output" >&2
+              echo "cargo audit did not produce valid JSON output."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            if ((audit_status == 0)); then
+              audit_status=1
+            fi
+            exit "$audit_status"
           fi
+
+          echo "report_created=true" >> "$GITHUB_OUTPUT"
+          jq -r '
+            . as $report
+            | "### Rust dependency audit\n\n"
+              + "Policy: `--deny yanked --deny unsound`; unmaintained warnings are informational.\n\n"
+              + "#### Finding counts\n\n"
+              + "- Vulnerabilities: \(($report.vulnerabilities.list // []) | length)\n"
+              + "- Unsound warnings: \(($report.warnings.unsound // []) | length)\n"
+              + "- Yanked warnings: \(($report.warnings.yanked // []) | length)\n"
+              + "- Unmaintained warnings (informational): \(($report.warnings.unmaintained // []) | length)\n\n"
+              + ([
+                  ["Vulnerabilities", ($report.vulnerabilities.list // [])],
+                  ["Unsound", ($report.warnings.unsound // [])],
+                  ["Yanked", ($report.warnings.yanked // [])],
+                  ["Unmaintained (informational)", ($report.warnings.unmaintained // [])]
+                ]
+                | map(
+                    .[0] as $label
+                    | .[1] as $findings
+                    | "#### \($label) (\($findings | length))\n\n"
+                      + if ($findings | length) == 0 then
+                          "No findings.\n\n"
+                        else
+                          ($findings | map(
+                            "- `\(.package.name // "unknown")@\(.package.version // "unknown")`"
+                            + (if .advisory.id then " (\(.advisory.id))" else "" end)
+                            + (if .advisory.title then ": \(.advisory.title)" else "" end)
+                            + (if (.versions.patched // [] | length) > 0 then
+                                 " (patched: \(.versions.patched | join(", ")))"
+                               else "" end)
+                          ) | join("\n")) + "\n\n"
+                        end
+                  ) | join(""))
+          ' "$audit_report" > "$audit_summary"
+
+          tee -a "$GITHUB_STEP_SUMMARY" < "$audit_summary"
+          echo "Full cargo-audit JSON report:"
+          jq . "$audit_report"
           exit "$audit_status"
+
+      - name: Upload cargo-audit JSON
+        if: always() && steps.audit.outputs.report_created == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cargo-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cargo-audit.json
+          if-no-files-found: error
+          retention-days: 14
 
   secrets:
     name: Secret scan
