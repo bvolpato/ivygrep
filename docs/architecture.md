@@ -621,10 +621,9 @@ match (context lines keep their start), cut on character boundaries and marked
 with `…`, so one hit cannot return megabytes of text. Line numbers and the line
 count stay unchanged.
 
-Literal searches retain at most the requested hit count per file and per parallel
-partial result set. They preserve path/span ordering without materializing every
-matching snippet; source-file reads and explicit unbounded output retain their
-existing memory costs.
+File-oriented literal searches rank files by matching-line count and path, then apply the file limit. A bounded search streams counts and reads selected files to build up to three previews per file. It reports omitted matches. Filename-only output streams counts and skips preview construction. When there is one candidate, it can stop counting after a match and the binary-sniff prefix. In normal output, `--no-limit` retains every matching preview and can use more memory.
+
+The hit-oriented literal API retains at most the requested hit count per file and per parallel partial result set. It preserves path and span ordering without materializing every matching snippet.
 
 Literal and regex searches also verify files the indexer walked but stored
 without chunks, such as minified bundles. Candidates are Merkle snapshot paths
