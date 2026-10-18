@@ -164,6 +164,11 @@ codegen-units = 1
 [profile.dev.package.gemm-f16]
 opt-level = 1
 
+# Keep the existing model APIs while upstream Candle adopts the secure ZIP API.
+[patch.crates-io]
+candle-core-010 = { package = "candle-core", path = "vendor/candle-core-0.10.2" }
+candle-core-011 = { package = "candle-core", path = "vendor/candle-core-0.11.0" }
+
 [[bench]]
 name = "indexer_bench"
 harness = false
