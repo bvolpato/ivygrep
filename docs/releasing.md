@@ -67,10 +67,10 @@ before the root crate version that requires it. GitHub release archives do not
 prove that crates.io publication succeeded.
 
 The ZIP security repair prepares `ivygrep-candle-core` 0.10.2-ivygrep.1 and
-0.11.0-ivygrep.1, `ivygrep-candle-nn`, `ivygrep-candle-flash-attn`, and `ivygrep-candle-transformers`
-0.10.2-ivygrep.1, and `ivygrep-candle-embed` 0.1.4-ivygrep.3. The manual workflow
-publishes the tensor cores before NN and FlashAttention, then Transformers and
-the embedder. First
+0.11.0-ivygrep.1, `ivygrep-candle-nn` 0.10.2-ivygrep.1, and
+`ivygrep-candle-embed` 0.1.4-ivygrep.3. The embedder contains only the upstream
+BERT implementation it uses, without the unrelated Transformers models. The
+manual workflow publishes the tensor cores before NN and the embedder. First
 publication of a new fork requires the `bootstrap` input and `CRATES_IO_TOKEN`;
 later releases can use trusted publishing after it is configured for each crate.
 Preparing or merging these manifests does not publish any crate.

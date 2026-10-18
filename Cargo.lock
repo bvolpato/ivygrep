@@ -1369,17 +1369,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fancy-regex"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
-dependencies = [
- "bit-set 0.8.0",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
 name = "fast-srgb8"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2689,10 +2678,11 @@ dependencies = [
  "anyhow",
  "ivygrep-candle-core 0.10.2-ivygrep.1",
  "ivygrep-candle-nn",
- "ivygrep-candle-transformers",
  "ivygrep-hf-hub",
+ "serde",
  "serde_json",
  "tokenizers 0.19.1",
+ "tracing",
 ]
 
 [[package]]
@@ -2709,23 +2699,6 @@ dependencies = [
  "safetensors 0.7.0",
  "serde",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "ivygrep-candle-transformers"
-version = "0.10.2-ivygrep.1"
-dependencies = [
- "byteorder",
- "fancy-regex 0.17.0",
- "ivygrep-candle-core 0.10.2-ivygrep.1",
- "ivygrep-candle-nn",
- "num-traits",
- "rand 0.9.3",
- "rayon",
- "serde",
- "serde_json",
- "serde_plain",
- "tracing",
 ]
 
 [[package]]
@@ -4560,15 +4533,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_plain"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ce1fc6db65a611022b23a0dec6975d63fb80a302cb3388835ff02c097258d50"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5121,7 +5085,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bitflags 2.13.0",
- "fancy-regex 0.11.0",
+ "fancy-regex",
  "filedescriptor",
  "finl_unicode",
  "fixedbitset",

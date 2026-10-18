@@ -72,8 +72,6 @@ class DistributionPackagesTest(unittest.TestCase):
             "candle-core-0.10.2": ("ivygrep-candle-core", "0.10.2-ivygrep.1", "candle_core"),
             "candle-core-0.11.0": ("ivygrep-candle-core", "0.11.0-ivygrep.1", "candle_core"),
             "candle-nn-0.10.2": ("ivygrep-candle-nn", "0.10.2-ivygrep.1", "candle_nn"),
-            "candle-flash-attn-0.10.2": ("ivygrep-candle-flash-attn", "0.10.2-ivygrep.1", "candle_flash_attn"),
-            "candle-transformers-0.10.2": ("ivygrep-candle-transformers", "0.10.2-ivygrep.1", "candle_transformers"),
         }
         for directory, (package, version, library) in forks.items():
             with self.subTest(fork=directory):
@@ -175,8 +173,6 @@ class DistributionPackagesTest(unittest.TestCase):
             "publish vendor/candle-core-0.10.2/Cargo.toml ivygrep-candle-core",
             "publish vendor/candle-core-0.11.0/Cargo.toml ivygrep-candle-core",
             "publish vendor/candle-nn-0.10.2/Cargo.toml ivygrep-candle-nn",
-            "publish vendor/candle-flash-attn-0.10.2/Cargo.toml ivygrep-candle-flash-attn",
-            "publish vendor/candle-transformers-0.10.2/Cargo.toml ivygrep-candle-transformers",
             "publish vendor/candle_embed/Cargo.toml ivygrep-candle-embed",
             "publish vendor/usearch/Cargo.toml ivygrep-usearch",
             "publish vendor/tree-sitter-haskell/Cargo.toml ivygrep-tree-sitter-haskell",

@@ -84,8 +84,6 @@ jobs:
             "vendor/candle-core-0.10.2/Cargo.toml|ivygrep-candle-core|0.10.2-ivygrep.1" \
             "vendor/candle-core-0.11.0/Cargo.toml|ivygrep-candle-core|0.11.0-ivygrep.1" \
             "vendor/candle-nn-0.10.2/Cargo.toml|ivygrep-candle-nn|0.10.2-ivygrep.1" \
-            "vendor/candle-flash-attn-0.10.2/Cargo.toml|ivygrep-candle-flash-attn|0.10.2-ivygrep.1" \
-            "vendor/candle-transformers-0.10.2/Cargo.toml|ivygrep-candle-transformers|0.10.2-ivygrep.1" \
             "vendor/candle_embed/Cargo.toml|ivygrep-candle-embed|0.1.4-ivygrep.3" \
             "vendor/usearch/Cargo.toml|ivygrep-usearch|2.24.0-ivygrep.2" \
             "vendor/tree-sitter-haskell/Cargo.toml|ivygrep-tree-sitter-haskell|0.23.1-ivygrep.1"; do
@@ -232,8 +230,6 @@ jobs:
           publish vendor/candle-core-0.10.2/Cargo.toml ivygrep-candle-core 0.10.2-ivygrep.1
           publish vendor/candle-core-0.11.0/Cargo.toml ivygrep-candle-core 0.11.0-ivygrep.1
           publish vendor/candle-nn-0.10.2/Cargo.toml ivygrep-candle-nn 0.10.2-ivygrep.1
-          publish vendor/candle-flash-attn-0.10.2/Cargo.toml ivygrep-candle-flash-attn 0.10.2-ivygrep.1
-          publish vendor/candle-transformers-0.10.2/Cargo.toml ivygrep-candle-transformers 0.10.2-ivygrep.1
           publish vendor/candle_embed/Cargo.toml ivygrep-candle-embed 0.1.4-ivygrep.3
           publish vendor/usearch/Cargo.toml ivygrep-usearch 2.24.0-ivygrep.2
           publish vendor/tree-sitter-haskell/Cargo.toml ivygrep-tree-sitter-haskell 0.23.1-ivygrep.1
