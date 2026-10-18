@@ -7,7 +7,7 @@ keywords=["cuda", "embeddings", "huggingface", "search", "vectors"]
 license="MIT"
 name="ivygrep-candle-embed"
 repository="https://github.com/bvolpato/ivygrep"
-version="0.1.4-ivygrep.2"
+version="0.1.4-ivygrep.3"
 
 [lib]
 name="candle_embed"
@@ -15,9 +15,9 @@ path="src/lib.rs"
 
 [dependencies]
 anyhow="1.0.82"
-candle={version="0.10.2", package="candle-core", default-features=false}
-candle-transformers="0.10.2"
-candle_nn={version="0.10.2", package="candle-nn", default-features=false}
+candle={version="=0.10.2-ivygrep.1", package="ivygrep-candle-core", path="../candle-core-0.10.2", default-features=false}
+candle-transformers={version="=0.10.2-ivygrep.1", package="ivygrep-candle-transformers", path="../candle-transformers-0.10.2"}
+candle_nn={version="=0.10.2-ivygrep.1", package="ivygrep-candle-nn", path="../candle-nn-0.10.2", default-features=false}
 hf-hub={package="ivygrep-hf-hub", path="../hf-hub", version="=0.3.2-ivygrep.2", features=["tokio"]}
 serde_json="1.0.116"
 tokenizers="0.19.1"

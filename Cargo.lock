@@ -391,65 +391,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
-name = "candle-core"
-version = "0.10.2"
-dependencies = [
- "byteorder",
- "candle-kernels 0.10.2",
- "candle-metal-kernels 0.10.2",
- "candle-ug 0.10.2",
- "cudarc 0.19.8",
- "float8",
- "gemm 0.19.0",
- "half",
- "libm",
- "memmap2",
- "num-traits",
- "num_cpus",
- "objc2-foundation",
- "objc2-metal",
- "rand 0.9.3",
- "rand_distr",
- "rayon",
- "safetensors 0.7.0",
- "thiserror 2.0.18",
- "tokenizers 0.22.2",
- "yoke 0.8.2",
- "zip",
-]
-
-[[package]]
-name = "candle-core"
-version = "0.11.0"
-dependencies = [
- "accelerate-src",
- "byteorder",
- "candle-kernels 0.11.0",
- "candle-metal-kernels 0.11.0",
- "candle-ug 0.11.0",
- "cudarc 0.19.8",
- "float8",
- "gemm 0.19.0",
- "half",
- "libc",
- "libm",
- "memmap2",
- "num-traits",
- "num_cpus",
- "objc2-foundation",
- "objc2-metal",
- "rand 0.9.3",
- "rand_distr",
- "rayon",
- "safetensors 0.8.0",
- "thiserror 2.0.18",
- "tokenizers 0.22.2",
- "yoke 0.8.2",
- "zerocopy",
- "zip",
-]
-
-[[package]]
 name = "candle-kernels"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,43 +436,6 @@ dependencies = [
  "objc2-metal",
  "once_cell",
  "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "candle-nn"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87"
-dependencies = [
- "candle-core 0.10.2",
- "candle-metal-kernels 0.10.2",
- "half",
- "libc",
- "num-traits",
- "objc2-metal",
- "rayon",
- "safetensors 0.7.0",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "candle-transformers"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f59d08c89e9f4af9c464e2f3a8e16199e7cc601e6f34538c2cfbb42b623b1783"
-dependencies = [
- "byteorder",
- "candle-core 0.10.2",
- "candle-nn",
- "fancy-regex 0.17.0",
- "num-traits",
- "rand 0.9.3",
- "rayon",
- "serde",
- "serde_json",
- "serde_plain",
  "tracing",
 ]
 
@@ -2638,7 +2542,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "assert_cmd",
- "candle-core 0.11.0",
  "clap",
  "colored",
  "criterion",
@@ -2653,6 +2556,7 @@ dependencies = [
  "hex",
  "ignore",
  "insta",
+ "ivygrep-candle-core 0.11.0-ivygrep.1",
  "ivygrep-candle-embed",
  "ivygrep-hf-hub",
  "ivygrep-tree-sitter-haskell",
@@ -2720,16 +2624,108 @@ dependencies = [
 ]
 
 [[package]]
+name = "ivygrep-candle-core"
+version = "0.10.2-ivygrep.1"
+dependencies = [
+ "byteorder",
+ "candle-kernels 0.10.2",
+ "candle-metal-kernels 0.10.2",
+ "candle-ug 0.10.2",
+ "cudarc 0.19.8",
+ "float8",
+ "gemm 0.19.0",
+ "half",
+ "libm",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "objc2-foundation",
+ "objc2-metal",
+ "rand 0.9.3",
+ "rand_distr",
+ "rayon",
+ "safetensors 0.7.0",
+ "thiserror 2.0.18",
+ "tokenizers 0.22.2",
+ "yoke 0.8.2",
+ "zip",
+]
+
+[[package]]
+name = "ivygrep-candle-core"
+version = "0.11.0-ivygrep.1"
+dependencies = [
+ "accelerate-src",
+ "byteorder",
+ "candle-kernels 0.11.0",
+ "candle-metal-kernels 0.11.0",
+ "candle-ug 0.11.0",
+ "cudarc 0.19.8",
+ "float8",
+ "gemm 0.19.0",
+ "half",
+ "libc",
+ "libm",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "objc2-foundation",
+ "objc2-metal",
+ "rand 0.9.3",
+ "rand_distr",
+ "rayon",
+ "safetensors 0.8.0",
+ "thiserror 2.0.18",
+ "tokenizers 0.22.2",
+ "yoke 0.8.2",
+ "zerocopy",
+ "zip",
+]
+
+[[package]]
 name = "ivygrep-candle-embed"
-version = "0.1.4-ivygrep.2"
+version = "0.1.4-ivygrep.3"
 dependencies = [
  "anyhow",
- "candle-core 0.10.2",
- "candle-nn",
- "candle-transformers",
+ "ivygrep-candle-core 0.10.2-ivygrep.1",
+ "ivygrep-candle-nn",
+ "ivygrep-candle-transformers",
  "ivygrep-hf-hub",
  "serde_json",
  "tokenizers 0.19.1",
+]
+
+[[package]]
+name = "ivygrep-candle-nn"
+version = "0.10.2-ivygrep.1"
+dependencies = [
+ "candle-metal-kernels 0.10.2",
+ "half",
+ "ivygrep-candle-core 0.10.2-ivygrep.1",
+ "libc",
+ "num-traits",
+ "objc2-metal",
+ "rayon",
+ "safetensors 0.7.0",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ivygrep-candle-transformers"
+version = "0.10.2-ivygrep.1"
+dependencies = [
+ "byteorder",
+ "fancy-regex 0.17.0",
+ "ivygrep-candle-core 0.10.2-ivygrep.1",
+ "ivygrep-candle-nn",
+ "num-traits",
+ "rand 0.9.3",
+ "rayon",
+ "serde",
+ "serde_json",
+ "serde_plain",
+ "tracing",
 ]
 
 [[package]]
