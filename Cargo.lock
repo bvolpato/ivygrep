@@ -2719,7 +2719,7 @@ dependencies = [
 
 [[package]]
 name = "ivygrep-candle-embed"
-version = "0.1.4-ivygrep.3"
+version = "0.1.4-ivygrep.4"
 dependencies = [
  "anyhow",
  "ivygrep-candle-core 0.10.2-ivygrep.1",
@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "ivygrep-hf-hub"
-version = "0.3.2-ivygrep.2"
+version = "0.3.2-ivygrep.3"
 dependencies = [
  "dirs 5.0.1",
  "futures",
@@ -2759,11 +2759,13 @@ dependencies = [
  "num_cpus",
  "rand 0.8.6",
  "reqwest",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "ureq",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -4428,9 +4430,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -6321,14 +6323,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.6",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.6"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Model downloads use TLS verifier and root certificate versions that exclude the keys and root affected by the emSign distrust advisories. The vendored Hub client requires the patched versions even when a consumer resolves dependencies without the ivygrep lockfile.
+
 ## [1.3.1] - 2026-10-18
 
 ### Changed
