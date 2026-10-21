@@ -137,7 +137,7 @@ impl CacheRepo {
     pub fn get(&self, filename: &str) -> Option<PathBuf> {
         let commit_path = self.ref_path();
         let commit_hash = std::fs::read_to_string(commit_path).ok()?;
-        let mut pointer_path = self.pointer_path(&commit_hash);
+        let mut pointer_path = self.pointer_path(commit_hash.trim()).ok()?;
         pointer_path.push(filename);
         if pointer_path.exists() {
             Some(pointer_path)
@@ -162,30 +162,50 @@ impl CacheRepo {
     /// Creates a reference in the cache directory that points branches to the correct
     /// commits within the blobs.
     pub fn create_ref(&self, commit_hash: &str) -> Result<(), std::io::Error> {
+        let commit_hash = commit_hash.trim();
+        validate_cache_hash(commit_hash)?;
         let ref_path = self.ref_path();
         // Needs to be done like this because revision might contain `/` creating subfolders here.
         std::fs::create_dir_all(ref_path.parent().unwrap())?;
         let mut file1 = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&ref_path)?;
-        file1.write_all(commit_hash.trim().as_bytes())?;
+        file1.write_all(commit_hash.as_bytes())?;
         Ok(())
     }
 
     #[cfg(feature = "online")]
-    pub(crate) fn blob_path(&self, etag: &str) -> PathBuf {
+    pub(crate) fn blob_path(&self, etag: &str) -> Result<PathBuf, std::io::Error> {
+        validate_cache_hash(etag)?;
         let mut blob_path = self.path();
         blob_path.push("blobs");
         blob_path.push(etag);
-        blob_path
+        Ok(blob_path)
     }
 
-    pub(crate) fn pointer_path(&self, commit_hash: &str) -> PathBuf {
+    pub(crate) fn pointer_path(&self, commit_hash: &str) -> Result<PathBuf, std::io::Error> {
+        validate_cache_hash(commit_hash)?;
         let mut pointer_path = self.path();
         pointer_path.push("snapshots");
         pointer_path.push(commit_hash);
-        pointer_path
+        Ok(pointer_path)
+    }
+}
+
+fn is_cache_hash(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_cache_hash(value: &str) -> Result<(), std::io::Error> {
+    if is_cache_hash(value) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid Hub cache hash",
+        ))
     }
 }
 

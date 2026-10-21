@@ -144,6 +144,14 @@ impl ApiBuilder {
         self
     }
 
+    /// Sets the endpoint used for Hub requests.
+    ///
+    /// The configured token is sent to this endpoint. Use HTTPS for remote endpoints.
+    pub fn with_endpoint(mut self, endpoint: String) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
     /// Sets the token to be used in the API
     pub fn with_token(mut self, token: Option<String>) -> Self {
         self.token = token;
@@ -273,18 +281,27 @@ impl Api {
         let header_linked_etag = "x-linked-etag";
         let header_etag = "etag";
 
-        let etag = match response.header(header_linked_etag) {
-            Some(etag) => etag,
-            None => response
-                .header(header_etag)
-                .ok_or(ApiError::MissingHeader(header_etag))?,
+        let (etag_header, etag) = match response.header(header_linked_etag) {
+            Some(etag) => (header_linked_etag, etag),
+            None => (
+                header_etag,
+                response
+                    .header(header_etag)
+                    .ok_or(ApiError::MissingHeader(header_etag))?,
+            ),
         };
         // Cleaning extra quotes
         let etag = etag.to_string().replace('"', "");
+        if !crate::is_cache_hash(&etag) {
+            return Err(ApiError::InvalidHeader(etag_header));
+        }
         let commit_hash = response
             .header(header_commit)
             .ok_or(ApiError::MissingHeader(header_commit))?
             .to_string();
+        if !crate::is_cache_hash(&commit_hash) {
+            return Err(ApiError::InvalidHeader(header_commit));
+        }
 
         // The response was redirected o S3 most likely which will
         // know about the size of the file
@@ -446,7 +463,7 @@ impl ApiRepo {
             .api
             .cache
             .repo(self.repo.clone())
-            .blob_path(&metadata.etag);
+            .blob_path(&metadata.etag)?;
         std::fs::create_dir_all(blob_path.parent().unwrap())?;
 
         let progressbar = if self.api.progress {
@@ -477,7 +494,7 @@ impl ApiRepo {
             .api
             .cache
             .repo(self.repo.clone())
-            .pointer_path(&metadata.commit_hash);
+            .pointer_path(&metadata.commit_hash)?;
         pointer_path.push(filename);
         std::fs::create_dir_all(pointer_path.parent().unwrap()).ok();
 
