@@ -14,6 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   IVYGREP_NO_AUTOSPAWN: "1"
+  UV_EXCLUDE_NEWER: "7 days"
 
 permissions:
   contents: read
@@ -52,11 +53,14 @@ jobs:
       - name: ShellCheck scripts
         run: shellcheck install.sh build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_tmp.sh scripts/e2e_all.sh scripts/e2e_web_ui.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
 
+      - name: Set npm seven-day release cutoff
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "NPM_CONFIG_BEFORE=" + new Date(Date.now() - 7 * 86400000).toISOString() + "\n")'
+
       - name: Install pnpm
         run: npm install -g pnpm@10.33.0
 
       - name: Lint Markdown
-        run: pnpm dlx markdownlint-cli2@0.23.2
+        run: npm exec --yes --package=markdownlint-cli2@0.23.2 -- markdownlint-cli2
 
       - name: Verify web frontend
         run: |
@@ -338,6 +342,8 @@ jobs:
       - name: Install uv for neural model caching
         if: matrix.validate_backend != ''
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.11.14
 
       - name: Validate local neural execution
         if: matrix.validate_backend != ''
@@ -398,6 +404,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.11.14
 
       - name: Build hash-only daemon
         run: cargo build --locked --no-default-features --bin ig
