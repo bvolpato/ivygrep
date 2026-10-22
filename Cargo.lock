@@ -2719,7 +2719,7 @@ dependencies = [
 
 [[package]]
 name = "ivygrep-candle-embed"
-version = "0.1.4-ivygrep.4"
+version = "0.1.4-ivygrep.5"
 dependencies = [
  "anyhow",
  "ivygrep-candle-core 0.10.2-ivygrep.1",
@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "ivygrep-hf-hub"
-version = "0.3.2-ivygrep.3"
+version = "0.3.2-ivygrep.4"
 dependencies = [
  "dirs 5.0.1",
  "futures",

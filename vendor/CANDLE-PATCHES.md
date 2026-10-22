@@ -27,7 +27,7 @@ adaptation follows upstream PR 4041, commit
 `70f72e9cfdbfc570846ca363ead2135394af3e9a`:
 <https://github.com/huggingface/candle/pull/4041>.
 
-The normalized manifests rename these packages to `ivygrep-candle-core` and `ivygrep-candle-nn`, with the upstream version followed by `-ivygrep.1`. Library names remain unchanged. NN and `ivygrep-candle-embed` 0.1.4-ivygrep.4 use the same exact maintained core version. The embedder includes private copies of the BERT implementation and its helpers, described in `candle_embed/CANDLE-SOURCES.md`; unrelated Transformers models and FlashAttention are not dependencies. The public embedder API, model mathematics, and CUDA/Metal forwarding are unchanged. Versioned path dependencies preserve the graph after crates.io normalization without relying on root-only Cargo patches.
+The normalized manifests rename these packages to `ivygrep-candle-core` and `ivygrep-candle-nn`, with the upstream version followed by `-ivygrep.1`. Library names remain unchanged. NN and `ivygrep-candle-embed` 0.1.4-ivygrep.5 use the same exact maintained core version. The embedder includes private copies of the BERT implementation and its helpers, described in `candle_embed/CANDLE-SOURCES.md`; unrelated Transformers models and FlashAttention are not dependencies. The public embedder API, model mathematics, and CUDA/Metal forwarding are unchanged. Versioned path dependencies preserve the graph after crates.io normalization without relying on root-only Cargo patches.
 
 The manual publication workflow prepares dependency order and requires separate
 publication of these versions before the root crate. See `docs/releasing.md`.
