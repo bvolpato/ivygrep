@@ -4,12 +4,7 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-
-- Model downloads use TLS verifier and root certificate versions that exclude the keys and root affected by the emSign distrust advisories. The vendored Hub client requires the patched versions even when a consumer resolves dependencies without the ivygrep lockfile.
-- Model downloads reject Hub ETags and commit IDs that are not 40- or 64-character hexadecimal hashes. A crafted response could previously direct a cache write outside the cache. Invalid cached references are ignored. This change does not verify model file digests or protect a cache directory that another local user can modify.
-
-## [1.3.1] - 2026-10-18
+## [1.3.1] - 2026-10-23
 
 ### Changed
 
@@ -27,6 +22,8 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Model downloads use TLS verifier and root certificate versions that exclude the keys and root affected by the emSign distrust advisories. The vendored Hub client requires the patched versions even when a consumer resolves dependencies without the ivygrep lockfile.
+- Model downloads reject Hub ETags and commit IDs that are not 40- or 64-character hexadecimal hashes. A crafted response could previously direct a cache write outside the cache. Invalid cached references are ignored. This change does not verify model file digests or protect a cache directory that another local user can modify.
 - Failed `--skip-gitignore` reindexes report their errors and retry on the next query. Local `--all-indices` searches prepare each selected workspace, and daemon failures cannot silently return results from an incomplete index.
 - Literal search limits files instead of matching chunks, counts matching lines exactly, bounds previews, and preserves Unicode matches when the trigram index cannot safely narrow candidates. Files are ranked by match count and path, including unlimited output. Selected files that change during a search trigger candidate reconsideration. The daemon protocol advances to version 10 while retaining legacy limits for version 8 and 9 clients.
 - E2E daemon checks choose socket-safe temporary paths on Unix, including long or multibyte `TMPDIR` values. Standalone daemon equivalence retains its requested artifacts while using a private shorter socket alias when necessary.
@@ -45,6 +42,8 @@ All notable changes to ivygrep are documented in this file.
 
 ### Security
 
+- Update Markdown rendering to markdown-it 15.0.3 to fix quadratic parsing of multiline link references.
+- Render the documentation typing animation with text nodes so escaped command text stays literal.
 - Update Rustls to 0.23.46 and replace yanked ZIP 7.2.0 and 8.6.0 with ZIP 9.0.5, resolving the dependency audit findings without suppressions. Vendored Candle 0.10.2 and 0.11.0 retain their published model APIs and licenses, with upstream-compatible fallible archive filename handling until a compatible Candle release is available.
 - A CodeQL workflow analyzes Rust and JavaScript/TypeScript on pull requests, pushes to `main`, weekly, and manual dispatch. It complements the dependency, secret, and workflow audits. Analysis skips a full project build; coverage of generated build output is not guaranteed.
 
