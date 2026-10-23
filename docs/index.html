@@ -762,7 +762,8 @@ Signals: lexical, symbol, git change.</pre>
             const prompt = document.createElement('span');
             prompt.className = 'prompt';
             prompt.textContent = '$';
-            const command = document.createTextNode(' ');
+            const command = document.createElement('span');
+            command.textContent = ' ';
             typingEl.replaceChildren(prompt, command);
             const outputs = document.querySelectorAll('.output');
             outputs.forEach(out => { out.style.transform = 'translateY(8px)'; });
@@ -770,7 +771,7 @@ Signals: lexical, symbol, git change.</pre>
             setTimeout(() => {
                 let i = 0;
                 const interval = setInterval(() => {
-                    command.data = ' ' + textToType.substring(0, i + 1);
+                    command.textContent = ' ' + textToType.substring(0, i + 1);
                     i++;
                     if (i >= textToType.length) {
                         clearInterval(interval);
