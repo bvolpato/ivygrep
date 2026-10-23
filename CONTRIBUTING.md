@@ -25,6 +25,10 @@ Required:
 
 Repository toolchain configuration installs `rustfmt` and Clippy automatically.
 
+Configured npm and uv installs use a seven-day release-age cutoff. Dependabot
+also waits seven days before selecting new package releases. Keep these age
+checks when updating tools or regenerating lockfiles.
+
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git
 cd ivygrep
