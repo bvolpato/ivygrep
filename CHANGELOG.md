@@ -13,7 +13,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Changed
 
-- Dependabot uses seven-day cooldowns, and configured npm and uv installs reject newly published package releases until they are seven days old.
+- Dependabot uses seven-day cooldowns, and configured npm and uv resolutions reject newly published package releases until they are seven days old. pnpm 11 enforces the cutoff without falling back to a too-new version.
 - `ig --status` no longer reads every page of a large SQLite store. It measured the store tiers (stored chunks, graph, auxiliary) with three full `dbstat` passes, which took 450 seconds for an index with an 8.3 GB store. The MCP status tool, the web UI, and the progress display of a first index ran the same passes. A status listing now measures the tiers in one pass, and only for a store up to 256 MiB. For a larger store, `index_components` has no `stored_chunks_bytes`, `graph_bytes`, or `sqlite_auxiliary_bytes`, and the text output shows the size of the whole store. `ig --doctor` always measures the tiers. The legacy call graph check reads only the legacy tables, so a current store costs no pass.
 - A search, `ig --interactive`, or `ig --add` that would index your home directory, a directory that contains it, or the filesystem root now asks for confirmation first. A search in the wrong directory could start hours of indexing and use many gigabytes. Without a terminal, `ig` does not build that index and reports the reason. Pass `--yes` (`-y`) to build it without the question. An index of such a directory that already exists is used as before, unless the command rebuilds it (`--add --force`) or adds the ignored files to it (`--skip-gitignore`).
 - An index run of a clean Git checkout starts 6 Git processes instead of 16. One `git status` gives the commit and the state of the worktree, one `git rev-parse` gives both Git paths, and one `git config` gives `core.excludesFile` and the sparse-checkout settings. Before the clean-checkout shortcut returns, and after an index update, ivygrep no longer reads the complete state a second time. It runs one `git status` and reads the Git index and the ignore files again.
@@ -46,6 +46,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Security
 
+- CI uses patched Node.js 22.23.4 and uv 0.13.5 bootstrap binaries to reject certificate chains containing compromised emSign intermediate keys. These critical bootstrap exceptions do not disable the seven-day dependency cutoff.
 - Update Rustls to 0.23.46 and replace yanked ZIP 7.2.0 and 8.6.0 with ZIP 9.0.5, resolving the dependency audit findings without suppressions. Vendored Candle 0.10.2 and 0.11.0 retain their published model APIs and licenses, with upstream-compatible fallible archive filename handling until a compatible Candle release is available.
 - A CodeQL workflow analyzes Rust and JavaScript/TypeScript on pull requests, pushes to `main`, weekly, and manual dispatch. It complements the dependency, secret, and workflow audits. Analysis skips a full project build; coverage of generated build output is not guaranteed.
 
