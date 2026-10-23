@@ -14,6 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   IVYGREP_NO_AUTOSPAWN: "1"
+  UV_EXCLUDE_NEWER: "7 days"
 
 permissions:
   contents: read
@@ -52,11 +53,19 @@ jobs:
       - name: ShellCheck scripts
         run: shellcheck install.sh build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_tmp.sh scripts/e2e_all.sh scripts/e2e_web_ui.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
 
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.4
+
+      - name: Set npm seven-day release cutoff
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "NPM_CONFIG_BEFORE=" + new Date(Date.now() - 7 * 86400000).toISOString() + "\n")'
+
       - name: Install pnpm
-        run: npm install -g pnpm@10.33.0
+        run: npm install -g pnpm@11.0.0
 
       - name: Lint Markdown
-        run: pnpm dlx markdownlint-cli2@0.23.2
+        run: npm exec --yes --package=markdownlint-cli2@0.23.2 -- markdownlint-cli2
 
       - name: Verify web frontend
         run: |
@@ -338,6 +347,8 @@ jobs:
       - name: Install uv for neural model caching
         if: matrix.validate_backend != ''
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.13.5
 
       - name: Validate local neural execution
         if: matrix.validate_backend != ''
@@ -367,10 +378,25 @@ jobs:
           IVYGREP_MODEL_PROFILE: ${{ matrix.model_profile }}
           MODEL_PROFILE: ${{ matrix.model_profile }}
 
+      - name: Install Node.js for Web UI E2E
+        if: runner.os == 'Linux' && matrix.cargo_flags == ''
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.4
+
+      - name: Set npm seven-day release cutoff for Web UI E2E
+        if: runner.os == 'Linux' && matrix.cargo_flags == ''
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const before = new Date(Date.now() - 7 * 86400000).toISOString();
+            fs.appendFileSync(process.env.GITHUB_ENV, "NPM_CONFIG_BEFORE=" + before + "\n");
+          '
+
       - name: Install Playwright Chromium for Web UI E2E
         if: runner.os == 'Linux' && matrix.cargo_flags == ''
         run: |
-          npm install -g pnpm@10.33.0
+          npm install -g pnpm@11.0.0
           pnpm -C web install --frozen-lockfile
           pnpm -C web exec playwright install chromium
 
@@ -398,6 +424,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.13.5
 
       - name: Build hash-only daemon
         run: cargo build --locked --no-default-features --bin ig
