@@ -136,6 +136,14 @@ impl ApiBuilder {
         self
     }
 
+    /// Sets the endpoint used for Hub requests.
+    ///
+    /// The configured token is sent to this endpoint. Use HTTPS for remote endpoints.
+    pub fn with_endpoint(mut self, endpoint: String) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
     /// Sets the token to be used in the API
     pub fn with_token(mut self, token: Option<String>) -> Self {
         self.token = token;
@@ -288,19 +296,28 @@ impl Api {
         let header_linked_etag = HeaderName::from_static("x-linked-etag");
         let header_etag = HeaderName::from_static("etag");
 
-        let etag = match headers.get(&header_linked_etag) {
-            Some(etag) => etag,
-            None => headers
-                .get(&header_etag)
-                .ok_or(ApiError::MissingHeader(header_etag))?,
+        let (etag_header, etag) = match headers.get(&header_linked_etag) {
+            Some(etag) => (header_linked_etag, etag),
+            None => (
+                header_etag.clone(),
+                headers
+                    .get(&header_etag)
+                    .ok_or(ApiError::MissingHeader(header_etag))?,
+            ),
         };
         // Cleaning extra quotes
         let etag = etag.to_str()?.to_string().replace('"', "");
+        if !crate::is_cache_hash(&etag) {
+            return Err(ApiError::InvalidHeader(etag_header));
+        }
         let commit_hash = headers
             .get(&header_commit)
-            .ok_or(ApiError::MissingHeader(header_commit))?
+            .ok_or(ApiError::MissingHeader(header_commit.clone()))?
             .to_str()?
             .to_string();
+        if !crate::is_cache_hash(&commit_hash) {
+            return Err(ApiError::InvalidHeader(header_commit));
+        }
 
         // The response was redirected o S3 most likely which will
         // know about the size of the file
@@ -527,7 +544,7 @@ impl ApiRepo {
         let metadata = self.api.metadata(&url).await?;
         let cache = self.api.cache.repo(self.repo.clone());
 
-        let blob_path = cache.blob_path(&metadata.etag);
+        let blob_path = cache.blob_path(&metadata.etag)?;
         std::fs::create_dir_all(blob_path.parent().unwrap())?;
 
         let progressbar = if self.api.progress {
@@ -556,7 +573,7 @@ impl ApiRepo {
 
         tokio::fs::rename(&tmp_filename, &blob_path).await?;
 
-        let mut pointer_path = cache.pointer_path(&metadata.commit_hash);
+        let mut pointer_path = cache.pointer_path(&metadata.commit_hash)?;
         pointer_path.push(filename);
         std::fs::create_dir_all(pointer_path.parent().unwrap()).ok();
 
