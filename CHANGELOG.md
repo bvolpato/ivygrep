@@ -4,15 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-
-- Model downloads use TLS verifier and root certificate versions that exclude the keys and root affected by the emSign distrust advisories. The vendored Hub client requires the patched versions even when a consumer resolves dependencies without the ivygrep lockfile.
-- Model downloads reject Hub ETags and commit IDs that are not 40- or 64-character hexadecimal hashes. A crafted response could previously direct a cache write outside the cache. Invalid cached references are ignored. This change does not verify model file digests or protect a cache directory that another local user can modify.
-
-## [1.3.1] - 2026-10-18
+## [1.3.1] - 2026-10-28
 
 ### Changed
 
+- Release retrieval checks audit candidate coverage consistently across search modes and retain per-query metrics when a validation gate fails. Final top-20 recall remains a separate metric.
 - `ig --status` no longer reads every page of a large SQLite store. It measured the store tiers (stored chunks, graph, auxiliary) with three full `dbstat` passes, which took 450 seconds for an index with an 8.3 GB store. The MCP status tool, the web UI, and the progress display of a first index ran the same passes. A status listing now measures the tiers in one pass, and only for a store up to 256 MiB. For a larger store, `index_components` has no `stored_chunks_bytes`, `graph_bytes`, or `sqlite_auxiliary_bytes`, and the text output shows the size of the whole store. `ig --doctor` always measures the tiers. The legacy call graph check reads only the legacy tables, so a current store costs no pass.
 - A search, `ig --interactive`, or `ig --add` that would index your home directory, a directory that contains it, or the filesystem root now asks for confirmation first. A search in the wrong directory could start hours of indexing and use many gigabytes. Without a terminal, `ig` does not build that index and reports the reason. Pass `--yes` (`-y`) to build it without the question. An index of such a directory that already exists is used as before, unless the command rebuilds it (`--add --force`) or adds the ignored files to it (`--skip-gitignore`).
 - An index run of a clean Git checkout starts 6 Git processes instead of 16. One `git status` gives the commit and the state of the worktree, one `git rev-parse` gives both Git paths, and one `git config` gives `core.excludesFile` and the sparse-checkout settings. Before the clean-checkout shortcut returns, and after an index update, ivygrep no longer reads the complete state a second time. It runs one `git status` and reads the Git index and the ignore files again.
@@ -27,6 +23,8 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Model downloads use TLS verifier and root certificate versions that exclude the keys and root affected by the emSign distrust advisories. The vendored Hub client requires the patched versions even when a consumer resolves dependencies without the ivygrep lockfile.
+- Model downloads reject Hub ETags and commit IDs that are not 40- or 64-character hexadecimal hashes. A crafted response could previously direct a cache write outside the cache. Invalid cached references are ignored. This change does not verify model file digests or protect a cache directory that another local user can modify.
 - Failed `--skip-gitignore` reindexes report their errors and retry on the next query. Local `--all-indices` searches prepare each selected workspace, and daemon failures cannot silently return results from an incomplete index.
 - Literal search limits files instead of matching chunks, counts matching lines exactly, bounds previews, and preserves Unicode matches when the trigram index cannot safely narrow candidates. Files are ranked by match count and path, including unlimited output. Selected files that change during a search trigger candidate reconsideration. The daemon protocol advances to version 10 while retaining legacy limits for version 8 and 9 clients.
 - E2E daemon checks choose socket-safe temporary paths on Unix, including long or multibyte `TMPDIR` values. Standalone daemon equivalence retains its requested artifacts while using a private shorter socket alias when necessary.
@@ -45,6 +43,10 @@ All notable changes to ivygrep are documented in this file.
 
 ### Security
 
+- Update zstd to 0.14.3 and zstd-safe to 8.2.0, including Tantivy's transitive dependencies, to fix stream context data leaks and memory safety advisories. Narrow versioned Tantivy forks preserve existing compressed indexes and the pinned search implementation.
+- Update the Windows clipboard dependency to unyanked clipboard-win 5.4.2, which fixes out-of-bounds reads of malformed HTML clipboard fragments. IvyGrep uses plain-text clipboard writes.
+- Update Markdown rendering to markdown-it 15.0.3 to fix quadratic parsing of multiline link references.
+- Render the documentation typing animation with text nodes so escaped command text stays literal.
 - Update Rustls to 0.23.46 and replace yanked ZIP 7.2.0 and 8.6.0 with ZIP 9.0.5, resolving the dependency audit findings without suppressions. Vendored Candle 0.10.2 and 0.11.0 retain their published model APIs and licenses, with upstream-compatible fallible archive filename handling until a compatible Candle release is available.
 - A CodeQL workflow analyzes Rust and JavaScript/TypeScript on pull requests, pushes to `main`, weekly, and manual dispatch. It complements the dependency, secret, and workflow audits. Analysis skips a full project build; coverage of generated build output is not guaranteed.
 

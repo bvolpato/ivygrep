@@ -383,7 +383,8 @@ def main() -> int:
             final_first_rank = first_relevant_rank(paths, case.judgments)
             deep_first_rank = None
             deep_recall = 0.0
-            candidate_recall = relevant_recall(paths, case.judgments)
+            final_recall = relevant_recall(paths, case.judgments)
+            candidate_recall = final_recall
             candidate_audit_sources = ["final"]
             audit_stage = (
                 AUDIT_SATISFIED
@@ -464,6 +465,7 @@ def main() -> int:
                 "audit_stage": audit_stage,
                 "hybrid_deep_first_relevant_rank": deep_first_rank,
                 "hybrid_deep_recall": deep_recall,
+                "final_recall": final_recall,
                 "candidate_recall": candidate_recall,
                 "candidate_audit_sources": candidate_audit_sources,
                 "audit_hits": audit_hits,
@@ -501,7 +503,16 @@ def main() -> int:
             "satisfaction_k": args.satisfaction_k,
             "satisfaction_rate": mean([1.0 if r["satisfied"] else 0.0 for r in rows]),
             "mean_hybrid_deep_recall": mean([r["hybrid_deep_recall"] for r in rows]),
+            "mean_final_recall": mean([r["final_recall"] for r in rows]),
             "mean_candidate_recall": mean([r["candidate_recall"] for r in rows]),
+            "candidate_recall_audited": args.audit_recall,
+            "query_metrics": [
+                {key: row[key] for key in (
+                    "id", "mrr", "ndcg10", "final_recall", "candidate_recall",
+                    "audit_stage", "neural_executed",
+                )}
+                for row in rows
+            ],
             "audit_stage_counts": stage_counts,
             "candidate_recall_misses": [
                 r["id"] for r in rows if r["audit_stage"] == AUDIT_BEFORE_FUSION

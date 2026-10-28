@@ -385,6 +385,7 @@ class PublicBenchmarkTest(unittest.TestCase):
                         "mean_ndcg10": 1.0,
                         "mean_mrr": 1.0,
                         "mean_candidate_recall": 1.0,
+                        "candidate_recall_audited": True,
                         "no_hit_queries": 0,
                     },
                     "hash-enriched": {
@@ -392,6 +393,7 @@ class PublicBenchmarkTest(unittest.TestCase):
                         "mean_ndcg10": 1.0,
                         "mean_mrr": 1.0,
                         "mean_candidate_recall": 1.0,
+                        "candidate_recall_audited": True,
                         "no_hit_queries": 0,
                     },
                 },
