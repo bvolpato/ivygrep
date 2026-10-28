@@ -1,3 +1,7 @@
 web/dist/** -whitespace
+# Preserve upstream formatting in the Tantivy compatibility forks.
+vendor/tantivy/** -whitespace
+vendor/tantivy-columnar/** -whitespace
+vendor/tantivy-sstable/** -whitespace
 benchmarks/public/reranker_model.json text eol=lf
 benchmarks/public/reranker_fit_query_ids.json text eol=lf

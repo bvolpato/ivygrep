@@ -4,7 +4,7 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [1.3.1] - 2026-10-23
+## [1.3.1] - 2026-10-28
 
 ### Changed
 
@@ -42,6 +42,8 @@ All notable changes to ivygrep are documented in this file.
 
 ### Security
 
+- Update zstd to 0.14.3 and zstd-safe to 8.2.0, including Tantivy's transitive dependencies, to fix stream context data leaks and memory safety advisories. Narrow versioned Tantivy forks preserve existing compressed indexes and the pinned search implementation.
+- Update the Windows clipboard dependency to unyanked clipboard-win 5.4.2, which fixes out-of-bounds reads of malformed HTML clipboard fragments. IvyGrep uses plain-text clipboard writes.
 - Update Markdown rendering to markdown-it 15.0.3 to fix quadratic parsing of multiline link references.
 - Render the documentation typing animation with text nodes so escaped command text stays literal.
 - Update Rustls to 0.23.46 and replace yanked ZIP 7.2.0 and 8.6.0 with ZIP 9.0.5, resolving the dependency audit findings without suppressions. Vendored Candle 0.10.2 and 0.11.0 retain their published model APIs and licenses, with upstream-compatible fallible archive filename handling until a compatible Candle release is available.

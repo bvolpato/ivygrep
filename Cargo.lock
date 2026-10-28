@@ -614,9 +614,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clipboard-win"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+checksum = "39ed3668f121a65e4ce95efeba22ad1f8ad6c6628397a5dd773118514a5e1804"
 dependencies = [
  "error-code",
 ]
@@ -2594,6 +2594,7 @@ dependencies = [
  "ivygrep-candle-core 0.11.0-ivygrep.1",
  "ivygrep-candle-embed",
  "ivygrep-hf-hub",
+ "ivygrep-tantivy",
  "ivygrep-tree-sitter-haskell",
  "ivygrep-usearch",
  "libc",
@@ -2617,7 +2618,6 @@ dependencies = [
  "smallvec",
  "streaming-iterator",
  "syntect",
- "tantivy",
  "tempfile",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
@@ -2655,7 +2655,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "xxhash-rust",
- "zstd 0.14.2",
+ "zstd",
 ]
 
 [[package]]
@@ -2766,6 +2766,84 @@ dependencies = [
  "tokio",
  "ureq",
  "webpki-roots 1.0.10",
+]
+
+[[package]]
+name = "ivygrep-tantivy"
+version = "0.27.0-ivygrep.1"
+dependencies = [
+ "aho-corasick",
+ "arc-swap",
+ "base64 0.22.1",
+ "bitpacking",
+ "bon",
+ "byteorder",
+ "census",
+ "crc32fast",
+ "crossbeam-channel",
+ "datasketches",
+ "downcast-rs",
+ "fastdivide",
+ "fnv",
+ "fs4",
+ "htmlescape",
+ "itertools 0.14.0",
+ "ivygrep-tantivy-columnar",
+ "levenshtein_automata",
+ "log",
+ "lru",
+ "lz4_flex",
+ "measure_time",
+ "memmap2",
+ "once_cell",
+ "oneshot",
+ "rayon",
+ "regex",
+ "rust-stemmers",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sketches-ddsketch",
+ "smallvec",
+ "tantivy-bitpacker",
+ "tantivy-common",
+ "tantivy-fst",
+ "tantivy-query-grammar",
+ "tantivy-stacker",
+ "tantivy-tokenizer-api",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "typetag",
+ "unwrap-infallible",
+ "uuid",
+ "winapi",
+]
+
+[[package]]
+name = "ivygrep-tantivy-columnar"
+version = "0.7.0-ivygrep.1"
+dependencies = [
+ "downcast-rs",
+ "fastdivide",
+ "itertools 0.14.0",
+ "ivygrep-tantivy-sstable",
+ "serde",
+ "tantivy-bitpacker",
+ "tantivy-common",
+ "tantivy-stacker",
+]
+
+[[package]]
+name = "ivygrep-tantivy-sstable"
+version = "0.7.0-ivygrep.1"
+dependencies = [
+ "futures-util",
+ "itertools 0.14.0",
+ "tantivy-bitpacker",
+ "tantivy-common",
+ "tantivy-fst",
+ "zstd",
 ]
 
 [[package]]
@@ -4949,79 +5027,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "tantivy"
-version = "0.27.0"
-source = "git+https://github.com/quickwit-oss/tantivy?rev=5ca39332002c2c87fb5d2abc707cf527b3319d42#5ca39332002c2c87fb5d2abc707cf527b3319d42"
-dependencies = [
- "aho-corasick",
- "arc-swap",
- "base64 0.22.1",
- "bitpacking",
- "bon",
- "byteorder",
- "census",
- "crc32fast",
- "crossbeam-channel",
- "datasketches",
- "downcast-rs",
- "fastdivide",
- "fnv",
- "fs4",
- "htmlescape",
- "itertools 0.14.0",
- "levenshtein_automata",
- "log",
- "lru",
- "lz4_flex",
- "measure_time",
- "memmap2",
- "once_cell",
- "oneshot",
- "rayon",
- "regex",
- "rust-stemmers",
- "rustc-hash",
- "serde",
- "serde_json",
- "sketches-ddsketch",
- "smallvec",
- "tantivy-bitpacker",
- "tantivy-columnar",
- "tantivy-common",
- "tantivy-fst",
- "tantivy-query-grammar",
- "tantivy-stacker",
- "tantivy-tokenizer-api",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "typetag",
- "unwrap-infallible",
- "uuid",
- "winapi",
-]
-
-[[package]]
 name = "tantivy-bitpacker"
 version = "0.10.0"
 source = "git+https://github.com/quickwit-oss/tantivy?rev=5ca39332002c2c87fb5d2abc707cf527b3319d42#5ca39332002c2c87fb5d2abc707cf527b3319d42"
 dependencies = [
  "bitpacking",
-]
-
-[[package]]
-name = "tantivy-columnar"
-version = "0.7.0"
-source = "git+https://github.com/quickwit-oss/tantivy?rev=5ca39332002c2c87fb5d2abc707cf527b3319d42#5ca39332002c2c87fb5d2abc707cf527b3319d42"
-dependencies = [
- "downcast-rs",
- "fastdivide",
- "itertools 0.14.0",
- "serde",
- "tantivy-bitpacker",
- "tantivy-common",
- "tantivy-sstable",
- "tantivy-stacker",
 ]
 
 [[package]]
@@ -5057,19 +5067,6 @@ dependencies = [
  "ordered-float 5.3.0",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "tantivy-sstable"
-version = "0.7.0"
-source = "git+https://github.com/quickwit-oss/tantivy?rev=5ca39332002c2c87fb5d2abc707cf527b3319d42#5ca39332002c2c87fb5d2abc707cf527b3319d42"
-dependencies = [
- "futures-util",
- "itertools 0.14.0",
- "tantivy-bitpacker",
- "tantivy-common",
- "tantivy-fst",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -7002,29 +6999,11 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 7.2.4",
-]
-
-[[package]]
-name = "zstd"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057cfd910cfac363a0ada849592624b4c9ff2e10bef504c3433810d78ed96f93"
-dependencies = [
- "zstd-safe 8.2.0",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]
