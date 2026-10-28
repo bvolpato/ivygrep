@@ -144,6 +144,8 @@ def validate_report(
                 f"the {expected_queries} current fixture queries"
             )
         else:
+            if measured.get("candidate_recall_audited") is not True:
+                errors.append(f"{mode} candidate recall was not audited")
             for metric, minimum in MIN_RELEVANCE_METRICS.items():
                 value = measured.get(metric)
                 if (
@@ -207,7 +209,7 @@ def measure(binary: Path, *, require_neural: bool = False) -> dict:
         ("hash-enriched", ["--enhance-hash"]),
     ]
     if require_neural:
-        evaluated_modes.append(("neural", ["--neural", "--no-audit-recall"]))
+        evaluated_modes.append(("neural", ["--neural"]))
 
     for mode, flags in evaluated_modes:
         result = subprocess.run(
@@ -271,9 +273,6 @@ def measure(binary: Path, *, require_neural: bool = False) -> dict:
         },
         "modes": modes,
     }
-    errors = validate_report(report, require_neural=require_neural)
-    if errors:
-        raise ValueError("; ".join(errors))
     return report
 
 
@@ -303,6 +302,10 @@ def main() -> int:
     report = measure(args.binary, require_neural=args.require_neural)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    errors = validate_report(report, require_neural=args.require_neural)
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
     print(f"wrote {args.output} for {report['binary']['version']}")
     return 0
 

@@ -1,5 +1,7 @@
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -7,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +48,7 @@ class ReleaseArtifactTest(unittest.TestCase):
         quality = {
             "queries": 1, "mean_ndcg10": 1.0, "mean_mrr": 1.0,
             "mean_candidate_recall": 1.0, "no_hit_queries": 0,
+            "candidate_recall_audited": True,
             "neural_queries_executed": 1, "neural_queries_unobservable": 0,
         }
         report = {
@@ -87,6 +91,39 @@ class ReleaseArtifactTest(unittest.TestCase):
             report["modes"].pop("neural")
             path.write_text(json.dumps(report))
             self.assertTrue(any("missing neural" in error for error in readiness.validate_release(root, "v1.2.13")))
+
+    def test_release_preflight_rejects_unaudited_candidate_recall(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.release_fixture(root)
+            path = root / "docs/benchmarks/current-head-relevance.json"
+            original = json.loads(path.read_text())
+            for mode in ("foreground", "hash-enriched", "neural"):
+                with self.subTest(mode=mode):
+                    report = json.loads(json.dumps(original))
+                    report["modes"][mode]["candidate_recall_audited"] = False
+                    path.write_text(json.dumps(report))
+                    errors = readiness.validate_release(root, "v1.2.13")
+                    self.assertTrue(any(f"{mode} candidate recall was not audited" in error for error in errors))
+
+    def test_failed_relevance_measurement_preserves_its_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.release_fixture(root)
+            output = root / "failed-relevance.json"
+            report = json.loads((root / "docs/benchmarks/current-head-relevance.json").read_text())
+            report["modes"]["neural"]["mean_candidate_recall"] = 0.1
+            report["modes"]["neural"]["query_metrics"] = [{"id": "one", "candidate_recall": 0.1}]
+            relevance = readiness.relevance
+            validate = relevance.validate_report
+            errors = io.StringIO()
+            with mock.patch.object(sys, "argv", ["benchmark", "--require-neural", "--output", str(output)]), \
+                 mock.patch.object(relevance, "measure", return_value=report), \
+                 mock.patch.object(relevance, "validate_report", side_effect=lambda value, **kwargs: validate(value, root=root, **kwargs)), \
+                 contextlib.redirect_stderr(errors):
+                self.assertEqual(relevance.main(), 1)
+            self.assertEqual(json.loads(output.read_text()), report)
+            self.assertIn("neural mean_candidate_recall 0.1 is below minimum 0.95", errors.getvalue())
 
     def test_checksum_requires_matching_archive_name_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
