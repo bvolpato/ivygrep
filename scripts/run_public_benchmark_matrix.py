@@ -4,6 +4,8 @@
 # dependencies = [
 #   "datasets>=3,<5",
 # ]
+# [tool.uv]
+# exclude-newer = "7 days"
 # ///
 """Prepare and run the pinned public code-retrieval benchmark matrix."""
 

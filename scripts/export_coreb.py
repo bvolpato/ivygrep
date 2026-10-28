@@ -5,6 +5,8 @@
 #   "pyarrow>=18,<22",
 #   "requests>=2.32,<3",
 # ]
+# [tool.uv]
+# exclude-newer = "7 days"
 # ///
 """Export pinned CoREB data into ivygrep retrieval benchmark layouts."""
 
