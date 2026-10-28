@@ -8,10 +8,10 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "2e2860a8058a285069c60e9991c742feac2f40a5ab008c99169df141a4e4c6d2",
-      "source_commit": "fed06bd8cc9f2118e7ae5e397ddeb01511a5b57a",
+      "sha256": "7276d0808b24a460136744b25276796437f90c460a42080068a97a194b5bfa54",
+      "source_commit": "07e814bb12bea4c3d1357e190927ec0d5d25ddef",
       "summary": {
-        "binary_sha256": "4578a863f6780cc9f046165ea2ef53f6cb965fdbb3e55d9b44ba7bb68db2f59f",
+        "binary_sha256": "d0ab8a7617075792a41db245d2073b67e91ebcfbe8b819e5b9d1455d34de89f7",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "6b877037ff957ca5ee5093e0aa55472a5cd40163c50741f37664e1daabeb8654"
@@ -26,25 +26,26 @@
               "after_filtering": 0,
               "before_fusion": 0,
               "candidate_budget": 0,
-              "first_useful_low": 3,
+              "first_useful_low": 4,
               "no_primary_judgment": 0,
               "not_audited": 0,
-              "satisfied": 22
+              "satisfied": 21
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 2691.811530967243,
+            "elapsed_ms": 4119.138448033482,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
               "doctor-health",
+              "identifier-tokenization",
               "indexing-pipeline"
             ],
             "mean_candidate_recall": 0.98,
             "mean_hybrid_deep_recall": 0.98,
-            "mean_mrr": 0.9257142857142857,
-            "mean_ndcg10": 0.8975349760811856,
-            "mean_p1": 0.88,
+            "mean_mrr": 0.9057142857142857,
+            "mean_ndcg10": 0.882772166224044,
+            "mean_p1": 0.84,
             "mean_p5": 0.2,
             "mean_recall5": 0.9,
             "mode": "foreground",
@@ -54,32 +55,33 @@
             "no_hit_queries": 0,
             "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.88
+            "satisfaction_rate": 0.84
           },
           "hash-enriched": {
             "audit_stage_counts": {
               "after_filtering": 0,
               "before_fusion": 0,
               "candidate_budget": 0,
-              "first_useful_low": 3,
+              "first_useful_low": 4,
               "no_primary_judgment": 0,
               "not_audited": 0,
-              "satisfied": 22
+              "satisfied": 21
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 2875.492515042424,
+            "elapsed_ms": 4412.953233113512,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
               "doctor-health",
+              "identifier-tokenization",
               "indexing-pipeline"
             ],
             "mean_candidate_recall": 0.98,
             "mean_hybrid_deep_recall": 0.98,
-            "mean_mrr": 0.9257142857142857,
-            "mean_ndcg10": 0.8975349760811856,
-            "mean_p1": 0.88,
+            "mean_mrr": 0.9057142857142857,
+            "mean_ndcg10": 0.882772166224044,
+            "mean_p1": 0.84,
             "mean_p5": 0.2,
             "mean_recall5": 0.9,
             "mode": "hash-enriched",
@@ -89,7 +91,7 @@
             "no_hit_queries": 0,
             "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.88
+            "satisfaction_rate": 0.84
           },
           "neural": {
             "audit_stage_counts": {
@@ -98,29 +100,29 @@
               "candidate_budget": 0,
               "first_useful_low": 0,
               "no_primary_judgment": 0,
-              "not_audited": 3,
-              "satisfied": 22
+              "not_audited": 4,
+              "satisfied": 21
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 2739.5150340162218,
+            "elapsed_ms": 3183.570174034685,
             "filter_misses": [],
             "low_rank_misses": [],
             "mean_candidate_recall": 0.96,
             "mean_hybrid_deep_recall": 0.0,
-            "mean_mrr": 0.9257142857142857,
-            "mean_ndcg10": 0.8975349760811856,
-            "mean_p1": 0.88,
+            "mean_mrr": 0.9057142857142857,
+            "mean_ndcg10": 0.882772166224044,
+            "mean_p1": 0.84,
             "mean_p5": 0.2,
             "mean_recall5": 0.9,
             "mode": "neural",
             "neural_queries_executed": 25,
             "neural_queries_unobservable": 0,
-            "neural_queries_with_results": 21,
+            "neural_queries_with_results": 0,
             "no_hit_queries": 0,
             "queries": 25,
             "satisfaction_k": 1,
-            "satisfaction_rate": 0.88
+            "satisfaction_rate": 0.84
           }
         },
         "runtime": {
