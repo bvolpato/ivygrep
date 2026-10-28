@@ -159,6 +159,6 @@ esac
 
 IVYGREP_WEB_URL="$web_url" \
 IVYGREP_REDIRECT_URL="$redirect_url" \
-  pnpm -C "$root/web" exec playwright test e2e/web-ui.pw.ts --config=playwright.config.ts
+  pnpm -C "$root/web" exec playwright test --config=playwright.config.ts
 
 echo "Web UI browser procedure passed"

@@ -758,16 +758,20 @@ Signals: lexical, symbol, git change.</pre>
         // Typing effect
         const typingEl = document.querySelector('.typing');
         if (typingEl) {
-            const prompt = '<span class="prompt">$</span> ';
             const textToType = typingEl.textContent.replace(/^\$\s*/, '').trim();
-            typingEl.innerHTML = prompt;
+            const prompt = document.createElement('span');
+            prompt.className = 'prompt';
+            prompt.textContent = '$';
+            const command = document.createElement('span');
+            command.textContent = ' ';
+            typingEl.replaceChildren(prompt, command);
             const outputs = document.querySelectorAll('.output');
             outputs.forEach(out => { out.style.transform = 'translateY(8px)'; });
 
             setTimeout(() => {
                 let i = 0;
                 const interval = setInterval(() => {
-                    typingEl.innerHTML = prompt + textToType.substring(0, i + 1);
+                    command.textContent = ' ' + textToType.substring(0, i + 1);
                     i++;
                     if (i >= textToType.length) {
                         clearInterval(interval);

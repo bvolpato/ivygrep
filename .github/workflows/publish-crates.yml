@@ -86,7 +86,10 @@ jobs:
             "vendor/candle-nn-0.10.2/Cargo.toml|ivygrep-candle-nn|0.10.2-ivygrep.1" \
             "vendor/candle_embed/Cargo.toml|ivygrep-candle-embed|0.1.4-ivygrep.5" \
             "vendor/usearch/Cargo.toml|ivygrep-usearch|2.24.0-ivygrep.2" \
-            "vendor/tree-sitter-haskell/Cargo.toml|ivygrep-tree-sitter-haskell|0.23.1-ivygrep.1"; do
+            "vendor/tree-sitter-haskell/Cargo.toml|ivygrep-tree-sitter-haskell|0.23.1-ivygrep.1" \
+            "vendor/tantivy-sstable/Cargo.toml|ivygrep-tantivy-sstable|0.7.0-ivygrep.1" \
+            "vendor/tantivy-columnar/Cargo.toml|ivygrep-tantivy-columnar|0.7.0-ivygrep.1" \
+            "vendor/tantivy/Cargo.toml|ivygrep-tantivy|0.27.0-ivygrep.1"; do
             IFS='|' read -r manifest name version <<< "$package"
             actual="$(package_version "$manifest" "$name")"
             if [[ "$actual" != "$version" ]]; then
@@ -233,4 +236,7 @@ jobs:
           publish vendor/candle_embed/Cargo.toml ivygrep-candle-embed 0.1.4-ivygrep.5
           publish vendor/usearch/Cargo.toml ivygrep-usearch 2.24.0-ivygrep.2
           publish vendor/tree-sitter-haskell/Cargo.toml ivygrep-tree-sitter-haskell 0.23.1-ivygrep.1
+          publish vendor/tantivy-sstable/Cargo.toml ivygrep-tantivy-sstable 0.7.0-ivygrep.1
+          publish vendor/tantivy-columnar/Cargo.toml ivygrep-tantivy-columnar 0.7.0-ivygrep.1
+          publish vendor/tantivy/Cargo.toml ivygrep-tantivy 0.27.0-ivygrep.1
           publish Cargo.toml ivygrep "$MAIN_VERSION"
