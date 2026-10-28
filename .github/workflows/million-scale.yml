@@ -20,6 +20,9 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_EXCLUDE_NEWER: "7 days"
+
 jobs:
   paired-benchmark:
     name: Paired generated-corpus benchmark
@@ -97,6 +100,8 @@ jobs:
       - name: Install uv
         if: steps.parameters.outputs.required == 'true'
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.5
 
       - name: Cache Cargo dependencies
         if: steps.parameters.outputs.required == 'true'

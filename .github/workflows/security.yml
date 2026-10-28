@@ -16,6 +16,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  UV_EXCLUDE_NEWER: "7 days"
+
 jobs:
   dependencies:
     name: Dependency audit
@@ -133,8 +136,10 @@ jobs:
       - name: Validate workflow syntax
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
-      - name: Install zizmor
-        run: python3 -m pip install --disable-pip-version-check zizmor==1.25.2
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.5
 
-      - name: Audit workflow security
-        run: zizmor --min-severity low .github/workflows
+      - name: Install zizmor
+        run: uv run --no-project --exclude-newer "7 days" --with zizmor==1.25.2 zizmor --min-severity low .github/workflows

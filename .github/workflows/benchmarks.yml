@@ -14,6 +14,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  UV_EXCLUDE_NEWER: "7 days"
+
 jobs:
   benchmark:
     name: Run Benchmarks
@@ -119,6 +122,8 @@ jobs:
       - name: Install uv for protected neural relevance
         if: steps.benchmark-changes.outputs.required == 'true'
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.5
 
       - name: Prime pinned neural relevance model
         if: steps.benchmark-changes.outputs.required == 'true'

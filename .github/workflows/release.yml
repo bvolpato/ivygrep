@@ -10,6 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  UV_EXCLUDE_NEWER: "7 days"
 
 jobs:
   preflight:
@@ -453,6 +454,7 @@ jobs:
         if: matrix.cuda || matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: 0.13.5
           enable-cache: false
 
       - name: Cache pinned neural model through Xet
@@ -631,6 +633,7 @@ jobs:
       - name: Install uv for MCP bundle packaging
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
+          version: 0.13.5
           enable-cache: false
 
       - name: Build MCP bundle and Registry metadata

@@ -4,6 +4,8 @@
 # dependencies = [
 #     "huggingface-hub[hf-xet]==1.23.0",
 # ]
+# [tool.uv]
+# exclude-newer = "7 days"
 # ///
 """Cache pinned ivygrep neural assets through Hugging Face's Xet client."""
 

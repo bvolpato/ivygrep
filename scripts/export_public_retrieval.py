@@ -4,6 +4,8 @@
 # dependencies = [
 #   "datasets>=3,<5",
 # ]
+# [tool.uv]
+# exclude-newer = "7 days"
 # ///
 """Export pinned public CoIR datasets into ivygrep's retrieval layout."""
 

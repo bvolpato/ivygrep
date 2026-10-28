@@ -6,6 +6,8 @@
 #     "PyYAML",
 #     "requests",
 # ]
+# [tool.uv]
+# exclude-newer = "7 days"
 # ///
 """Validate a multi-file WinGet manifest against its declared schemas."""
 

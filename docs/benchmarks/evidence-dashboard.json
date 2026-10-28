@@ -2033,7 +2033,7 @@
       "path": ".github/workflows/release.yml",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "a0d9b6bc8a0ba5c96c8cbb6bb5360d52e5f062472e7c1d27c70acff3e69b480b",
+      "sha256": "6219d87eba0bd89ef894124feb05722e049d6c04c68cfdff474df2fd90a75251",
       "source_commit": null,
       "summary": {
         "artifact_acceptance": true,
