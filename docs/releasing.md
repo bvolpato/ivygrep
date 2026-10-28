@@ -68,6 +68,12 @@ prove that crates.io publication succeeded.
 
 The ZIP security repair prepares `ivygrep-candle-core` 0.10.2-ivygrep.1 and 0.11.0-ivygrep.1 and `ivygrep-candle-nn` 0.10.2-ivygrep.1. The Hub cache and TLS repairs prepare `ivygrep-hf-hub` 0.3.2-ivygrep.4 and `ivygrep-candle-embed` 0.1.4-ivygrep.5. The embedder contains only the upstream BERT implementation it uses, without the unrelated Transformers models. The manual workflow publishes the Hub fork and tensor cores before NN and the embedder. First publication of a new fork requires the `bootstrap` input and `CRATES_IO_TOKEN`; later releases can use trusted publishing after it is configured for each crate. Preparing or merging these manifests does not publish any crate.
 
+The zstd security repair prepares `ivygrep-tantivy-sstable` 0.7.0-ivygrep.1,
+`ivygrep-tantivy-columnar` 0.7.0-ivygrep.1, and `ivygrep-tantivy` 0.27.0-ivygrep.1.
+These forks retain the pinned Tantivy source and index compression support while
+requiring patched zstd dependencies. Publish sstable before columnar, then Tantivy,
+before the root crate. The manual workflow follows this order.
+
 CUDA compilation or CPU fallback is not GPU execution evidence. Do not advertise
 CUDA execution without a result from a CUDA device or runner. The strict Metal
 job must name the actual Metal backend. QEMU/musl, native Windows, and native

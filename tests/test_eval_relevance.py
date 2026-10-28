@@ -1,7 +1,12 @@
+import contextlib
 import importlib.util
+import io
+import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "eval_relevance.py"
@@ -13,6 +18,56 @@ SPEC.loader.exec_module(eval_relevance)
 
 
 class RelevanceEvaluationTest(unittest.TestCase):
+    def test_candidate_audit_finds_deep_results_without_changing_final_ranks(self):
+        case = eval_relevance.QueryCase("coverage", "find network handling", [
+            eval_relevance.Judgment("src/network.rs", 3),
+            eval_relevance.Judgment("src/protocol.rs", 2),
+        ])
+
+        def query_output(command, **kwargs):
+            if "--status" in command:
+                return '[{"has_neural_vectors": true}]'
+            if "--add" in command or "--enhance-internal" in command:
+                return "[]"
+            paths = ["src/network.rs"]
+            if "--no-limit" in command:
+                paths.append("src/protocol.rs")
+            return json.dumps([
+                {"file_path": path, "hits": [{"sources": ["neural"], "neural_executed": True}]}
+                for path in paths
+            ])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "ig"
+            binary.touch()
+            for audited, expected_recall in ((False, 0.5), (True, 1.0)):
+                with self.subTest(audited=audited):
+                    arguments = [
+                        "eval_relevance", "--repo", temporary, "--binary", str(binary),
+                        "--skip-build", "--neural", "--json",
+                        "--audit-recall" if audited else "--no-audit-recall",
+                    ]
+                    output = io.StringIO()
+                    with mock.patch.object(sys, "argv", arguments), \
+                         mock.patch.object(eval_relevance, "load_cases", return_value=[case]), \
+                         mock.patch.object(eval_relevance, "run", side_effect=query_output), \
+                         contextlib.redirect_stdout(output):
+                        self.assertEqual(eval_relevance.main(), 0)
+                    report = json.loads(output.getvalue())
+                    self.assertIs(report["candidate_recall_audited"], audited)
+                    self.assertEqual(report["mean_candidate_recall"], expected_recall)
+                    self.assertEqual(report["mean_final_recall"], 0.5)
+                    self.assertEqual(report["mean_mrr"], 1.0)
+                    self.assertEqual(report["mean_recall5"], 0.5)
+                    self.assertEqual(report["neural_queries_executed"], 1)
+                    self.assertEqual(report["query_metrics"][0], {
+                        "id": "coverage", "mrr": 1.0,
+                        "ndcg10": report["mean_ndcg10"], "final_recall": 0.5,
+                        "candidate_recall": expected_recall,
+                        "audit_stage": eval_relevance.AUDIT_SATISFIED,
+                        "neural_executed": True,
+                    })
+
     def test_parse_search_output_deduplicates_paths_and_collects_sources(self):
         output = """
         [
