@@ -8,8 +8,8 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "7276d0808b24a460136744b25276796437f90c460a42080068a97a194b5bfa54",
-      "source_commit": "07e814bb12bea4c3d1357e190927ec0d5d25ddef",
+      "sha256": "16434e8582d2ecdff2b16ab7817977391444bf90223c0824cba825e054d8409d",
+      "source_commit": "edada76caca9e70f28992e26a9ff4bb42d190343",
       "summary": {
         "binary_sha256": "d0ab8a7617075792a41db245d2073b67e91ebcfbe8b819e5b9d1455d34de89f7",
         "fixture": {
@@ -18,7 +18,7 @@
         },
         "harness": {
           "path": "scripts/eval_relevance.py",
-          "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
+          "sha256": "9a8cc279e58048250632dd96c2018f915789bc6e99ae8d5cef7770ea6409187f"
         },
         "modes": {
           "foreground": {
@@ -32,8 +32,9 @@
               "satisfied": 21
             },
             "candidate_budget_misses": [],
+            "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 4119.138448033482,
+            "elapsed_ms": 9548.82205487229,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -42,18 +43,246 @@
               "indexing-pipeline"
             ],
             "mean_candidate_recall": 0.98,
+            "mean_final_recall": 0.94,
             "mean_hybrid_deep_recall": 0.98,
-            "mean_mrr": 0.9057142857142857,
-            "mean_ndcg10": 0.882772166224044,
+            "mean_mrr": 0.9066666666666667,
+            "mean_ndcg10": 0.8679440283152121,
             "mean_p1": 0.84,
-            "mean_p5": 0.2,
-            "mean_recall5": 0.9,
+            "mean_p5": 0.19200000000000003,
+            "mean_recall5": 0.88,
             "mode": "foreground",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
             "neural_queries_with_results": 0,
             "no_hit_queries": 0,
             "queries": 25,
+            "query_metrics": [
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "ranking-fusion",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "chunking",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "vector-store",
+                "mrr": 0.16666666666666666,
+                "ndcg10": 0.3562071871080222,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "embedding",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "daemon-watch",
+                "mrr": 1.0,
+                "ndcg10": 0.9173194127129571,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 0.5,
+                "id": "incremental-change-detection",
+                "mrr": 1.0,
+                "ndcg10": 0.3373519727104165,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 0.5,
+                "id": "ipc-socket",
+                "mrr": 1.0,
+                "ndcg10": 0.7984848580994974,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "mcp-server",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "cli-args",
+                "mrr": 1.0,
+                "ndcg10": 0.9173194127129571,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "doctor-health",
+                "mrr": 0.5,
+                "ndcg10": 0.7098097413968655,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "tui",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "gitignore-walk",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "query-aliases",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "regex-mode",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "workspace-config",
+                "mrr": 1.0,
+                "ndcg10": 0.5997368403740738,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "job-progress",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "identifier-tokenization",
+                "mrr": 0.5,
+                "ndcg10": 0.6309297535714575,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "glob-filtering",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "literal-exact-search",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "request-response-format",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "indexing-pipeline",
+                "mrr": 0.5,
+                "ndcg10": 0.6442869262030828,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "concurrent-search-limit",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 0.5,
+                "final_recall": 0.5,
+                "id": "skip-generated-files",
+                "mrr": 1.0,
+                "ndcg10": 0.7871546029909718,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "pasted-snapshot-diff",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "pasted-literal-matcher-setup",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              }
+            ],
             "satisfaction_k": 1,
             "satisfaction_rate": 0.84
           },
@@ -68,8 +297,9 @@
               "satisfied": 21
             },
             "candidate_budget_misses": [],
+            "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 4412.953233113512,
+            "elapsed_ms": 8841.837993822992,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -78,18 +308,246 @@
               "indexing-pipeline"
             ],
             "mean_candidate_recall": 0.98,
+            "mean_final_recall": 0.94,
             "mean_hybrid_deep_recall": 0.98,
-            "mean_mrr": 0.9057142857142857,
-            "mean_ndcg10": 0.882772166224044,
+            "mean_mrr": 0.9066666666666667,
+            "mean_ndcg10": 0.8679440283152121,
             "mean_p1": 0.84,
-            "mean_p5": 0.2,
-            "mean_recall5": 0.9,
+            "mean_p5": 0.19200000000000003,
+            "mean_recall5": 0.88,
             "mode": "hash-enriched",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
             "neural_queries_with_results": 0,
             "no_hit_queries": 0,
             "queries": 25,
+            "query_metrics": [
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "ranking-fusion",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "chunking",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "vector-store",
+                "mrr": 0.16666666666666666,
+                "ndcg10": 0.3562071871080222,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "embedding",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "daemon-watch",
+                "mrr": 1.0,
+                "ndcg10": 0.9173194127129571,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 0.5,
+                "id": "incremental-change-detection",
+                "mrr": 1.0,
+                "ndcg10": 0.3373519727104165,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 0.5,
+                "id": "ipc-socket",
+                "mrr": 1.0,
+                "ndcg10": 0.7984848580994974,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "mcp-server",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "cli-args",
+                "mrr": 1.0,
+                "ndcg10": 0.9173194127129571,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "doctor-health",
+                "mrr": 0.5,
+                "ndcg10": 0.7098097413968655,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "tui",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "gitignore-walk",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "query-aliases",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "regex-mode",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "workspace-config",
+                "mrr": 1.0,
+                "ndcg10": 0.5997368403740738,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "job-progress",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "identifier-tokenization",
+                "mrr": 0.5,
+                "ndcg10": 0.6309297535714575,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "glob-filtering",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "literal-exact-search",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "request-response-format",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "indexing-pipeline",
+                "mrr": 0.5,
+                "ndcg10": 0.6442869262030828,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "concurrent-search-limit",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 0.5,
+                "final_recall": 0.5,
+                "id": "skip-generated-files",
+                "mrr": 1.0,
+                "ndcg10": 0.7871546029909718,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "pasted-snapshot-diff",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "pasted-literal-matcher-setup",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": false
+              }
+            ],
             "satisfaction_k": 1,
             "satisfaction_rate": 0.84
           },
@@ -98,29 +556,263 @@
               "after_filtering": 0,
               "before_fusion": 0,
               "candidate_budget": 0,
-              "first_useful_low": 0,
+              "first_useful_low": 4,
               "no_primary_judgment": 0,
-              "not_audited": 4,
+              "not_audited": 0,
               "satisfied": 21
             },
             "candidate_budget_misses": [],
+            "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 3183.570174034685,
+            "elapsed_ms": 12944.79703111574,
             "filter_misses": [],
-            "low_rank_misses": [],
-            "mean_candidate_recall": 0.96,
-            "mean_hybrid_deep_recall": 0.0,
-            "mean_mrr": 0.9057142857142857,
-            "mean_ndcg10": 0.882772166224044,
+            "low_rank_misses": [
+              "vector-store",
+              "doctor-health",
+              "identifier-tokenization",
+              "indexing-pipeline"
+            ],
+            "mean_candidate_recall": 0.98,
+            "mean_final_recall": 0.94,
+            "mean_hybrid_deep_recall": 0.98,
+            "mean_mrr": 0.9066666666666667,
+            "mean_ndcg10": 0.8679440283152121,
             "mean_p1": 0.84,
-            "mean_p5": 0.2,
-            "mean_recall5": 0.9,
+            "mean_p5": 0.19200000000000003,
+            "mean_recall5": 0.88,
             "mode": "neural",
             "neural_queries_executed": 25,
             "neural_queries_unobservable": 0,
-            "neural_queries_with_results": 0,
+            "neural_queries_with_results": 22,
             "no_hit_queries": 0,
             "queries": 25,
+            "query_metrics": [
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "ranking-fusion",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "chunking",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "vector-store",
+                "mrr": 0.16666666666666666,
+                "ndcg10": 0.3562071871080222,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "embedding",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "daemon-watch",
+                "mrr": 1.0,
+                "ndcg10": 0.9173194127129571,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 0.5,
+                "id": "incremental-change-detection",
+                "mrr": 1.0,
+                "ndcg10": 0.3373519727104165,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 0.5,
+                "id": "ipc-socket",
+                "mrr": 1.0,
+                "ndcg10": 0.7984848580994974,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "mcp-server",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "cli-args",
+                "mrr": 1.0,
+                "ndcg10": 0.9173194127129571,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "doctor-health",
+                "mrr": 0.5,
+                "ndcg10": 0.7098097413968655,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "tui",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "gitignore-walk",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "query-aliases",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "regex-mode",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "workspace-config",
+                "mrr": 1.0,
+                "ndcg10": 0.5997368403740738,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "job-progress",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "identifier-tokenization",
+                "mrr": 0.5,
+                "ndcg10": 0.6309297535714575,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "glob-filtering",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "literal-exact-search",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "request-response-format",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "first_useful_low",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "indexing-pipeline",
+                "mrr": 0.5,
+                "ndcg10": 0.6442869262030828,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "concurrent-search-limit",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 0.5,
+                "final_recall": 0.5,
+                "id": "skip-generated-files",
+                "mrr": 1.0,
+                "ndcg10": 0.7871546029909718,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "pasted-snapshot-diff",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              },
+              {
+                "audit_stage": "satisfied",
+                "candidate_recall": 1.0,
+                "final_recall": 1.0,
+                "id": "pasted-literal-matcher-setup",
+                "mrr": 1.0,
+                "ndcg10": 1.0,
+                "neural_executed": true
+              }
+            ],
             "satisfaction_k": 1,
             "satisfaction_rate": 0.84
           }
