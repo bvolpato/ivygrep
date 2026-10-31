@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lru::LruCache;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Condvar, Mutex};
@@ -20,6 +20,7 @@ use tracing::{error, info, warn};
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
+use crate::enhancement_queue::EnhancementPolicy;
 use crate::indexer::{
     index_workspace, index_workspace_with_store_replacement, indexed_skip_gitignore,
     reconcile_worktree_overlay_with_store_replacement, remove_workspace_index,
@@ -2058,6 +2059,7 @@ impl DaemonState {
         workspaces: &[Workspace],
         skip_gitignore: bool,
         cancellation: Option<&SearchCancellation>,
+        origin: RequestOrigin,
     ) -> std::result::Result<Option<SearchLeaseSet>, DaemonResponse> {
         let mut workspaces = workspaces.to_vec();
         loop {
@@ -2078,6 +2080,7 @@ impl DaemonState {
                         skip_gitignore,
                         None,
                         std::time::Instant::now(),
+                        origin,
                     )
                     .await;
                     if !matches!(response, DaemonResponse::Ack { .. }) {
@@ -2187,7 +2190,7 @@ impl DaemonState {
             let mut resolved_after_wait = Vec::with_capacity(workspaces.len());
             for workspace in &workspaces {
                 resolved_after_wait.push(
-                    self.resolve_workspace_revalidated(&workspace.root)
+                    self.resolve_workspace_revalidated(&workspace.root, origin)
                         .map_err(|error| DaemonResponse::Error {
                             message: error.to_string(),
                         })?,
@@ -2366,10 +2369,16 @@ impl DaemonState {
         workspace: &Workspace,
         skip_gitignore: bool,
     ) -> Result<Arc<dyn EmbeddingModel>> {
+        self.require_tracked_base(workspace)?;
         let cancellation = SearchCancellation::new(false);
         let mut cancel_on_drop = CancelSearchOnDrop(Some(cancellation.clone()));
         let model = self
-            .prepare_context_model_cancellable(workspace, skip_gitignore, &cancellation, false)
+            .prepare_context_model_cancellable(
+                workspace,
+                skip_gitignore,
+                &cancellation,
+                RequestOrigin::Web,
+            )
             .await;
         cancel_on_drop.disarm();
         model
@@ -2377,15 +2386,14 @@ impl DaemonState {
 
     /// Workspace lease first, CPU permit second, both held by the returned
     /// model until the context pack is built. `cancellation` ends either wait.
-    /// `wait_for_neural_model` loads the neural query model before returning
-    /// instead of answering with the hash model while it loads, which is what
-    /// an in-process build does.
+    /// Local context packs wait for the neural model as an in-process build does.
+    /// Web requests can use the hash model while the neural model loads.
     async fn prepare_context_model_cancellable(
         &self,
         workspace: &Workspace,
         skip_gitignore: bool,
         cancellation: &SearchCancellation,
-        wait_for_neural_model: bool,
+        origin: RequestOrigin,
     ) -> Result<Arc<dyn EmbeddingModel>> {
         let _timer = crate::performance::StageTimer::start("context_prepare");
         let search_leases = self
@@ -2393,6 +2401,7 @@ impl DaemonState {
                 std::slice::from_ref(workspace),
                 skip_gitignore,
                 Some(cancellation),
+                origin,
             )
             .await
             .map_err(|response| match response {
@@ -2422,7 +2431,7 @@ impl DaemonState {
             )?;
             let inner = if state.cached_neural_identity(&workspace).is_none() {
                 cached_hash_model()
-            } else if wait_for_neural_model {
+            } else if matches!(origin, RequestOrigin::Local) {
                 state.lazy_model.get_or_init(create_search_model).clone()
             } else {
                 state.maybe_start_model_load();
@@ -2441,8 +2450,55 @@ impl DaemonState {
         self.resolve_workspace_cached(path, true)
     }
 
-    fn resolve_workspace_revalidated(&self, path: &Path) -> Result<Workspace> {
-        self.resolve_workspace_cached(path, false)
+    fn resolve_workspace_revalidated(
+        &self,
+        path: &Path,
+        origin: RequestOrigin,
+    ) -> Result<Workspace> {
+        // A concurrent removal can win the lease after a Web request selected its root.
+        if matches!(origin, RequestOrigin::Web) {
+            Workspace::require_tracked(path)?;
+        }
+        crate::workspace_file::validate_root(path)?;
+        let workspace = self.resolve_workspace_cached(path, false)?;
+        anyhow::ensure!(workspace.root == path, "selected workspace root changed");
+        if matches!(origin, RequestOrigin::Web) {
+            self.require_tracked_base(&workspace)?;
+        }
+        Ok(workspace)
+    }
+
+    /// Rebuilding a linked worktree can also create or update its base index.
+    fn require_tracked_base(&self, workspace: &Workspace) -> Result<()> {
+        if let Some(base_dir) = &workspace.base_index_dir {
+            let root = self
+                .main_worktree_root(workspace)
+                .context("worktree base is not tracked")?;
+            let base = Workspace::resolve_tracked(&root).context("worktree base is not tracked")?;
+            anyhow::ensure!(
+                &base.index_dir == base_dir && !base.is_worktree(),
+                "worktree base changed"
+            );
+        }
+        Ok(())
+    }
+
+    fn select_query_workspaces(
+        &self,
+        path: Option<&Path>,
+        origin: RequestOrigin,
+    ) -> Result<SearchWorkspaceSet> {
+        let resolve = |root: &Path| match origin {
+            RequestOrigin::Local => self.resolve_workspace(root),
+            RequestOrigin::Web => self.resolve_workspace_revalidated(root, origin),
+        };
+        let Some(path) = path else {
+            return select_all_indexed_workspaces(resolve);
+        };
+        Ok(SearchWorkspaceSet {
+            workspaces: vec![resolve(path)?],
+            warnings: Vec::new(),
+        })
     }
 
     fn resolve_workspace_cached(&self, path: &Path, accept_fresh: bool) -> Result<Workspace> {
@@ -2509,21 +2565,21 @@ impl DaemonState {
     /// and the start of a worker, when a worker place is free, run on a
     /// blocking task after the hits are returned, and each workspace/mode is
     /// re-checked at most once per `ENHANCEMENT_TRIGGER_INTERVAL`.
-    fn schedule_search_enhancement(&self, workspaces: Vec<Workspace>, query_uses_neural: bool) {
+    fn schedule_search_enhancement(&self, workspaces: Vec<Workspace>, policy: EnhancementPolicy) {
         if workspaces.is_empty() || !crate::config::background_enhancement_enabled() {
             return;
         }
         // The workspace that is searched now goes ahead of the ones that wait.
         self.enhancement_queue
             .touch(workspaces.iter().map(|workspace| workspace.id.as_str()));
-        let due = self.due_enhancement_workspaces(workspaces, query_uses_neural);
+        let due = self.due_enhancement_workspaces(workspaces, policy);
         if due.is_empty() {
             return;
         }
         let queue = self.enhancement_queue.clone();
         let trigger = move || {
             for workspace in due {
-                queue.request(workspace, query_uses_neural);
+                queue.request(workspace, policy);
             }
             queue.dispatch();
         };
@@ -2540,7 +2596,7 @@ impl DaemonState {
     fn due_enhancement_workspaces(
         &self,
         workspaces: Vec<Workspace>,
-        query_uses_neural: bool,
+        policy: EnhancementPolicy,
     ) -> Vec<Workspace> {
         let now = std::time::Instant::now();
         let mut triggers = self.enhancement_triggers.lock();
@@ -2549,7 +2605,7 @@ impl DaemonState {
             .filter(|workspace| {
                 let key = EnhancementTriggerKey {
                     workspace_id: workspace.id.clone(),
-                    query_uses_neural,
+                    policy,
                 };
                 let recent = triggers
                     .get(&key)
@@ -3282,12 +3338,27 @@ pub(crate) async fn handle_web_request(
     request: DaemonRequest,
 ) -> DaemonResponse {
     let _in_flight = state.activity.begin();
-    if !is_search_request(&request) {
+    if matches!(request, DaemonRequest::Status) {
         return handle_request(state, request).await;
+    }
+    if !matches!(
+        request,
+        DaemonRequest::Search { .. }
+            | DaemonRequest::LiteralSearch { .. }
+            | DaemonRequest::RegexSearch { .. }
+    ) {
+        return DaemonResponse::Error {
+            message: "unsupported Web request".to_string(),
+        };
     }
     let cancellation = SearchCancellation::new(false);
     let mut cancel_on_drop = CancelSearchOnDrop(Some(cancellation.clone()));
-    let handler = handle_request_with_cancellation(state, request, Some(cancellation.clone()));
+    let handler = handle_request_with_cancellation(
+        state,
+        request,
+        Some(cancellation.clone()),
+        RequestOrigin::Web,
+    );
     tokio::pin!(handler);
     let deadline = config::search_deadline();
     let deadline_timer = async move {
@@ -3757,7 +3828,12 @@ where
     let deadline = (!matches!(envelope.request, DaemonRequest::ContextPack { .. }))
         .then(config::search_deadline)
         .flatten();
-    let handler = handle_request_with_cancellation(state, envelope.request, cancellation.clone());
+    let handler = handle_request_with_cancellation(
+        state,
+        envelope.request,
+        cancellation.clone(),
+        RequestOrigin::Local,
+    );
     tokio::pin!(handler);
     let Some(cancellation) = cancellation else {
         let response = handler.await;
@@ -3913,6 +3989,7 @@ async fn run_index_request(
     skip_gitignore: bool,
     lead: Option<InflightIndexLead>,
     arrived_at: std::time::Instant,
+    origin: RequestOrigin,
 ) -> DaemonResponse {
     // Counted here, not only in the request that asked for it: a `StartIndex`
     // request answers at once and the index runs on in a detached task.
@@ -3937,7 +4014,7 @@ async fn run_index_request(
             Ok(leases) => leases,
             Err(response) => return response,
         };
-        let current = match state.resolve_workspace(&workspace.root) {
+        let current = match state.resolve_workspace_revalidated(&workspace.root, origin) {
             Ok(current) => current,
             Err(error) => {
                 return DaemonResponse::Error {
@@ -4104,7 +4181,7 @@ async fn run_index_request(
 }
 
 async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonResponse {
-    handle_request_with_cancellation(state, request, None).await
+    handle_request_with_cancellation(state, request, None, RequestOrigin::Local).await
 }
 
 fn is_search_request(request: &DaemonRequest) -> bool {
@@ -4151,15 +4228,28 @@ async fn handle_enveloped_request(
         Ok(prepared) => prepared,
         Err(response) => return response,
     };
-    let response = handle_request_with_cancellation(state, envelope.request, cancellation).await;
+    let response = handle_request_with_cancellation(
+        state,
+        envelope.request,
+        cancellation,
+        RequestOrigin::Local,
+    )
+    .await;
     drop(registration);
     response
+}
+
+#[derive(Clone, Copy)]
+enum RequestOrigin {
+    Local,
+    Web,
 }
 
 async fn handle_request_with_cancellation(
     state: DaemonState,
     request: DaemonRequest,
     cancellation: Option<SearchCancellation>,
+    origin: RequestOrigin,
 ) -> DaemonResponse {
     match request {
         DaemonRequest::Version => DaemonResponse::Version {
@@ -4281,7 +4371,16 @@ async fn handle_request_with_cancellation(
                 None => None,
             };
             register_workspace_for_index(&workspace, watch, skip_gitignore);
-            run_index_request(state, workspace, watch, skip_gitignore, lead, arrived_at).await
+            run_index_request(
+                state,
+                workspace,
+                watch,
+                skip_gitignore,
+                lead,
+                arrived_at,
+                origin,
+            )
+            .await
         }
         DaemonRequest::StartIndex {
             path,
@@ -4318,6 +4417,7 @@ async fn handle_request_with_cancellation(
                                 skip_gitignore,
                                 Some(lead),
                                 arrived_at,
+                                origin,
                             )
                             .await;
                             if let DaemonResponse::Error { message } = response {
@@ -4349,8 +4449,14 @@ async fn handle_request_with_cancellation(
             scope_is_file,
             skip_gitignore,
             force_neural,
+            hash_only,
             disable_memory_expansion,
         } => {
+            if hash_only && force_neural {
+                return DaemonResponse::Error {
+                    message: "hash-only and forced neural search are incompatible".to_string(),
+                };
+            }
             if cancellation
                 .as_ref()
                 .is_some_and(SearchCancellation::is_cancelled)
@@ -4361,26 +4467,12 @@ async fn handle_request_with_cancellation(
             let state_clone = state.clone();
             let all_indices = path.is_none();
 
-            let workspace_set = if let Some(ref p) = path {
-                match state_clone.resolve_workspace(p) {
-                    Ok(workspace) => crate::search_service::SearchWorkspaceSet {
-                        workspaces: vec![workspace],
-                        warnings: Vec::new(),
-                    },
-                    Err(err) => {
-                        return DaemonResponse::Error {
-                            message: err.to_string(),
-                        };
-                    }
-                }
-            } else {
-                match select_all_indexed_workspaces(|root| state_clone.resolve_workspace(root)) {
-                    Ok(workspaces) => workspaces,
-                    Err(err) => {
-                        return DaemonResponse::Error {
-                            message: err.to_string(),
-                        };
-                    }
+            let workspace_set = match state.select_query_workspaces(path.as_deref(), origin) {
+                Ok(workspaces) => workspaces,
+                Err(err) => {
+                    return DaemonResponse::Error {
+                        message: err.to_string(),
+                    };
                 }
             };
             let workspaces = workspace_set.workspaces;
@@ -4408,10 +4500,11 @@ async fn handle_request_with_cancellation(
                 workspaces.len()
             );
 
-            let has_neural_vectors = workspaces
-                .iter()
-                .map(|workspace| state_clone.cached_neural_identity(workspace))
-                .any(|identity| identity.is_some());
+            let has_neural_vectors = !hash_only
+                && workspaces
+                    .iter()
+                    .map(|workspace| state_clone.cached_neural_identity(workspace))
+                    .any(|identity| identity.is_some());
             if !options.is_cancelled()
                 && should_start_model_load(has_neural_vectors, &query, force_neural)
             {
@@ -4426,7 +4519,12 @@ async fn handle_request_with_cancellation(
             // Workspace leases come before the CPU permit: a search parked
             // behind an exclusive index lease must not pin CPU capacity.
             let search_leases = match state_clone
-                .acquire_search_leases(&workspaces, options.skip_gitignore, cancellation.as_ref())
+                .acquire_search_leases(
+                    &workspaces,
+                    options.skip_gitignore,
+                    cancellation.as_ref(),
+                    origin,
+                )
                 .await
             {
                 Ok(Some(leases)) => leases,
@@ -4440,27 +4538,29 @@ async fn handle_request_with_cancellation(
                 leases: mode_leases,
                 metadata_stamps,
             } = search_leases;
-            let neural_identities = workspaces
-                .iter()
-                .map(|workspace| state_clone.cached_neural_identity(workspace))
-                .collect::<Vec<_>>();
-            if let Err(err) = state_clone.validate_forced_neural_workspaces(
-                &workspaces,
-                &neural_identities,
-                force_neural,
-            ) {
-                return DaemonResponse::Error {
-                    message: err.to_string(),
-                };
-            }
-            if !options.is_cancelled()
-                && should_start_model_load(
-                    neural_identities.iter().any(Option::is_some),
-                    &query,
+            if !hash_only {
+                let neural_identities = workspaces
+                    .iter()
+                    .map(|workspace| state_clone.cached_neural_identity(workspace))
+                    .collect::<Vec<_>>();
+                if let Err(err) = state_clone.validate_forced_neural_workspaces(
+                    &workspaces,
+                    &neural_identities,
                     force_neural,
-                )
-            {
-                state_clone.maybe_start_model_load();
+                ) {
+                    return DaemonResponse::Error {
+                        message: err.to_string(),
+                    };
+                }
+                if !options.is_cancelled()
+                    && should_start_model_load(
+                        neural_identities.iter().any(Option::is_some),
+                        &query,
+                        force_neural,
+                    )
+                {
+                    state_clone.maybe_start_model_load();
+                }
             }
             tracing::trace!("daemon_search_lease={:?}", request_started.elapsed());
             // Bound concurrent heavy search work (see #58). The permit is held
@@ -4479,12 +4579,16 @@ async fn handle_request_with_cancellation(
                 if options.is_cancelled() {
                     return (Vec::new(), workspace_warnings, 0, query, options, true);
                 }
-                let model = match state_clone.get_model_for_search(force_neural) {
-                    Ok(model) => model,
-                    Err(err) => {
-                        let mut warnings = workspace_warnings;
-                        warnings.push(err.to_string());
-                        return (Vec::new(), warnings, 0, query, options, false);
+                let model = if hash_only {
+                    cached_hash_model()
+                } else {
+                    match state_clone.get_model_for_search(force_neural) {
+                        Ok(model) => model,
+                        Err(err) => {
+                            let mut warnings = workspace_warnings;
+                            warnings.push(err.to_string());
+                            return (Vec::new(), warnings, 0, query, options, false);
+                        }
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
@@ -4518,7 +4622,11 @@ async fn handle_request_with_cancellation(
                 if options.is_cancelled() {
                     return (Vec::new(), all_errors, 0, query, options, true);
                 }
-                let query_uses_neural = query_uses_neural(&query, options.force_neural);
+                let policy = if hash_only {
+                    EnhancementPolicy::HashOnly
+                } else {
+                    EnhancementPolicy::for_query(query_uses_neural(&query, options.force_neural))
+                };
                 let cache_revision = state_clone.query_cache_revision();
                 let workspace_signatures = workspaces
                     .iter()
@@ -4551,8 +4659,7 @@ async fn handle_request_with_cancellation(
                     if cached_hits.len() == cached_hit_count {
                         let cancelled = options.is_cancelled();
                         if !cancelled {
-                            state_clone
-                                .schedule_search_enhancement(workspaces.clone(), query_uses_neural);
+                            state_clone.schedule_search_enhancement(workspaces.clone(), policy);
                         }
                         return (
                             cached_hits,
@@ -4671,7 +4778,7 @@ async fn handle_request_with_cancellation(
                 }
                 // Background hash and neural enhancement runs off the response path.
                 if !cancelled {
-                    state_clone.schedule_search_enhancement(workspaces.clone(), query_uses_neural);
+                    state_clone.schedule_search_enhancement(workspaces.clone(), policy);
                 }
                 tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
                 (
@@ -4727,6 +4834,7 @@ async fn handle_request_with_cancellation(
                 }
             } else {
                 if !disable_memory_expansion
+                    && !hash_only
                     && !force_neural
                     && should_expand_memory_query(&expansion_query, &hits, limit)
                 {
@@ -4746,6 +4854,7 @@ async fn handle_request_with_cancellation(
                         scope_is_file,
                         skip_gitignore: expansion_options.skip_gitignore,
                         force_neural: expansion_options.force_neural,
+                        hash_only: false,
                         disable_memory_expansion: true,
                     };
                     let variants = memory_query_variants(&expansion_query);
@@ -4756,11 +4865,13 @@ async fn handle_request_with_cancellation(
                             state.clone(),
                             requests[0].clone(),
                             cancellation.clone(),
+                            origin,
                         )),
                         Box::pin(handle_request_with_cancellation(
                             state.clone(),
                             requests[1].clone(),
                             cancellation.clone(),
+                            origin,
                         )),
                     );
                     if cancellation
@@ -4820,26 +4931,12 @@ async fn handle_request_with_cancellation(
             {
                 return cancelled_search_response();
             }
-            let workspace_set = if let Some(ref p) = path {
-                match state.resolve_workspace(p) {
-                    Ok(workspace) => SearchWorkspaceSet {
-                        workspaces: vec![workspace],
-                        warnings: Vec::new(),
-                    },
-                    Err(err) => {
-                        return DaemonResponse::Error {
-                            message: err.to_string(),
-                        };
-                    }
-                }
-            } else {
-                match select_all_indexed_workspaces(|root| state.resolve_workspace(root)) {
-                    Ok(workspaces) => workspaces,
-                    Err(err) => {
-                        return DaemonResponse::Error {
-                            message: err.to_string(),
-                        };
-                    }
+            let workspace_set = match state.select_query_workspaces(path.as_deref(), origin) {
+                Ok(workspaces) => workspaces,
+                Err(err) => {
+                    return DaemonResponse::Error {
+                        message: err.to_string(),
+                    };
                 }
             };
             let workspaces = workspace_set.workspaces;
@@ -4864,7 +4961,7 @@ async fn handle_request_with_cancellation(
             };
             // Workspace leases come before the CPU permit (see Search).
             let search_leases = match state
-                .acquire_search_leases(&workspaces, skip_gitignore, cancellation.as_ref())
+                .acquire_search_leases(&workspaces, skip_gitignore, cancellation.as_ref(), origin)
                 .await
             {
                 Ok(Some(leases)) => leases,
@@ -4952,26 +5049,12 @@ async fn handle_request_with_cancellation(
             {
                 return cancelled_search_response();
             }
-            let workspace_set = if let Some(ref p) = path {
-                match state.resolve_workspace(p) {
-                    Ok(workspace) => SearchWorkspaceSet {
-                        workspaces: vec![workspace],
-                        warnings: Vec::new(),
-                    },
-                    Err(err) => {
-                        return DaemonResponse::Error {
-                            message: err.to_string(),
-                        };
-                    }
-                }
-            } else {
-                match select_all_indexed_workspaces(|root| state.resolve_workspace(root)) {
-                    Ok(workspaces) => workspaces,
-                    Err(err) => {
-                        return DaemonResponse::Error {
-                            message: err.to_string(),
-                        };
-                    }
+            let workspace_set = match state.select_query_workspaces(path.as_deref(), origin) {
+                Ok(workspaces) => workspaces,
+                Err(err) => {
+                    return DaemonResponse::Error {
+                        message: err.to_string(),
+                    };
                 }
             };
             let workspaces = workspace_set.workspaces;
@@ -4998,7 +5081,12 @@ async fn handle_request_with_cancellation(
             let state_clone = state.clone();
             // Workspace leases come before the CPU permit (see Search).
             let search_leases = match state_clone
-                .acquire_search_leases(&workspaces, options.skip_gitignore, cancellation.as_ref())
+                .acquire_search_leases(
+                    &workspaces,
+                    options.skip_gitignore,
+                    cancellation.as_ref(),
+                    origin,
+                )
                 .await
             {
                 Ok(Some(leases)) => leases,
@@ -5132,7 +5220,12 @@ async fn handle_request_with_cancellation(
                 cancel_token: Some(cancellation.flag.clone()),
             };
             let bundle = match state
-                .prepare_context_model_cancellable(&workspace, skip_gitignore, &cancellation, true)
+                .prepare_context_model_cancellable(
+                    &workspace,
+                    skip_gitignore,
+                    &cancellation,
+                    origin,
+                )
                 .await
             {
                 Ok(model) => {
@@ -5170,7 +5263,7 @@ async fn handle_request_with_cancellation(
                 Ok(bundle) => {
                     state.schedule_search_enhancement(
                         vec![workspace],
-                        query_uses_neural(&query, false),
+                        EnhancementPolicy::for_query(query_uses_neural(&query, false)),
                     );
                     DaemonResponse::ContextPack { bundle }
                 }
@@ -5973,7 +6066,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             let queue = state.enhancement_queue.clone();
                             let edited = control.workspace.clone();
                             tokio::task::spawn_blocking(move || {
-                                queue.request(edited, false);
+                                queue.request(edited, EnhancementPolicy::MaintainExisting);
                                 queue.dispatch();
                             });
                         }
@@ -6253,7 +6346,7 @@ fn search_context_signature(
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 struct EnhancementTriggerKey {
     workspace_id: String,
-    query_uses_neural: bool,
+    policy: EnhancementPolicy,
 }
 
 fn neural_status_signature(workspace: &Workspace) -> NeuralStatusSignature {
@@ -7219,6 +7312,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
 
@@ -7308,6 +7402,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         let search_state = state.clone();
@@ -7589,6 +7684,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: false,
         };
         let DaemonRequest::Search {
@@ -7647,6 +7743,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: false,
         };
         let response = handle_request(test_state(), request).await;
@@ -7927,6 +8024,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: true,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         let search_state = state.clone();
@@ -8118,7 +8216,7 @@ mod tests {
         let state = test_state();
         let warm = handle_request(
             state.clone(),
-            workspace_identity_search_request(&original, "oldorangedelta"),
+            test_hybrid_search_request(&original, "oldorangedelta"),
         )
         .await;
         assert!(matches!(warm, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
@@ -8139,7 +8237,7 @@ mod tests {
 
         let queued_search = tokio::spawn(handle_request(
             state.clone(),
-            workspace_identity_search_request(&original, "newvioletquartz"),
+            test_hybrid_search_request(&original, "newvioletquartz"),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
@@ -8187,13 +8285,13 @@ mod tests {
 
         let current = handle_request(
             state.clone(),
-            workspace_identity_search_request(&replacement, "newvioletquartz"),
+            test_hybrid_search_request(&replacement, "newvioletquartz"),
         )
         .await;
         assert!(matches!(current, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
         let stale = handle_request(
             state,
-            workspace_identity_search_request(&replacement, "oldorangedelta"),
+            test_hybrid_search_request(&replacement, "oldorangedelta"),
         )
         .await;
         assert!(
@@ -8220,7 +8318,7 @@ mod tests {
             }
             let response = handle_request(
                 state.clone(),
-                workspace_identity_search_request(&workspace, "unchangedmarker"),
+                test_hybrid_search_request(&workspace, "unchangedmarker"),
             )
             .await;
             assert!(
@@ -8234,7 +8332,7 @@ mod tests {
         }
     }
 
-    fn workspace_identity_search_request(workspace: &Workspace, query: &str) -> DaemonRequest {
+    fn test_hybrid_search_request(workspace: &Workspace, query: &str) -> DaemonRequest {
         DaemonRequest::Search {
             path: Some(workspace.root.clone()),
             query: query.to_owned(),
@@ -8247,6 +8345,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         }
     }
@@ -8298,7 +8397,7 @@ mod tests {
         let original = Workspace::resolve(&target).unwrap();
         index_workspace(&original, create_hash_model().as_ref()).unwrap();
         let state = test_state();
-        let request = |query: &str| workspace_identity_search_request(&original, query);
+        let request = |query: &str| test_hybrid_search_request(&original, query);
         let warm = handle_request(state.clone(), request("applecipherquartz")).await;
         assert!(matches!(warm, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
         let mut reader =
@@ -8388,7 +8487,10 @@ mod tests {
         let b = Workspace::resolve(repo_b.path()).unwrap();
         let state = test_state();
 
-        let due = state.due_enhancement_workspaces(vec![a.clone(), b.clone()], false);
+        let due = state.due_enhancement_workspaces(
+            vec![a.clone(), b.clone()],
+            EnhancementPolicy::MaintainExisting,
+        );
         assert_eq!(
             due.iter().map(|ws| ws.id.clone()).collect::<Vec<_>>(),
             vec![a.id.clone(), b.id.clone()],
@@ -8396,22 +8498,28 @@ mod tests {
         );
         assert!(
             state
-                .due_enhancement_workspaces(vec![a.clone(), b.clone()], false)
+                .due_enhancement_workspaces(
+                    vec![a.clone(), b.clone()],
+                    EnhancementPolicy::MaintainExisting
+                )
                 .is_empty(),
             "a second query within the interval does not re-probe or re-spawn"
         );
-        let neural_due = state.due_enhancement_workspaces(vec![a.clone()], true);
+        let neural_due =
+            state.due_enhancement_workspaces(vec![a.clone()], EnhancementPolicy::Neural);
         assert_eq!(neural_due.len(), 1, "neural mode is tracked separately");
 
         state.enhancement_triggers.lock().put(
             EnhancementTriggerKey {
                 workspace_id: a.id.clone(),
-                query_uses_neural: false,
+                policy: EnhancementPolicy::MaintainExisting,
             },
             std::time::Instant::now() - ENHANCEMENT_TRIGGER_INTERVAL,
         );
         assert_eq!(
-            state.due_enhancement_workspaces(vec![a, b], false).len(),
+            state
+                .due_enhancement_workspaces(vec![a, b], EnhancementPolicy::MaintainExisting)
+                .len(),
             1,
             "only the workspace whose interval elapsed is due again"
         );
@@ -8579,6 +8687,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                hash_only: false,
                 disable_memory_expansion: true,
             };
             let first = handle_request(state.clone(), request.clone()).await;
@@ -8860,6 +8969,38 @@ mod tests {
         let state = test_state();
         assert!(state.lazy_model.set(cached_hash_model()).is_ok());
         assert!(state.get_model_for_search(true).is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queued_web_search_does_not_recreate_a_removed_index() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn removed_marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        let leases = state.acquire_index_lease(&workspace).await.unwrap();
+        let mut search = std::pin::pin!(handle_web_request(
+            state,
+            test_hybrid_search_request(&workspace, "removed_marker")
+        ));
+        poll_fn(|cx| {
+            assert!(search.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        remove_workspace_index(&workspace).unwrap();
+        drop(leases);
+        let response = search.await;
+        assert!(
+            matches!(response, DaemonResponse::Error { message } if message.contains("workspace is not tracked"))
+        );
+        assert!(workspace.read_metadata().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -9826,6 +9967,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         let before = handle_request(state.clone(), request.clone()).await;
@@ -9884,7 +10026,12 @@ mod tests {
     async fn acquire_search_lease_without_watcher(state: &DaemonState, workspace: &Workspace) {
         let leases = tokio::time::timeout(
             Duration::from_secs(5),
-            state.acquire_search_leases(std::slice::from_ref(workspace), false, None),
+            state.acquire_search_leases(
+                std::slice::from_ref(workspace),
+                false,
+                None,
+                RequestOrigin::Local,
+            ),
         )
         .await
         .unwrap()
@@ -10031,6 +10178,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         let before_search = handle_request(state.clone(), cached_request.clone()).await;
@@ -10840,6 +10988,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                hash_only: false,
                 disable_memory_expansion: true,
             },
         )
@@ -10864,6 +11013,46 @@ mod tests {
             !workspace.has_neural_vectors(),
             "daemon search must leave neural vector generation to background work"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hash_only_search_ignores_warm_neural_results() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("auth.rs"),
+            "pub fn authenticate_user() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_hash(&workspace, model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
+        let state = test_state();
+        assert!(state.lazy_model.set(Arc::new(TestNeuralModel)).is_ok());
+
+        for only_hash in [false, true, true, false] {
+            let mut request = test_hybrid_search_request(
+                &workspace,
+                "where are user credentials checked before access",
+            );
+            if let DaemonRequest::Search { hash_only, .. } = &mut request {
+                *hash_only = only_hash;
+            }
+            let response = handle_request(state.clone(), request).await;
+            let DaemonResponse::SearchResults { hits, .. } = response else {
+                panic!("unexpected response: {response:?}");
+            };
+            assert!(!hits.is_empty());
+            assert_eq!(
+                hits.iter().any(|hit| hit.neural_executed),
+                !only_hash,
+                "{hits:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -10899,6 +11088,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
 
@@ -10991,6 +11181,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         let first = handle_request(state.clone(), request.clone()).await;
@@ -11072,6 +11263,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         // The query cache stores hits only, so the repeat has to warn again.
@@ -11131,6 +11323,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                hash_only: false,
                 disable_memory_expansion: true,
             },
         )
@@ -11191,6 +11384,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                hash_only: false,
                 disable_memory_expansion: true,
             },
         )
@@ -11285,6 +11479,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                hash_only: false,
                 disable_memory_expansion: true,
             },
         ];
@@ -11407,6 +11602,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         let all_request = DaemonRequest::Search {
@@ -11421,6 +11617,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
 
@@ -11539,7 +11736,12 @@ mod tests {
         register_watcher(&state, repo.path()).unwrap();
         drop(
             state
-                .acquire_search_leases(std::slice::from_ref(&workspace), false, None)
+                .acquire_search_leases(
+                    std::slice::from_ref(&workspace),
+                    false,
+                    None,
+                    RequestOrigin::Local,
+                )
                 .await
                 .unwrap()
                 .unwrap(),
@@ -11730,6 +11932,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: true,
         };
         let response_has_ignored_file = |response: DaemonResponse| match response {
@@ -11880,7 +12083,12 @@ mod tests {
         .unwrap();
 
         let unfinished = state
-            .acquire_search_leases(std::slice::from_ref(&workspace), false, None)
+            .acquire_search_leases(
+                std::slice::from_ref(&workspace),
+                false,
+                None,
+                RequestOrigin::Local,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -11889,7 +12097,12 @@ mod tests {
 
         std::fs::remove_file(workspace.indexing_incomplete_path()).unwrap();
         let ready = state
-            .acquire_search_leases(std::slice::from_ref(&workspace), false, None)
+            .acquire_search_leases(
+                std::slice::from_ref(&workspace),
+                false,
+                None,
+                RequestOrigin::Local,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -11900,7 +12113,12 @@ mod tests {
         let skip_gitignore = workspace.read_metadata().unwrap().unwrap().skip_gitignore;
         let leases = tokio::time::timeout(
             Duration::from_secs(10),
-            state.acquire_search_leases(std::slice::from_ref(workspace), skip_gitignore, None),
+            state.acquire_search_leases(
+                std::slice::from_ref(workspace),
+                skip_gitignore,
+                None,
+                RequestOrigin::Local,
+            ),
         )
         .await
         .expect("initial watcher reconciliation timed out")
@@ -12072,6 +12290,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                hash_only: false,
                 disable_memory_expansion: true,
             },
         )));

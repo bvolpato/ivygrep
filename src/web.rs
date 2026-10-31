@@ -699,6 +699,7 @@ fn build_search_request_for_path(
             scope_is_file,
             skip_gitignore,
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: false,
         },
     })
@@ -753,15 +754,15 @@ fn resolve_context_workspace(
         .map(str::trim)
         .filter(|workspace| !workspace.is_empty() && *workspace != "__all__")
         .context("select one workspace for context mode")?;
-    let selected = Workspace::resolve(Path::new(selected))?;
-    let selected_root = selected.root;
-    if !tracked_roots()?.contains(&selected_root) {
-        bail!("workspace is not tracked");
-    }
+    let selected_root = Workspace::resolve_tracked(Path::new(selected))?.root;
     let scoped_path = param(params, "scope")
         .map(str::trim)
         .filter(|scope| !scope.is_empty())
         .map_or_else(|| selected_root.clone(), |scope| selected_root.join(scope));
+    let scoped_path = scoped_path.canonicalize()?;
+    if !scoped_path.starts_with(&selected_root) {
+        bail!("scope is outside selected workspace");
+    }
     let (workspace, scope_filter) = crate::workspace::resolve_workspace_and_scope(&scoped_path)?;
     if workspace.root != selected_root {
         bail!("scope is outside selected workspace");
@@ -875,7 +876,7 @@ async fn write_search_stream(
         return Ok(());
     };
     write_sse(stream, "results", &value).await?;
-    write_sse(stream, "done", &json!({"ok": true})).await
+    write_sse(stream, "done", &json!({"ok": value.get("error").is_none()})).await
 }
 
 fn searches_all_workspaces(params: &HashMap<String, Vec<String>>) -> bool {
@@ -1058,7 +1059,6 @@ fn resolve_tracked_path(
     params: &HashMap<String, Vec<String>>,
     require_dir: bool,
 ) -> Result<(PathBuf, PathBuf)> {
-    let roots = tracked_roots()?;
     let workspace_param = param(params, "workspace")
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "__all__");
@@ -1068,22 +1068,16 @@ fn resolve_tracked_path(
         .unwrap_or(".");
 
     let root = if let Some(workspace) = workspace_param {
-        let workspace = Workspace::resolve(&PathBuf::from(workspace))?;
-        let root = workspace.root;
-        if !roots.iter().any(|tracked| tracked == &root) {
-            bail!("workspace is not tracked");
-        }
-        root
+        Workspace::resolve_tracked(Path::new(workspace))?.root
     } else {
         let candidate = PathBuf::from(path_param);
         if !candidate.is_absolute() {
             bail!("workspace is required for relative paths");
         }
         let canonical = candidate.canonicalize()?;
-        roots
-            .iter()
+        tracked_roots()?
+            .into_iter()
             .find(|root| canonical.starts_with(root))
-            .cloned()
             .ok_or_else(|| anyhow!("path is outside tracked workspaces"))?
     };
 
@@ -1428,12 +1422,12 @@ mod tests {
         crate::config::ensure_app_dirs().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("source.rs"), "fn needle() {}\n").unwrap();
+        let workspace = register_test_workspace(root.path());
         let state = crate::daemon::test_state_with_cpu_permits(1);
         let (mut client, server, addr) = connected_pair().await;
         let auth = WebAuth::for_listener(addr);
         let cookie = format!("{}={}", auth.cookie_name, auth.token);
         let handler = tokio::spawn(handle_connection(server, state, test_config(addr), auth));
-        let workspace = percent_encode(&root.path().display().to_string());
         client
             .write_all(
                 format!(
@@ -1552,12 +1546,12 @@ mod tests {
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         crate::config::ensure_app_dirs().unwrap();
         let root = tempfile::tempdir().unwrap();
+        let workspace = register_test_workspace(root.path());
         let state = crate::daemon::test_state_with_cpu_permits(0);
         let (mut client, server, addr) = connected_pair().await;
         let auth = WebAuth::for_listener(addr);
         let cookie = format!("{}={}", auth.cookie_name, auth.token);
         let handler = tokio::spawn(handle_connection(server, state, test_config(addr), auth));
-        let workspace = percent_encode(&root.path().display().to_string());
         client
             .write_all(
                 format!(
@@ -1576,6 +1570,13 @@ mod tests {
             finished.is_ok(),
             "abandoned web search kept waiting for a CPU permit"
         );
+    }
+
+    fn register_test_workspace(path: &Path) -> String {
+        let workspace = Workspace::resolve(path).unwrap();
+        crate::indexer::index_workspace(&workspace, crate::embedding::create_hash_model().as_ref())
+            .unwrap();
+        percent_encode(&workspace.root.display().to_string())
     }
 
     #[test]

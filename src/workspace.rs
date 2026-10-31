@@ -271,12 +271,36 @@ pub fn index_path_string(path: &Path) -> String {
 }
 
 impl Workspace {
+    /// Check the registry before inspecting a root supplied by a Web client.
+    pub(crate) fn resolve_tracked(root: &Path) -> Result<Self> {
+        Self::require_tracked(root)?;
+        Self::resolve_registered(root).context("workspace is not tracked")
+    }
+
+    pub(crate) fn require_tracked(root: &Path) -> Result<()> {
+        let id = workspace_id(root);
+        let path = config::indexes_root()?.join(&id).join("workspace.json");
+        let metadata: WorkspaceMetadata =
+            serde_json::from_slice(&fs::read(path).context("workspace is not tracked")?)?;
+        anyhow::ensure!(
+            metadata.id == id && metadata.root == root,
+            "workspace is not tracked"
+        );
+        Ok(())
+    }
+
     pub(crate) fn resolve_registered(root: &Path) -> Result<Self> {
+        Self::resolve_registered_with_main_worktree_root(root).map(|(workspace, _)| workspace)
+    }
+
+    pub(crate) fn resolve_registered_with_main_worktree_root(
+        root: &Path,
+    ) -> Result<(Self, Option<PathBuf>)> {
         crate::workspace_file::validate_root(root)
             .context("registered workspace root is no longer a safe directory")?;
-        let workspace = Self::resolve(root)?;
+        let (workspace, main) = Self::resolve_with_main_worktree_root(root)?;
         anyhow::ensure!(workspace.root == root, "registered workspace root changed");
-        Ok(workspace)
+        Ok((workspace, main))
     }
 
     pub fn resolve(path: &Path) -> Result<Self> {
@@ -1559,12 +1583,18 @@ fn gitmodules_paths(root: &Path) -> HashSet<PathBuf> {
 }
 
 pub fn resolve_workspace_and_scope(path: &Path) -> Result<(Workspace, Option<WorkspaceScope>)> {
+    resolve_workspace_and_scope_with_base(path).map(|(workspace, scope, _)| (workspace, scope))
+}
+
+pub(crate) fn resolve_workspace_and_scope_with_base(
+    path: &Path,
+) -> Result<(Workspace, Option<WorkspaceScope>, Option<PathBuf>)> {
     let canonical = config::canonicalize_lossy(path)?;
     let metadata = fs::metadata(&canonical)
         .with_context(|| format!("failed to inspect path {}", canonical.display()))?;
     let scope_is_file = metadata.is_file();
 
-    let workspace = Workspace::resolve(&canonical)?;
+    let (workspace, base) = Workspace::resolve_with_main_worktree_root(&canonical)?;
     let rel_path = canonical
         .strip_prefix(&workspace.root)
         .with_context(|| {
@@ -1585,7 +1615,7 @@ pub fn resolve_workspace_and_scope(path: &Path) -> Result<(Workspace, Option<Wor
         })
     };
 
-    Ok((workspace, scope))
+    Ok((workspace, scope, base))
 }
 
 pub fn workspace_id(root: &Path) -> String {

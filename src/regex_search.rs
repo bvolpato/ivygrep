@@ -23,7 +23,6 @@ use crate::merkle::MerkleSnapshot;
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::SearchOptions;
-use crate::walker::SourcePathMatcher;
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 use crate::workspace_file::RootHandle;
 
@@ -55,19 +54,8 @@ struct PublicationStamp {
     snapshot: crate::merkle::SnapshotStamp,
 }
 
-/// Files outside the lexical index that queries must read directly.
-pub(crate) struct UnindexedPaths {
-    /// Snapshot files stored without chunks, such as minified bundles. The
-    /// indexer decided their visibility for this publication.
-    pub(crate) recorded: Vec<PathBuf>,
-    /// Regex only: files the walk found that the snapshot never recorded, such
-    /// as files over the indexing size limit or created since publication.
-    unrecorded: Vec<PathBuf>,
-}
-
-/// `None` records that a publication has too many unindexed files to
-/// enumerate, so later queries skip the work instead of repeating it.
-type Coverage = Option<Arc<UnindexedPaths>>;
+/// Snapshot paths without chunks. `None` means there are too many to enumerate.
+type Coverage = Option<Arc<Vec<PathBuf>>>;
 
 fn coverage_cache() -> &'static Mutex<HashMap<CoverageKey, Coverage>> {
     static CACHE: OnceLock<Mutex<HashMap<CoverageKey, Coverage>>> = OnceLock::new();
@@ -175,7 +163,11 @@ fn required_literal_runs(pattern: &str) -> Option<Vec<String>> {
         .into_iter()
         .flat_map(|literal| {
             literal
-                .split(|byte: &u8| !byte.is_ascii_alphanumeric())
+                // Unicode case-insensitive regexes also match K for K and ſ for S.
+                // Neither character contributes an ASCII trigram to the index.
+                .split(|byte: &u8| {
+                    !byte.is_ascii_alphanumeric() || matches!(byte, b'k' | b'K' | b's' | b'S')
+                })
                 .filter(|run| run.len() >= 3 && run.is_ascii())
                 .map(|run| String::from_utf8_lossy(run).to_ascii_lowercase())
                 .collect::<Vec<_>>()
@@ -315,35 +307,29 @@ fn unindexed_matching_paths(
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
-    let coverage = cached_unindexed_paths(workspace, CoverageConsumer::Regex, options)?;
-    let candidates = coverage
-        .recorded
-        .iter()
-        .map(|path| (path, true))
-        .chain(coverage.unrecorded.iter().map(|path| (path, false)));
-    // Unrecorded paths come from a walk cached per publication. Recheck live
-    // ignore rules, so an exclude added since that walk hides them even when
-    // reindexing finds nothing to publish.
-    let mut source_paths = None;
+    let publication = publication_stamp(workspace)?;
+    let snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).ok()?;
+    let coverage = cached_unindexed_paths(
+        workspace,
+        CoverageConsumer::Regex,
+        options,
+        publication.clone(),
+        Some(&snapshot),
+    )?;
+    // A new file over the indexing limit does not change the publication.
+    let unrecorded = unrecorded_regex_paths(workspace, &snapshot, coverage.len(), options)?;
+    if publication_stamp(workspace)? != publication {
+        return None;
+    }
     let files = RootHandle::new(&workspace.root);
     let mut paths = Vec::new();
-    for (rel, recorded) in candidates {
+    for rel in coverage.iter().chain(&unrecorded) {
         if options.is_cancelled() {
             return Some(Vec::new());
         }
-        let type_match = type_filter_match_for_path(rel, options.type_filter.as_deref());
         if scope_filter.is_none_or(|scope| scope.matches(rel))
             && path_matcher.matches(rel)
-            && type_match != PathTypeFilterMatch::Reject
-            && (recorded
-                || source_paths
-                    .get_or_insert_with(|| {
-                        SourcePathMatcher::new(&workspace.root, options.skip_gitignore)
-                    })
-                    .allows(rel)
-                    .ok()?)
-            && (type_match != PathTypeFilterMatch::ValidateText
-                || unknown_file_is_indexable_text(&files, rel))
+            && matches_live_file_type(&files, rel, options.type_filter.as_deref())
         {
             paths.push(rel.clone());
         }
@@ -376,13 +362,21 @@ pub(crate) fn unindexed_literal_candidates(
     workspace: &Workspace,
     options: &SearchOptions,
 ) -> Coverage {
-    cached_unindexed_paths(workspace, CoverageConsumer::Literal, options)
+    cached_unindexed_paths(
+        workspace,
+        CoverageConsumer::Literal,
+        options,
+        publication_stamp(workspace)?,
+        None,
+    )
 }
 
 fn cached_unindexed_paths(
     workspace: &Workspace,
     consumer: CoverageConsumer,
     options: &SearchOptions,
+    publication: PublicationStamp,
+    snapshot: Option<&MerkleSnapshot>,
 ) -> Coverage {
     let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
     if use_overlay && workspace.worktree_overlay_is_stale().ok()? {
@@ -392,13 +386,20 @@ fn cached_unindexed_paths(
         workspace_id: workspace.id.clone(),
         consumer,
         skip_gitignore: options.skip_gitignore,
-        publication: publication_stamp(workspace)?,
+        publication,
     };
     if let Some(coverage) = coverage_cache().lock().ok()?.get(&key) {
         return coverage.clone();
     }
 
-    let snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).ok()?;
+    let loaded;
+    let snapshot = match snapshot {
+        Some(snapshot) => snapshot,
+        None => {
+            loaded = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).ok()?;
+            &loaded
+        }
+    };
     let covered = chunk_backed_paths(workspace, use_overlay)?;
     // Stores commit before the snapshot is saved. Never pair chunks from one
     // publication with the file list of another.
@@ -415,35 +416,20 @@ fn cached_unindexed_paths(
             return remember_coverage(key, None);
         }
     }
-    let unrecorded = match consumer {
-        CoverageConsumer::Literal => {
-            // Empty files and files with a NUL in the sniffed prefix cannot
-            // produce a literal hit. Drop them once per publication instead of
-            // reading every binary asset on each query.
-            let files = RootHandle::new(&workspace.root);
-            recorded = recorded
-                .into_par_iter()
-                .filter(|path| !options.is_cancelled() && may_contain_text(&files, path))
-                .collect();
-            Vec::new()
-        }
-        CoverageConsumer::Regex => {
-            match unrecorded_regex_paths(workspace, &snapshot, recorded.len(), options)? {
-                Some(unrecorded) => unrecorded,
-                None => return remember_coverage(key, None),
-            }
-        }
-    };
+    if consumer == CoverageConsumer::Literal {
+        // Empty files and files with a NUL in the sniffed prefix cannot
+        // produce a literal hit. Drop them once per publication instead of
+        // reading every binary asset on each query.
+        let files = RootHandle::new(&workspace.root);
+        recorded = recorded
+            .into_par_iter()
+            .filter(|path| !options.is_cancelled() && may_contain_text(&files, path))
+            .collect();
+    }
     if options.is_cancelled() {
         return None;
     }
-    remember_coverage(
-        key,
-        Some(Arc::new(UnindexedPaths {
-            recorded,
-            unrecorded,
-        })),
-    )
+    remember_coverage(key, Some(Arc::new(recorded)))
 }
 
 /// Returns `None` while this index or its base carries a publication marker,
@@ -522,17 +508,13 @@ fn may_contain_text(files: &RootHandle, path: &std::path::Path) -> bool {
     }
 }
 
-/// Files the snapshot never recorded, found by walking with the query's ignore
-/// rules: files over the indexing size limit, files created since publication,
-/// and ignored files when a query skips ignore rules the index applied. The
-/// outer `None` skips caching, for example after a walk error. The inner `None`
-/// records too many unindexed files.
+/// Walk with the current ignore rules to find files missing from the snapshot.
 fn unrecorded_regex_paths(
     workspace: &Workspace,
     snapshot: &MerkleSnapshot,
     recorded: usize,
     options: &SearchOptions,
-) -> Option<Option<Vec<PathBuf>>> {
+) -> Option<Vec<PathBuf>> {
     let mut unrecorded = Vec::new();
     for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
         if options.is_cancelled() {
@@ -548,11 +530,10 @@ fn unrecorded_regex_paths(
         }
         unrecorded.push(relative.to_path_buf());
         if recorded + unrecorded.len() > MAX_UNINDEXED_FILES {
-            return Some(None);
+            return None;
         }
     }
-    unrecorded.sort();
-    Some(Some(unrecorded))
+    Some(unrecorded)
 }
 
 fn constrain_query_to_scope(
@@ -810,7 +791,7 @@ enum PathTypeFilterMatch {
     Reject,
 }
 
-fn type_filter_matches_language(language: &str, filter: &str) -> bool {
+pub(crate) fn type_filter_matches_language(language: &str, filter: &str) -> bool {
     let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
     language.eq_ignore_ascii_case(expected)
 }
@@ -836,6 +817,18 @@ fn unknown_file_is_indexable_text(files: &RootHandle, path: &std::path::Path) ->
         return false;
     };
     crate::chunking::is_indexable_file_reader(path, &mut file).unwrap_or(false)
+}
+
+pub(crate) fn matches_live_file_type(
+    files: &RootHandle,
+    path: &std::path::Path,
+    filter: Option<&str>,
+) -> bool {
+    match type_filter_match_for_path(path, filter) {
+        PathTypeFilterMatch::Match => true,
+        PathTypeFilterMatch::Reject => false,
+        PathTypeFilterMatch::ValidateText => unknown_file_is_indexable_text(files, path),
+    }
 }
 
 fn expand_regex_context(
@@ -1019,15 +1012,11 @@ mod tests {
     fn required_literal_runs_ignore_optional_and_alternative_text() {
         assert_eq!(
             required_literal_runs("func.*DDSQLizer").unwrap(),
-            vec!["ddsqlizer".to_string(), "func".to_string()]
+            vec!["qlizer".to_string(), "func".to_string()]
         );
         assert_eq!(
             required_literal_runs("SELECT.*FROM.*WHERE").unwrap(),
-            vec![
-                "select".to_string(),
-                "where".to_string(),
-                "from".to_string()
-            ]
+            vec!["elect".to_string(), "where".to_string(), "from".to_string()]
         );
         assert_eq!(
             required_literal_runs("hello_world").unwrap(),
@@ -1513,6 +1502,11 @@ mod tests {
             indexed_hits[0].preview,
             "before\nunknown_extension_marker\nafter"
         );
+        for query in ["unknown_extension_marker", "_"] {
+            let hits = crate::search::literal_search(&workspace, query, &options).unwrap();
+            assert_eq!(hits.len(), 1, "{query}: {hits:?}");
+            assert_eq!(hits[0].file_path, PathBuf::from("notes.memo"));
+        }
     }
 
     #[test]
@@ -1579,7 +1573,7 @@ mod tests {
             regex_paths(),
             HashSet::from([PathBuf::from("created.rs"), PathBuf::from("indexed.rs")])
         );
-        // The cached walk must not keep a file an exclude added before reindexing hides.
+        // New ignore rules take effect without waiting for another publication.
         std::fs::write(root.path().join(".gitignore"), "created.rs\n").unwrap();
         assert_eq!(regex_paths(), HashSet::from([PathBuf::from("indexed.rs")]));
     }
@@ -1595,12 +1589,19 @@ mod tests {
             "pub fn ordinary_source() {}\n",
         )
         .unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let before = regex_search_with_options(
+            &workspace,
+            "oversized_regex_marker",
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(before.is_empty());
         let mut oversized = "padding line\n".repeat(1_400_000);
         oversized.push_str("oversized_regex_marker\n");
         std::fs::write(root.path().join("oversized.log"), oversized).unwrap();
-
-        let workspace = Workspace::resolve(root.path()).unwrap();
-        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
         let hits = regex_search_with_options(
             &workspace,

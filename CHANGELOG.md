@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Web searches can select registered workspace roots only. A request for an untracked directory no longer creates an index or makes its files available through the Web API.
+
+### Fixed
+
+- `--all` and linked-worktree searches ask before rebuilding an index of the home directory, one of its ancestors, or the filesystem root. They also ask before `--skip-gitignore` expands such an index, even when a daemon runs the search.
+- Daemon searches honor `--hash` even when a neural model is already loaded. They can update hash vectors without starting a neural worker.
+- Literal `--type text` includes text files with unknown extensions. Regex searches find Unicode case-insensitive matches that have no matching ASCII trigram, and find new files even when a reindex leaves the index unchanged.
+
 ## [1.3.1] - 2026-10-28
 
 ### Changed

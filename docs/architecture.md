@@ -625,20 +625,9 @@ File-oriented literal searches rank files by matching-line count and path, then 
 
 The hit-oriented literal API retains at most the requested hit count per file and per parallel partial result set. It preserves path and span ordering without materializing every matching snippet.
 
-Literal and regex searches also verify files the indexer walked but stored
-without chunks, such as minified bundles. Candidates are Merkle snapshot paths
-from the last completed publication that have no effective chunks (overlay
-chunks plus untombstoned base chunks), so ignore and exclude decisions are the
-indexer's own rather than a second walk's. Coverage is cached per publication
-(index and base generations plus the snapshot file identity) and skipped while a
-publication marker exists. Literal search drops empty files and files with a NUL
-in the sniffed prefix once per publication. Regex search also walks once per
-publication for files the snapshot never recorded: files over the 16 MiB
-indexing limit, files created since publication, and ignored files when a query
-skips ignore rules the index applied. Each query rechecks those walked files
-against live ignore rules, so a new exclude hides them even when reindexing has
-nothing to publish. Above 4,096 unindexed files, literal keeps indexed
-candidates and regex walks the workspace.
+Literal and regex searches also verify files the indexer recorded without chunks, such as minified bundles. The cache holds paths in the last Merkle snapshot that have no effective chunks in the overlay or base index. The cache key includes the index and base generations and the snapshot file identity. Searches bypass the cache during an unfinished publication. Literal search drops empty files and files with a NUL in the sniffed prefix once per publication.
+
+An indexed regex search also walks file names under the current ignore rules. It checks paths absent from the snapshot, including new files and files over the 16 MiB indexing limit. A new file can therefore match even when a reindex has nothing to publish. Above 4,096 unindexed files, literal search keeps indexed candidates and regex search falls back to a full scan.
 
 Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,
@@ -1124,6 +1113,8 @@ recovery (`EnsureWatcher`), restart, progress, and structured errors. A client t
 older protocol (for example a development build with the same build version)
 gets a structured version error from the `Version` probe and restarts it.
 
+Version 10 added file-oriented literal results. Version 11 adds the `hash_only` search option. An older client that omits it keeps automatic model selection. A hash-only request uses hash vectors even if the daemon has a neural model loaded, and it can request only hash vectors from the background queue.
+
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered
 IPC connections cannot revive stale searches.
@@ -1211,9 +1202,7 @@ of terminating the session.
 
 ### Web
 
-Daemon serves embedded assets and APIs for status, search, streaming search,
-file reads, editor launch, and workspace trees. File operations enforce tracked
-workspace containment.
+The daemon serves embedded assets and APIs for status, search, streaming search, file reads, editor launch, and workspace trees. Web clients select roots from the workspace registry. Searches check that the root is still registered after waiting for an index operation. A linked worktree also needs a registered main checkout because rebuilding an overlay can rebuild its base index. Unlike a local CLI search, a Web search cannot register a new root. File operations enforce tracked workspace containment.
 
 Loopback is default. Every listener, loopback included, requires a generated
 per-daemon session token: any local user can reach a loopback port. API clients
