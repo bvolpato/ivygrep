@@ -589,7 +589,11 @@ fn web_server_serves_status_search_and_file() {
                 .ends_with(repo.path().file_name().unwrap().to_str().unwrap()))
     );
 
-    let workspace = percent_encode(&repo.path().canonicalize().unwrap().display().to_string());
+    let workspace = percent_encode(&format!(
+        "{}{}",
+        repo.path().canonicalize().unwrap().display(),
+        std::path::MAIN_SEPARATOR
+    ));
     let search_path =
         format!("/api/search?q=web_marker_search_target&workspace={workspace}&limit=5");
     let search: serde_json::Value =

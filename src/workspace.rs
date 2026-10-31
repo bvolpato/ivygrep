@@ -278,15 +278,48 @@ impl Workspace {
     }
 
     pub(crate) fn require_tracked(root: &Path) -> Result<()> {
-        let id = workspace_id(root);
-        let path = config::indexes_root()?.join(&id).join("workspace.json");
-        let metadata: WorkspaceMetadata =
-            serde_json::from_slice(&fs::read(path).context("workspace is not tracked")?)?;
+        // Normalize separators without resolving an untrusted path on the host.
+        let id = workspace_id(&root.components().collect::<PathBuf>());
+        let indexes = config::indexes_root()?
+            .canonicalize()
+            .context("workspace is not tracked")?;
+        let path = Path::new(&id).join("workspace.json");
+        let bytes =
+            crate::workspace_file::read(&indexes, &path).context("workspace is not tracked")?;
+        let metadata: WorkspaceMetadata = serde_json::from_slice(&bytes)?;
         anyhow::ensure!(
             metadata.id == id && metadata.root == root,
             "workspace is not tracked"
         );
         Ok(())
+    }
+
+    pub(crate) fn canonical_member(&self, member: &Path) -> Result<PathBuf> {
+        let path = self.root.join(member);
+        anyhow::ensure!(
+            !member
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+                && path.starts_with(&self.root),
+            "path is outside workspace"
+        );
+        let path = path.canonicalize()?;
+        anyhow::ensure!(path.starts_with(&self.root), "path is outside workspace");
+        Ok(path)
+    }
+
+    pub(crate) fn scope_within_root(&self, scope: &Path) -> Result<Option<WorkspaceScope>> {
+        let path = self
+            .canonical_member(scope)
+            .context("scope is missing or outside selected workspace")?;
+        anyhow::ensure!(
+            !path
+                .ancestors()
+                .take_while(|dir| *dir != self.root)
+                .any(is_git_workspace_root),
+            "scope is outside selected workspace"
+        );
+        scope_for_canonical_path(&self.root, &path)
     }
 
     pub(crate) fn resolve_registered(root: &Path) -> Result<Self> {
@@ -1590,32 +1623,26 @@ pub(crate) fn resolve_workspace_and_scope_with_base(
     path: &Path,
 ) -> Result<(Workspace, Option<WorkspaceScope>, Option<PathBuf>)> {
     let canonical = config::canonicalize_lossy(path)?;
-    let metadata = fs::metadata(&canonical)
-        .with_context(|| format!("failed to inspect path {}", canonical.display()))?;
-    let scope_is_file = metadata.is_file();
-
     let (workspace, base) = Workspace::resolve_with_main_worktree_root(&canonical)?;
-    let rel_path = canonical
-        .strip_prefix(&workspace.root)
-        .with_context(|| {
-            format!(
-                "path {} is not inside workspace root {}",
-                canonical.display(),
-                workspace.root.display()
-            )
-        })?
-        .to_path_buf();
-
-    let scope = if rel_path.as_os_str().is_empty() {
-        None
-    } else {
-        Some(WorkspaceScope {
-            rel_path,
-            is_file: scope_is_file,
-        })
-    };
-
+    let scope = scope_for_canonical_path(&workspace.root, &canonical)?;
     Ok((workspace, scope, base))
+}
+
+fn scope_for_canonical_path(root: &Path, canonical: &Path) -> Result<Option<WorkspaceScope>> {
+    let rel_path = canonical.strip_prefix(root).with_context(|| {
+        format!(
+            "path {} is not inside workspace root {}",
+            canonical.display(),
+            root.display()
+        )
+    })?;
+    if rel_path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(WorkspaceScope {
+        rel_path: rel_path.to_path_buf(),
+        is_file: fs::metadata(canonical)?.is_file(),
+    }))
 }
 
 pub fn workspace_id(root: &Path) -> String {

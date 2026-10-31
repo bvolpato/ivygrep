@@ -754,20 +754,12 @@ fn resolve_context_workspace(
         .map(str::trim)
         .filter(|workspace| !workspace.is_empty() && *workspace != "__all__")
         .context("select one workspace for context mode")?;
-    let selected_root = Workspace::resolve_tracked(Path::new(selected))?.root;
-    let scoped_path = param(params, "scope")
-        .map(str::trim)
-        .filter(|scope| !scope.is_empty())
-        .map_or_else(|| selected_root.clone(), |scope| selected_root.join(scope));
-    let scoped_path = scoped_path.canonicalize()?;
-    if !scoped_path.starts_with(&selected_root) {
-        bail!("scope is outside selected workspace");
-    }
-    let (workspace, scope_filter) = crate::workspace::resolve_workspace_and_scope(&scoped_path)?;
-    if workspace.root != selected_root {
-        bail!("scope is outside selected workspace");
-    }
-    Ok((workspace, scope_filter))
+    let workspace = Workspace::resolve_tracked(Path::new(selected))?;
+    let scope = match param(params, "scope").map(str::trim) {
+        None | Some("") => None,
+        Some(scope) => workspace.scope_within_root(Path::new(scope))?,
+    };
+    Ok((workspace, scope))
 }
 
 async fn build_context_pack(
@@ -791,9 +783,7 @@ async fn build_context_pack(
         bail!("budget_tokens must be between 256 and 131072");
     }
     let skip_gitignore = parse_bool_param(params, "skip_gitignore");
-    let model = state
-        .prepare_context_model(&workspace, skip_gitignore)
-        .await?;
+    let (workspace, model) = state.prepare_context(&workspace, skip_gitignore).await?;
     // The builder runs on the blocking pool, which dropping this future (the
     // browser disconnected) cannot stop. The guard sets the token its retrieval
     // searches check, so abandoned work ends early.
@@ -1050,6 +1040,7 @@ fn tracked_roots() -> Result<Vec<PathBuf>> {
     // use. Keep its id order and de-duplication.
     let roots = list_workspace_metadata()?
         .into_iter()
+        .filter(|(dir, metadata)| dir.file_name() == Some(metadata.id.as_ref()))
         .map(|(_, metadata)| (metadata.id, metadata.root))
         .collect::<BTreeMap<_, _>>();
     Ok(roots.into_values().collect())
@@ -1062,42 +1053,33 @@ fn resolve_tracked_path(
     let workspace_param = param(params, "workspace")
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "__all__");
-    let path_param = param(params, "path")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(".");
+    let path = Path::new(
+        param(params, "path")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("."),
+    );
 
     let root = if let Some(workspace) = workspace_param {
-        Workspace::resolve_tracked(Path::new(workspace))?.root
+        PathBuf::from(workspace)
     } else {
-        let candidate = PathBuf::from(path_param);
-        if !candidate.is_absolute() {
+        if !path.is_absolute() {
             bail!("workspace is required for relative paths");
         }
-        let canonical = candidate.canonicalize()?;
         tracked_roots()?
             .into_iter()
-            .find(|root| canonical.starts_with(root))
+            .find(|root| path.starts_with(root))
             .ok_or_else(|| anyhow!("path is outside tracked workspaces"))?
     };
-
-    let raw_path = PathBuf::from(path_param);
-    let candidate = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        root.join(raw_path)
-    };
-    let canonical = candidate.canonicalize()?;
-    if !canonical.starts_with(&root) {
-        bail!("path is outside workspace");
-    }
+    let workspace = Workspace::resolve_tracked(&root)?;
+    let canonical = workspace.canonical_member(path)?;
     if require_dir && !canonical.is_dir() {
         bail!("path is not a directory");
     }
     if !require_dir && !canonical.is_file() {
         bail!("path is not a file");
     }
-    Ok((root, canonical))
+    Ok((workspace.root, canonical))
 }
 
 fn read_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
@@ -1577,6 +1559,79 @@ mod tests {
         crate::indexer::index_workspace(&workspace, crate::embedding::create_hash_model().as_ref())
             .unwrap();
         percent_encode(&workspace.root.display().to_string())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn context_scopes_stay_in_the_selected_non_git_workspace() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), "fn marker() {}\n").unwrap();
+        let registered = register_test_workspace(root.path());
+        let resolve = |scope: &str| {
+            let (_, params) = parse_target(&format!("/?workspace={registered}&scope={scope}"))?;
+            resolve_context_workspace(&params)
+        };
+        for (path, is_file) in [("src", false), ("src/lib.rs", true)] {
+            let (workspace, scope) = resolve(path).unwrap();
+            assert_eq!(workspace.root, root.path().canonicalize().unwrap());
+            let scope = scope.unwrap();
+            assert_eq!(scope.rel_path, Path::new(path));
+            assert_eq!(scope.is_file, is_file);
+        }
+        for path in [home.path().to_path_buf(), home.path().join("missing")] {
+            let encoded = percent_encode(&path.to_string_lossy());
+            assert_eq!(
+                resolve(&encoded).unwrap_err().to_string(),
+                "scope is missing or outside selected workspace"
+            );
+            let (_, params) = parse_target(&format!("/api/file?path={encoded}")).unwrap();
+            assert_eq!(
+                read_tracked_file(&params).unwrap_err().to_string(),
+                "path is outside tracked workspaces"
+            );
+        }
+        let nested = root.path().join("nested");
+        assert!(
+            std::process::Command::new("git")
+                .arg("init")
+                .arg("-q")
+                .arg(&nested)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(resolve("nested").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(home.path(), root.path().join("outside")).unwrap();
+            assert!(resolve("outside").is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn file_requests_reject_relocated_registry_entries() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("source.rs"), "fn marker() {}\n").unwrap();
+        let registered = register_test_workspace(root.path());
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let backup = workspace.index_dir.with_file_name("backup");
+        std::fs::rename(&workspace.index_dir, &backup).unwrap();
+        std::os::unix::fs::symlink(&backup, &workspace.index_dir).unwrap();
+        let path = percent_encode(&workspace.root.join("source.rs").to_string_lossy());
+        for query in [
+            format!("workspace={registered}&path=source.rs"),
+            format!("path={path}"),
+        ] {
+            let (_, params) = parse_target(&format!("/api/file?{query}")).unwrap();
+            assert!(read_tracked_file(&params).is_err(), "{query}");
+        }
     }
 
     #[test]

@@ -2364,16 +2364,16 @@ impl DaemonState {
 
     /// Dropping the returned future (the Web client hung up) also stops a lease
     /// wait already handed to the blocking pool.
-    pub(crate) async fn prepare_context_model(
+    pub(crate) async fn prepare_context(
         &self,
         workspace: &Workspace,
         skip_gitignore: bool,
-    ) -> Result<Arc<dyn EmbeddingModel>> {
+    ) -> Result<(Workspace, Arc<dyn EmbeddingModel>)> {
         self.require_tracked_base(workspace)?;
         let cancellation = SearchCancellation::new(false);
         let mut cancel_on_drop = CancelSearchOnDrop(Some(cancellation.clone()));
-        let model = self
-            .prepare_context_model_cancellable(
+        let prepared = self
+            .prepare_context_cancellable(
                 workspace,
                 skip_gitignore,
                 &cancellation,
@@ -2381,20 +2381,21 @@ impl DaemonState {
             )
             .await;
         cancel_on_drop.disarm();
-        model
+        prepared
     }
 
     /// Workspace lease first, CPU permit second, both held by the returned
     /// model until the context pack is built. `cancellation` ends either wait.
+    /// Use the returned workspace because the checkout can change during the wait.
     /// Local context packs wait for the neural model as an in-process build does.
     /// Web requests can use the hash model while the neural model loads.
-    async fn prepare_context_model_cancellable(
+    async fn prepare_context_cancellable(
         &self,
         workspace: &Workspace,
         skip_gitignore: bool,
         cancellation: &SearchCancellation,
         origin: RequestOrigin,
-    ) -> Result<Arc<dyn EmbeddingModel>> {
+    ) -> Result<(Workspace, Arc<dyn EmbeddingModel>)> {
         let _timer = crate::performance::StageTimer::start("context_prepare");
         let search_leases = self
             .acquire_search_leases(
@@ -2437,11 +2438,12 @@ impl DaemonState {
                 state.maybe_start_model_load();
                 state.get_model_for_search(false)?
             };
-            Ok(Arc::new(ModeLeasedEmbeddingModel {
+            let model: Arc<dyn EmbeddingModel> = Arc::new(ModeLeasedEmbeddingModel {
                 inner,
                 _leases: leases,
                 _cpu_permit: permit,
-            }) as Arc<dyn EmbeddingModel>)
+            });
+            Ok((workspace, model))
         })
         .await?
     }
@@ -5220,16 +5222,10 @@ async fn handle_request_with_cancellation(
                 cancel_token: Some(cancellation.flag.clone()),
             };
             let bundle = match state
-                .prepare_context_model_cancellable(
-                    &workspace,
-                    skip_gitignore,
-                    &cancellation,
-                    origin,
-                )
+                .prepare_context_cancellable(&workspace, skip_gitignore, &cancellation, origin)
                 .await
             {
-                Ok(model) => {
-                    let build_workspace = workspace.clone();
+                Ok((build_workspace, model)) => {
                     let build_query = query.clone();
                     let build_state = state.clone();
                     tokio::task::spawn_blocking(move || {
@@ -5249,7 +5245,7 @@ async fn handle_request_with_cancellation(
                             },
                             Some(&search_context),
                         )?;
-                        Ok(serde_json::to_value(bundle)?)
+                        Ok((serde_json::to_value(bundle)?, build_workspace))
                     })
                     .await
                     .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
@@ -5260,7 +5256,7 @@ async fn handle_request_with_cancellation(
                 return cancelled_search_response();
             }
             match bundle {
-                Ok(bundle) => {
+                Ok((bundle, workspace)) => {
                     state.schedule_search_enhancement(
                         vec![workspace],
                         EnhancementPolicy::for_query(query_uses_neural(&query, false)),
@@ -8191,6 +8187,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn daemon_workspace_identity_re_resolves_queued_index_request() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repositories = tempdir().unwrap();
@@ -8235,6 +8234,16 @@ mod tests {
         .await
         .expect("index request should queue for the old workspace lease");
 
+        let mut queued_context = Box::pin(handle_request(
+            state.clone(),
+            context_pack_request_for(&original, "newvioletquartz"),
+        ));
+        poll_fn(|cx| {
+            assert!(queued_context.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let queued_context = tokio::spawn(queued_context);
         let queued_search = tokio::spawn(handle_request(
             state.clone(),
             test_hybrid_search_request(&original, "newvioletquartz"),
@@ -8281,6 +8290,22 @@ mod tests {
         assert!(
             matches!(queued_search, DaemonResponse::SearchResults { ref hits, .. } if hits.len() == 1),
             "queued search should use the replacement workspace: {queued_search:?}"
+        );
+        let context = tokio::time::timeout(Duration::from_secs(30), queued_context)
+            .await
+            .unwrap()
+            .unwrap();
+        let DaemonResponse::ContextPack { bundle } = context else {
+            panic!("queued context should use the replacement workspace: {context:?}");
+        };
+        assert!(
+            bundle["items"].as_array().unwrap().iter().any(|item| {
+                item["preview"]
+                    .as_str()
+                    .unwrap()
+                    .contains("newvioletquartz")
+            }),
+            "{bundle}"
         );
 
         let current = handle_request(
@@ -9075,10 +9100,7 @@ mod tests {
                 .set(Arc::new(TestNeuralModel) as Arc<dyn EmbeddingModel>)
                 .is_ok()
         );
-        let model = state
-            .prepare_context_model(&workspace, false)
-            .await
-            .unwrap();
+        let (_, model) = state.prepare_context(&workspace, false).await.unwrap();
         assert!(model.model_identity().is_none());
     }
 

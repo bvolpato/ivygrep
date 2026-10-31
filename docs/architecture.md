@@ -1204,6 +1204,8 @@ of terminating the session.
 
 The daemon serves embedded assets and APIs for status, search, streaming search, file reads, editor launch, and workspace trees. Web clients select roots from the workspace registry. Searches check that the root is still registered after waiting for an index operation. A linked worktree also needs a registered main checkout because rebuilding an overlay can rebuild its base index. Unlike a local CLI search, a Web search cannot register a new root. File operations enforce tracked workspace containment.
 
+Use the workspace root reported by `/api/status`. File paths and context scopes must stay inside that root and cannot contain `..` components. A context request can select a file or directory even if the workspace has no Git metadata. If the checkout changes while the request waits, the context builder uses the workspace for which it holds the lease.
+
 Loopback is default. Every listener, loopback included, requires a generated
 per-daemon session token: any local user can reach a loopback port. API clients
 may send it as a bearer token. Loopback listeners accept only loopback Host

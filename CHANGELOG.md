@@ -10,6 +10,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Context searches in the Web UI now accept a file or directory inside a registered non-Git workspace. If a checkout changes while a context request waits, the daemon uses the replacement index.
 - `--all` and linked-worktree searches ask before rebuilding an index of the home directory, one of its ancestors, or the filesystem root. They also ask before `--skip-gitignore` expands such an index, even when a daemon runs the search.
 - Daemon searches honor `--hash` even when a neural model is already loaded. They can update hash vectors without starting a neural worker.
 - Literal `--type text` includes text files with unknown extensions. Regex searches find Unicode case-insensitive matches that have no matching ASCII trigram, and find new files even when a reindex leaves the index unchanged.
