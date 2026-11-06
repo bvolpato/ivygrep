@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "d0ab8a7617075792a41db245d2073b67e91ebcfbe8b819e5b9d1455d34de89f7",
+    "sha256": "a092363f49d2c70a17fed221825eb46f1b954e4fe3fc68000a57a7aed1c06074",
     "version": "ivygrep 1.3.1"
   },
   "fixture": {
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "9a8cc279e58048250632dd96c2018f915789bc6e99ae8d5cef7770ea6409187f"
   },
-  "ivygrep_commit": "edada76caca9e70f28992e26a9ff4bb42d190343",
+  "ivygrep_commit": "f898466fe9205680a4fa5d1ea765f53003ba80b2",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -26,7 +26,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 9548.82205487229,
+      "elapsed_ms": 3557.4154989990348,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -38,10 +38,10 @@
       "mean_final_recall": 0.94,
       "mean_hybrid_deep_recall": 0.98,
       "mean_mrr": 0.9066666666666667,
-      "mean_ndcg10": 0.8679440283152121,
+      "mean_ndcg10": 0.8696291523244517,
       "mean_p1": 0.84,
-      "mean_p5": 0.19200000000000003,
-      "mean_recall5": 0.88,
+      "mean_p5": 0.2,
+      "mean_recall5": 0.9,
       "mode": "foreground",
       "neural_queries_executed": 0,
       "neural_queries_unobservable": 0,
@@ -181,7 +181,7 @@
           "final_recall": 1.0,
           "id": "workspace-config",
           "mrr": 1.0,
-          "ndcg10": 0.5997368403740738,
+          "ndcg10": 0.641864940605065,
           "neural_executed": false
         },
         {
@@ -291,7 +291,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 8841.837993822992,
+      "elapsed_ms": 3845.906105998438,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -303,10 +303,10 @@
       "mean_final_recall": 0.94,
       "mean_hybrid_deep_recall": 0.98,
       "mean_mrr": 0.9066666666666667,
-      "mean_ndcg10": 0.8679440283152121,
+      "mean_ndcg10": 0.8696291523244517,
       "mean_p1": 0.84,
-      "mean_p5": 0.19200000000000003,
-      "mean_recall5": 0.88,
+      "mean_p5": 0.2,
+      "mean_recall5": 0.9,
       "mode": "hash-enriched",
       "neural_queries_executed": 0,
       "neural_queries_unobservable": 0,
@@ -446,7 +446,7 @@
           "final_recall": 1.0,
           "id": "workspace-config",
           "mrr": 1.0,
-          "ndcg10": 0.5997368403740738,
+          "ndcg10": 0.641864940605065,
           "neural_executed": false
         },
         {
@@ -556,7 +556,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 12944.79703111574,
+      "elapsed_ms": 9187.284435000038,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -568,10 +568,10 @@
       "mean_final_recall": 0.94,
       "mean_hybrid_deep_recall": 0.98,
       "mean_mrr": 0.9066666666666667,
-      "mean_ndcg10": 0.8679440283152121,
+      "mean_ndcg10": 0.8696291523244517,
       "mean_p1": 0.84,
-      "mean_p5": 0.19200000000000003,
-      "mean_recall5": 0.88,
+      "mean_p5": 0.2,
+      "mean_recall5": 0.9,
       "mode": "neural",
       "neural_queries_executed": 25,
       "neural_queries_unobservable": 0,
@@ -711,7 +711,7 @@
           "final_recall": 1.0,
           "id": "workspace-config",
           "mrr": 1.0,
-          "ndcg10": 0.5997368403740738,
+          "ndcg10": 0.641864940605065,
           "neural_executed": true
         },
         {
@@ -828,6 +828,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "b97471c27e02b3f3d813a641629b77868f5af5bb1687a7215cbd34cd2ea4311e"
+    "sha256": "305b53a5718181e4f1d56ca8caca48a9cd282c8e064f563f2757530b65e48d62"
   }
 }

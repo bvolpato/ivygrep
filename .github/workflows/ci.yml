@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
 
@@ -61,21 +61,43 @@ jobs:
       - name: Set npm seven-day release cutoff
         run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "NPM_CONFIG_BEFORE=" + new Date(Date.now() - 7 * 86400000).toISOString() + "\n")'
 
-      - name: Install pnpm
-        run: npm install -g pnpm@11.0.0
-
       - name: Lint Markdown
         run: npm exec --yes --package=markdownlint-cli2@0.23.2 -- markdownlint-cli2
 
       - name: Verify web frontend
         run: |
-          pnpm -C web install --frozen-lockfile
-          pnpm -C web check
-          pnpm -C web build
-          git diff --exit-code -- web/dist
+          cd web
+          corepack pnpm install --frozen-lockfile
+          corepack pnpm check
+          corepack pnpm build
+          git -C .. diff --exit-code -- web/dist
 
       - name: Test Python harnesses
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Fetch evidence publication commits
+        run: |
+          set -euo pipefail
+          manifest=benchmarks/evidence/manifest.json
+          commits="$(jq -r '
+            [.evidence[]?.publication_commit, .release_history_publication_commit]
+            | map(select(. != null))
+            | if all(.[]; type == "string" and test("^[0-9a-fA-F]{40}$"))
+              then .[] | ascii_downcase
+              else error("invalid publication commit")
+              end
+          ' "$manifest")"
+          while IFS= read -r commit; do
+            [[ -n "$commit" ]] || continue
+            if [[ ! "$commit" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::Invalid evidence publication commit in $manifest"
+              exit 1
+            fi
+            if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$commit"
+            fi
+            git cat-file -e "$commit^{commit}"
+          done <<< "$commits"
 
       - name: Verify generated benchmark dashboard
         run: |
@@ -142,7 +164,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Install Python on Windows
         if: runner.os == 'Windows'
@@ -284,7 +306,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Install Python on Windows
         if: runner.os == 'Windows'
@@ -346,9 +368,9 @@ jobs:
 
       - name: Install uv for neural model caching
         if: matrix.validate_backend != ''
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: 0.13.5
+          version: 0.13.6
 
       - name: Validate local neural execution
         if: matrix.validate_backend != ''
@@ -396,13 +418,15 @@ jobs:
       - name: Install Playwright Chromium for Web UI E2E
         if: runner.os == 'Linux' && matrix.cargo_flags == ''
         run: |
-          npm install -g pnpm@11.0.0
-          pnpm -C web install --frozen-lockfile
-          pnpm -C web exec playwright install chromium
+          cd web
+          corepack enable pnpm
+          corepack pnpm install --frozen-lockfile
+          corepack pnpm exec playwright install chromium
 
       - name: Run bundled Web UI browser E2E
         if: runner.os == 'Linux' && matrix.cargo_flags == ''
-        run: ./scripts/e2e_web_ui.sh --binary "$PWD/target/release/ig"
+        working-directory: web
+        run: ../scripts/e2e_web_ui.sh --binary "$GITHUB_WORKSPACE/target/release/ig"
 
   mutation-correctness:
     name: Mutation correctness
@@ -414,7 +438,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -423,9 +447,9 @@ jobs:
           cache-bin: "false"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: 0.13.5
+          version: 0.13.6
 
       - name: Build hash-only daemon
         run: cargo build --locked --no-default-features --bin ig

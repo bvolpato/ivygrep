@@ -32,7 +32,7 @@ use crate::protocol::{
 };
 use crate::search::{SearchOptions, validate_forced_neural_workspaces};
 use crate::search_service::{HitOrdering, SearchBatch, SearchOutcome, select_search_workspaces};
-use crate::workspace::{Workspace, WorkspaceScope, resolve_workspace_and_scope};
+use crate::workspace::{Workspace, WorkspaceScope};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -199,7 +199,7 @@ impl App {
             Some(path) => path.clone(),
             None => std::env::current_dir()?,
         };
-        let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
+        let (workspace, scope_filter) = crate::cli::resolve_query_workspace(&cli, &query_path)?;
         let bg_status = prepare_workspace_for_tui(&cli, &workspace, &runtime)?;
 
         Ok(Self {
@@ -644,24 +644,24 @@ fn prepare_workspace_for_tui(
     workspace: &Workspace,
     runtime: &tokio::runtime::Handle,
 ) -> Result<Option<String>> {
-    if cli.all_indices && !cli.skip_gitignore {
-        return Ok(None);
+    if cli.all_indices {
+        crate::cli::confirm_broad_all(cli.skip_gitignore, cli.yes)?;
+        if !cli.skip_gitignore {
+            return Ok(None);
+        }
     }
-
-    let needs_reindex_for_gitignore = cli.skip_gitignore
-        && !workspace
-            .read_metadata()
-            .ok()
-            .flatten()
-            .is_some_and(|m| m.skip_gitignore);
-
     // Fast existence-only check: avoids opening SQLite (which can block for
     // minutes on huge repos if the enhancer holds a WAL lock).
-    let metadata_present = workspace
-        .read_metadata()
-        .ok()
-        .flatten()
+    let metadata = workspace.read_metadata().ok().flatten();
+    let metadata_present = metadata
+        .as_ref()
         .is_some_and(|m| m.last_indexed_at_unix.is_some());
+    if cli.all_indices && !metadata_present {
+        // Do not add the current directory to an all-index search.
+        return Ok(None);
+    }
+    let needs_reindex_for_gitignore =
+        cli.skip_gitignore && !metadata.is_some_and(|m| m.skip_gitignore);
     let artifacts_exist = workspace.sqlite_path().exists()
         && workspace.tantivy_dir().exists()
         && workspace.vector_path().exists();
@@ -672,7 +672,9 @@ fn prepare_workspace_for_tui(
     }
 
     // The terminal is not in raw mode yet, so the question can be asked here.
-    crate::cli::confirm_broad_index(&workspace.root, cli.yes)?;
+    if !cli.all_indices {
+        crate::cli::confirm_broad_index(&workspace.root, cli.yes)?;
+    }
 
     // Not indexed — fire-and-forget: kick off indexing in the background
     // and let the TUI launch immediately.  trigger_search() already falls
@@ -761,7 +763,8 @@ fn build_search_request(
         scope_is_file: scoped.is_some_and(|s| s.is_file),
         skip_gitignore: cli.skip_gitignore,
         force_neural: cli.force_neural,
-        disable_memory_expansion: cli.no_memory_expansion_internal || cli.hash,
+        hash_only: cli.hash,
+        disable_memory_expansion: cli.no_memory_expansion_internal,
     }
 }
 
@@ -2147,6 +2150,7 @@ mod tests {
                 scope_path,
                 scope_is_file,
                 skip_gitignore,
+                hash_only,
                 ..
             } => {
                 assert_eq!(path, Some(PathBuf::from("/repo")));
@@ -2158,6 +2162,7 @@ mod tests {
                 assert_eq!(scope_path, Some(PathBuf::from("src/search.rs")));
                 assert!(scope_is_file);
                 assert!(!skip_gitignore);
+                assert!(hash_only);
             }
             other => panic!("expected Search request, got {other:?}"),
         }

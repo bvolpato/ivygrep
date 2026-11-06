@@ -1,9 +1,12 @@
 import hashlib
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +86,58 @@ class CacheNeuralModelTest(unittest.TestCase):
 
             with self.assertRaisesRegex(SystemExit, "unexpected model snapshot"):
                 MODULE.write_rust_revision_ref(profile, downloaded)
+
+    def test_cache_profile_selects_patched_tls_bundle_without_user_override(self) -> None:
+        profile = MODULE.PROFILES["potion-code-v2"]
+        patched_bundle = "/patched/certifi.pem"
+        cases = (
+            ({}, patched_bundle, None),
+            ({"SSL_CERT_FILE": ""}, patched_bundle, None),
+            ({"SSL_CERT_DIR": ""}, patched_bundle, ""),
+            ({"SSL_CERT_FILE": "/user/custom.pem"}, "/user/custom.pem", None),
+            ({"SSL_CERT_DIR": "/user/custom-certs"}, None, "/user/custom-certs"),
+        )
+
+        for environment, expected_file, expected_dir in cases:
+            with self.subTest(environment=environment):
+                with tempfile.TemporaryDirectory() as tmp:
+                    cache = Path(tmp)
+                    fake_hub = ModuleType("huggingface_hub")
+
+                    def download_asset(
+                        repo_id: str,
+                        filename: str,
+                        revision: str,
+                        cache_dir: str,
+                    ) -> str:
+                        repo_name = f"models--{repo_id.replace('/', '--')}"
+                        repo_dir = Path(cache_dir) / repo_name
+                        path = repo_dir / "snapshots" / revision / filename
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b"test asset")
+                        return str(path)
+
+                    fake_hub.hf_hub_download = download_asset
+                    fake_certifi = ModuleType("certifi")
+                    fake_certifi.where = lambda: patched_bundle
+
+                    with mock.patch.dict(os.environ, environment, clear=True):
+                        with mock.patch.dict(
+                            sys.modules,
+                            {"certifi": fake_certifi, "huggingface_hub": fake_hub},
+                        ):
+                            with mock.patch.object(
+                                MODULE,
+                                "file_sha256",
+                                return_value=profile.weights_sha256,
+                            ):
+                                with mock.patch("builtins.print"):
+                                    MODULE.cache_profile("potion-code-v2", cache)
+
+                        self.assertEqual(
+                            os.environ.get("SSL_CERT_FILE"), expected_file
+                        )
+                        self.assertEqual(os.environ.get("SSL_CERT_DIR"), expected_dir)
 
 
 if __name__ == "__main__":

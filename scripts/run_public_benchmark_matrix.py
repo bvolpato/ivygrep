@@ -2,7 +2,8 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "datasets>=3,<5",
+#   "certifi>=2026.10.23",
+#   "datasets>=5,<6",
 # ]
 # [tool.uv]
 # exclude-newer = "7 days"

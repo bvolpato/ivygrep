@@ -2,7 +2,8 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#     "huggingface-hub[hf-xet]==1.23.0",
+#     "certifi>=2026.10.23",
+#     "huggingface-hub[hf-xet]==2.4.0",
 # ]
 # [tool.uv]
 # exclude-newer = "7 days"
@@ -14,6 +15,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 
 
@@ -84,6 +86,12 @@ def write_rust_revision_ref(
 
 
 def cache_profile(name: str, cache: Path) -> None:
+    # Hub 2 uses httpx2's OS trust store by default. Keep the patched certifi
+    # bundle unless the caller explicitly selects an SSL certificate bundle.
+    if not os.environ.get("SSL_CERT_FILE") and not os.environ.get("SSL_CERT_DIR"):
+        import certifi
+
+        os.environ["SSL_CERT_FILE"] = certifi.where()
     from huggingface_hub import hf_hub_download
 
     profile = PROFILES[name]

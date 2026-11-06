@@ -23,6 +23,32 @@ use crate::workspace::Workspace;
 /// next search or edit asks again.
 const MAX_PENDING: usize = 1024;
 
+/// A hash-only request must not start a neural worker, even if the workspace
+/// already has neural vectors. A later search can still request neural work.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum EnhancementPolicy {
+    HashOnly,
+    MaintainExisting,
+    Neural,
+}
+
+impl EnhancementPolicy {
+    pub(crate) fn for_query(uses_neural: bool) -> Self {
+        if uses_neural {
+            Self::Neural
+        } else {
+            Self::MaintainExisting
+        }
+    }
+
+    fn lane(self, host: &dyn WorkerHost, workspace: &Workspace) -> Option<WorkerLane> {
+        match self {
+            Self::HashOnly => host.needs_hash(workspace).then_some(WorkerLane::Hash),
+            Self::MaintainExisting | Self::Neural => host.lane(workspace, self == Self::Neural),
+        }
+    }
+}
+
 /// How the queue looks at workers. The daemon uses `WorkerProcesses`; tests
 /// use a host without processes.
 pub(crate) trait WorkerHost: Send + Sync {
@@ -82,7 +108,7 @@ impl WorkerHost for WorkerProcesses {
 
 struct PendingRequest {
     workspace: Workspace,
-    query_uses_neural: bool,
+    policy: EnhancementPolicy,
     lane: WorkerLane,
     /// Position in the order of requests and searches; the highest goes first.
     recency: u64,
@@ -150,17 +176,16 @@ impl EnhancementQueue {
 
     /// Queue the work that `workspace` still needs. Reads the index, so call
     /// it off the async runtime.
-    pub(crate) fn request(&self, workspace: Workspace, query_uses_neural: bool) {
-        let Some(mut lane) = self.host.lane(&workspace, query_uses_neural) else {
+    pub(crate) fn request(&self, workspace: Workspace, mut policy: EnhancementPolicy) {
+        let Some(mut lane) = policy.lane(self.host.as_ref(), &workspace) else {
             return;
         };
         let mut state = self.state.lock();
-        let mut uses_neural = query_uses_neural;
         if let Some(waiting) = state.pending.get(&workspace.id)
-            && waiting.query_uses_neural
+            && waiting.policy > policy
         {
-            // A neural request is not downgraded by a later lexical search.
-            uses_neural = true;
+            // A later search does not cancel work another caller requested.
+            policy = waiting.policy;
             lane = waiting.lane;
         }
         let recency = state.next_recency();
@@ -168,7 +193,7 @@ impl EnhancementQueue {
             workspace.id.clone(),
             PendingRequest {
                 workspace,
-                query_uses_neural: uses_neural,
+                policy,
                 lane,
                 recency,
                 // An edit or a search since the last try: hash vectors may lag again.
@@ -244,10 +269,7 @@ impl EnhancementQueue {
                 WorkerLane::Hash
             } else {
                 // The index may have moved on since the request.
-                let Some(lane) = self
-                    .host
-                    .lane(&request.workspace, request.query_uses_neural)
-                else {
+                let Some(lane) = request.policy.lane(self.host.as_ref(), &request.workspace) else {
                     pending.remove(&id);
                     continue;
                 };
@@ -404,7 +426,7 @@ mod tests {
         let hash = |index: usize| (workspaces[index].id.clone(), WorkerLane::Hash);
 
         for workspace in &workspaces {
-            queue.request(workspace.clone(), false);
+            queue.request(workspace.clone(), EnhancementPolicy::MaintainExisting);
         }
         // A search moves a waiting workspace to the front.
         queue.touch([workspaces[1].id.as_str()].into_iter());
@@ -418,7 +440,7 @@ mod tests {
         assert_eq!(host.started().len(), 2, "a full lane starts nothing");
 
         // A request for a workspace whose worker still runs waits for it.
-        queue.request(workspaces[4].clone(), false);
+        queue.request(workspaces[4].clone(), EnhancementPolicy::MaintainExisting);
         // The root of a waiting workspace is deleted.
         drop(roots.remove(0));
         host.finish(&workspaces[1]);
@@ -451,6 +473,28 @@ mod tests {
 
     #[test]
     #[serial]
+    fn hash_only_never_upgrades_to_neural_while_waiting() {
+        let (_roots, workspaces) = workspaces(1);
+        let ws = &workspaces[0];
+        let host = Arc::new(FakeWorkers::default());
+        let queue = EnhancementQueue::new(Box::new(host.clone()));
+        queue.request(ws.clone(), EnhancementPolicy::HashOnly);
+        host.neural.lock().insert(ws.id.clone());
+        queue.dispatch();
+        host.finish(ws);
+        queue.request(ws.clone(), EnhancementPolicy::HashOnly);
+        queue.dispatch();
+        assert_eq!(host.started(), [(ws.id.clone(), WorkerLane::Hash)]);
+        queue.request(ws.clone(), EnhancementPolicy::MaintainExisting);
+        queue.dispatch();
+        assert_eq!(
+            host.started().last(),
+            Some(&(ws.id.clone(), WorkerLane::Neural))
+        );
+    }
+
+    #[test]
+    #[serial]
     fn workspace_that_waits_for_a_neural_place_gets_hash_vectors_meanwhile() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -463,13 +507,13 @@ mod tests {
         let started = |index: usize, lane| (workspaces[index].id.clone(), lane);
 
         // Two long neural runs take both neural places.
-        queue.request(workspaces[0].clone(), true);
-        queue.request(workspaces[1].clone(), true);
+        queue.request(workspaces[0].clone(), EnhancementPolicy::Neural);
+        queue.request(workspaces[1].clone(), EnhancementPolicy::Neural);
         queue.dispatch();
         // A fresh worktree is searched. Its neural run has to wait, its hash
         // vectors do not. A later lexical search keeps the neural request.
-        queue.request(workspaces[2].clone(), true);
-        queue.request(workspaces[2].clone(), false);
+        queue.request(workspaces[2].clone(), EnhancementPolicy::Neural);
+        queue.request(workspaces[2].clone(), EnhancementPolicy::MaintainExisting);
         // While other processes hold the hash places too, nothing starts.
         *host.foreign.lock() = 2;
         queue.dispatch();
@@ -490,7 +534,7 @@ mod tests {
         // are current are not built again, by this workspace or a new one.
         host.finish(&workspaces[2]);
         host.hash_done.lock().insert(workspaces[3].id.clone());
-        queue.request(workspaces[3].clone(), true);
+        queue.request(workspaces[3].clone(), EnhancementPolicy::Neural);
         queue.dispatch();
         queue.dispatch();
         assert_eq!(host.started().len(), 3);

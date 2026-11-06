@@ -77,7 +77,9 @@ syntect = { version = "5.3.0", default-features = false, features = [
 arboard = "3.4.0"
 libc = "0.2"
 lru = "0.19.0"
-# Keep exact-pinned because parser recovery changes can affect public-code retrieval.
+# Keep exact-pinned at the latest 0.26 release supported by tree-sitter-perl 1.1.2.
+# Its native `links = "tree-sitter"` dependency conflicts with a second core version.
+# Parser recovery changes can also affect public-code retrieval.
 tree-sitter = "=0.26.13"
 tree-sitter-rust = "0.24.1"
 tree-sitter-python = "0.25.0"
@@ -96,7 +98,7 @@ tree-sitter-bash = "0.25.1"
 tree-sitter-haskell = { package = "ivygrep-tree-sitter-haskell", path = "vendor/tree-sitter-haskell", version = "=0.23.1-ivygrep.1" }
 tree-sitter-ocaml = "0.26.0"
 tree-sitter-lua = "0.5.0"
-tree-sitter-dart = "0.2.0"
+tree-sitter-dart = "0.3.0"
 tree-sitter-objc = "3.0.2"
 tree-sitter-perl = "1.1.2"
 tree-sitter-starlark = "1.3.0"

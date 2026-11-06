@@ -2,7 +2,8 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "datasets>=3,<5",
+#   "certifi>=2026.10.23",
+#   "datasets>=5,<6",
 # ]
 # [tool.uv]
 # exclude-newer = "7 days"
@@ -15,6 +16,7 @@ import argparse
 import hashlib
 import heapq
 import json
+import os
 from pathlib import Path
 import random
 import shutil
@@ -36,6 +38,14 @@ def retryable_hub_error(error: BaseException) -> bool:
     return getattr(response, "status_code", None) in RETRYABLE_HUB_STATUS
 
 
+def configure_hf_tls_bundle() -> None:
+    # Datasets may select Hub 2, so use the same patched bundle as model downloads.
+    if not os.environ.get("SSL_CERT_FILE") and not os.environ.get("SSL_CERT_DIR"):
+        import certifi
+
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+
+
 def load_pinned_dataset(
     repo: str,
     revision: str,
@@ -44,6 +54,7 @@ def load_pinned_dataset(
 ):
     """Load a revision-pinned dataset, retrying throttled or failing Hub requests."""
     if loader is None:
+        configure_hf_tls_bundle()
         from datasets import load_dataset as loader
     for attempt, delay in enumerate((*HUB_RETRY_DELAYS_SECONDS, None), start=1):
         try:

@@ -2,7 +2,8 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "pyarrow>=18,<22",
+#   "certifi>=2026.10.23",
+#   "pyarrow>=26,<27",
 #   "requests>=2.32,<3",
 # ]
 # [tool.uv]

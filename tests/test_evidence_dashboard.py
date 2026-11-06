@@ -439,7 +439,6 @@ class EvidenceDashboardTest(unittest.TestCase):
         self.assertIn("Benchmark dashboard", html)
         self.assertIn("nDCG@10", html)
         self.assertIn("Index throughput", html)
-        self.assertIn("not pinned to an immutable revision", html)
         self.assertNotIn("policy", html.lower())
         current = next(
             item

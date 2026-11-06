@@ -4,17 +4,22 @@ Not yet published: crates.io has no `ivygrep` crate. Until the bootstrap run
 below succeeds, install from a [GitHub release](https://github.com/bvolpato/ivygrep/releases),
 Homebrew, WinGet, or source.
 
-ivygrep depends on four behavior-critical forks. Their package names are
+ivygrep depends on nine maintained forks. Their package names are
 distinct so `cargo install ivygrep --locked` will not depend on local
 `[patch.crates-io]` configuration once published.
 
 Publication order:
 
 1. `ivygrep-hf-hub`
-2. `ivygrep-candle-embed`
-3. `ivygrep-usearch`
-4. `ivygrep-tree-sitter-haskell`
-5. `ivygrep`
+2. `ivygrep-candle-core` 0.10.2 and 0.11.0 fork versions
+3. `ivygrep-candle-nn`
+4. `ivygrep-candle-embed`
+5. `ivygrep-usearch`
+6. `ivygrep-tree-sitter-haskell`
+7. `ivygrep-tantivy-sstable`
+8. `ivygrep-tantivy-columnar`
+9. `ivygrep-tantivy`
+10. `ivygrep`
 
 First publication requires crates.io token because trusted publishing cannot
 create a crate. Add token as repository Actions secret `CRATES_IO_TOKEN`, then

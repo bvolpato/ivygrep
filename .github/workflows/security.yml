@@ -29,10 +29,10 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.1 --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Audit locked dependencies
         id: audit
@@ -137,9 +137,9 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: 0.13.5
+          version: 0.13.6
 
       - name: Install zizmor
-        run: uv run --no-project --exclude-newer "7 days" --with zizmor==1.25.2 zizmor --min-severity low .github/workflows
+        run: uv run --no-project --exclude-newer "7 days" --with zizmor==1.31.1 zizmor --min-severity low .github/workflows

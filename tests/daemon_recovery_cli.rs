@@ -6,6 +6,7 @@ mod tests {
 
     use assert_cmd::assert::OutputAssertExt;
     use assert_cmd::cargo::cargo_bin;
+    use ivygrep::jobs::{JobKind, WATCHER_HEARTBEAT_TTL_SECS, job_status};
     use ivygrep::workspace::{Workspace, list_workspaces};
     use serial_test::serial;
     use tempfile::tempdir;
@@ -26,11 +27,16 @@ mod tests {
     }
 
     fn kill_watcher_pid(workspace: &Workspace) {
-        let pid = std::fs::read_to_string(workspace.watcher_pid_path())
-            .unwrap()
-            .trim()
-            .parse::<i32>()
-            .unwrap();
+        let status = job_status(workspace, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS);
+        assert!(
+            status.active(),
+            "watcher should be active before termination"
+        );
+        let pid = status
+            .record
+            .and_then(|record| record.pid)
+            .expect("active watcher must have a recorded PID");
+        let pid = i32::try_from(pid).unwrap();
         let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
         assert_eq!(rc, 0, "failed to kill daemon pid {pid}");
     }
