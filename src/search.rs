@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -643,12 +644,14 @@ impl SearchContext {
             .map(str::to_ascii_lowercase)
             .filter(|term| term.len() >= 3)
             .collect::<HashSet<_>>();
-        chunks.sort_by(|left, right| {
-            representative_chunk_score(right, &task_terms)
-                .cmp(&representative_chunk_score(left, &task_terms))
-                .then_with(|| left.start_line.cmp(&right.start_line))
-        });
-        let chunk = chunks.remove(0);
+        let Some(chunk) = chunks.into_iter().min_by_key(|chunk| {
+            (
+                Reverse(representative_chunk_score(chunk, &task_terms)),
+                chunk.start_line,
+            )
+        }) else {
+            return Ok(None);
+        };
         let preview =
             crate::chunking::strip_chunk_header(&chunk.text, &chunk.file_path).to_string();
         Ok(Some(SearchHit {
