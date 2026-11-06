@@ -3031,17 +3031,18 @@ void phantomCpp() {}
 
     #[test]
     fn context_symbol_sources_keep_query_qualifiers_and_observe_live_edits() {
-        let root = tempdir().unwrap();
+        let directory = tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
         let path = Path::new("calls.rs");
         let source = "fn run() {\n    Client::first();\n    Other::first();\n    Client::second();\n    let text = \"Client::second()\";\n}\n";
-        std::fs::write(root.path().join(path), source).unwrap();
+        std::fs::write(root.join(path), source).unwrap();
         for (query, expected_line) in [
             ("Client::first", 2),
             ("Other::first", 3),
             ("Client::second", 4),
         ] {
             let matches = cached_symbol_lines(
-                &crate::workspace_file::RootHandle::new(root.path()),
+                &crate::workspace_file::RootHandle::new(&root),
                 path,
                 "rust",
                 &parse_symbol_query(query),
@@ -3053,13 +3054,13 @@ void phantomCpp() {}
         }
 
         std::fs::write(
-            root.path().join(path),
+            root.join(path),
             source.replace("Client::second();", "Server::second();"),
         )
         .unwrap();
         let matches = |query: &str| {
             cached_symbol_lines(
-                &crate::workspace_file::RootHandle::new(root.path()),
+                &crate::workspace_file::RootHandle::new(&root),
                 path,
                 "rust",
                 &parse_symbol_query(query),
@@ -3068,7 +3069,7 @@ void phantomCpp() {}
         };
         assert!(matches("Client::second").is_empty());
         assert_eq!(matches("Server::second")[0].line, 4);
-        std::fs::remove_file(root.path().join(path)).unwrap();
+        std::fs::remove_file(root.join(path)).unwrap();
         assert!(matches("Server::second").is_empty());
     }
 

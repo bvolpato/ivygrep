@@ -5,6 +5,7 @@ Measured on November 6, 2026, on a Ryzen 9 9950X3D workstation with 32 logical C
 These are shared-workstation measurements, not latency guarantees.
 
 The baseline is `b2dcc6456dc85a705dbc69f9b1198ba97d71e682`.
+The measured candidate source is `9f24037033c830bd9d23acc217e37143814807d1`.
 Both binaries use the release profile with ThinLTO, `CARGO_PROFILE_RELEASE_DEBUG=1`,
 and `CARGO_PROFILE_RELEASE_STRIP=none` for CPU profiling.
 
@@ -12,7 +13,7 @@ and `CARGO_PROFILE_RELEASE_STRIP=none` for CPU profiling.
 | --- | --- |
 | Baseline binary | `494bc3eaa266a1ec53d4eba5b55ba3378d1a2b5328e52c33ba67ba339d85041d` |
 | Candidate binary | `bcffe1ab36d83eda2d18f93f5ddd1ca1a6844e3e8508f5e8136428c401d1899c` |
-| Runtime patch, `git diff <baseline> -- src` | `1d37daac47b47e4427d13b8fd913259e424ba27a3f9a2484f78dda8815b6dc7b` |
+| Measured source patch, `git diff <baseline> <candidate> -- src` | `1d37daac47b47e4427d13b8fd913259e424ba27a3f9a2484f78dda8815b6dc7b` |
 | Source corpus | `a817b782d2a569abf2394385d787c7453c5b919aa7a9b48dfc36fe45e2103190` |
 
 ## What changed
@@ -125,7 +126,7 @@ freshness and memory evidence.
 
 ## Reproduce
 
-Build the baseline and the candidate commit containing this report in separate
+Build the baseline and the measured candidate commit identified above in separate
 checkouts and Cargo target directories. Do not run builds during measurements:
 
 ```sh
