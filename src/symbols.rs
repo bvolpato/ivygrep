@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params, types::ToSql};
+use sha2::{Digest, Sha256};
 
 use crate::chunking::ChunkDefinition;
 use crate::indexer::{
@@ -18,6 +20,11 @@ const SYMBOL_DEFINITION_LOOKUP_BATCH: usize = 128;
 /// Match the bounded literal-search ceiling; never turn a small relationship
 /// request into an unbounded repository scan when every candidate is rejected.
 const SYMBOL_RELATIONSHIP_CANDIDATE_LIMIT: usize = 25_000;
+const MAX_RETAINED_SYMBOL_SOURCE_FILES: usize = 8;
+const SYMBOL_SOURCE_CACHE_BYTES: usize = 2 * 1024 * 1024;
+type SymbolSourceKey = (PathBuf, String, [u8; 32]);
+type SymbolSourceCell = Arc<OnceLock<Arc<ParsedSymbolSource>>>;
+type SymbolSourceCache = crate::byte_cache::ByteCache<SymbolSourceKey, SymbolSourceCell>;
 /// Columns written per `symbols` row; keeps batched insert sizing in sync.
 pub(crate) const SYMBOL_ROW_COLUMNS: usize = 6;
 
@@ -662,6 +669,117 @@ pub(crate) fn search_symbol_relationships_with_context(
     )
 }
 
+fn cached_symbol_lines(
+    files: &crate::workspace_file::RootHandle,
+    path: &Path,
+    language: &str,
+    query: &SymbolQuery<'_>,
+    go_generic_function: bool,
+) -> Vec<SymbolLine> {
+    // Cache reuse never replaces a contained live read, including across requests.
+    let Ok(text) = files.read_to_string(path) else {
+        return Vec::new();
+    };
+    static CACHE: OnceLock<parking_lot::Mutex<SymbolSourceCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        parking_lot::Mutex::new(SymbolSourceCache::new(
+            MAX_RETAINED_SYMBOL_SOURCE_FILES,
+            SYMBOL_SOURCE_CACHE_BYTES,
+        ))
+    });
+    cached_symbol_source(cache, path, &text, language).matching_lines(
+        language,
+        query,
+        go_generic_function,
+    )
+}
+
+fn cached_symbol_source(
+    cache: &parking_lot::Mutex<SymbolSourceCache>,
+    path: &Path,
+    text: &str,
+    language: &str,
+) -> Arc<ParsedSymbolSource> {
+    let key = (
+        path.to_path_buf(),
+        language.to_string(),
+        Sha256::digest(text.as_bytes()).into(),
+    );
+    // The byte budget covers retained source, keys, and cache metadata. Tree
+    // allocations are opaque; the entry limit bounds the number retained.
+    let key_bytes = std::mem::size_of::<(SymbolSourceKey, SymbolSourceCell)>()
+        + key.0.capacity()
+        + key.1.capacity()
+        + std::mem::size_of::<ParsedSymbolSource>()
+        + std::mem::size_of::<OnceLock<Arc<ParsedSymbolSource>>>()
+        + 128;
+    let cell = {
+        let mut cache = cache.lock();
+        if let Some(cell) = cache.get(&key) {
+            cell.clone()
+        } else {
+            let cell = Arc::new(OnceLock::new());
+            cache.insert(key.clone(), cell.clone(), key_bytes + text.len());
+            cell
+        }
+    };
+    // Share one immutable parse without holding the cache lock while parsing
+    // or waiting for another request to finish the same source.
+    let source = cell
+        .get_or_init(|| Arc::new(ParsedSymbolSource::new(path, text.to_string(), language)))
+        .clone();
+    if source.text != text {
+        return Arc::new(ParsedSymbolSource::new(path, text.to_string(), language));
+    }
+    let mut cache = cache.lock();
+    if cache
+        .get(&key)
+        .is_some_and(|cached| Arc::ptr_eq(cached, &cell))
+    {
+        if source.tree.is_some() {
+            cache.insert(key, cell, key_bytes + source.text.capacity());
+        } else {
+            cache.remove(&key);
+        }
+    }
+    source
+}
+
+struct ParsedSymbolSource {
+    text: String,
+    tree: Option<tree_sitter::Tree>,
+}
+
+impl ParsedSymbolSource {
+    fn new(path: &Path, text: String, language: &str) -> Self {
+        let tree = crate::chunking::parse_source_tree(path, &text, language);
+        Self { text, tree }
+    }
+
+    fn matching_lines(
+        &self,
+        language: &str,
+        query: &SymbolQuery<'_>,
+        go_generic_function: bool,
+    ) -> Vec<SymbolLine> {
+        let fallback;
+        let source = if self.tree.is_some() {
+            &self.text
+        } else {
+            fallback = mask_non_code(&self.text, language);
+            &fallback
+        };
+        matching_symbol_lines_in_source(
+            &self.text,
+            source,
+            self.tree.as_ref(),
+            language,
+            query,
+            go_generic_function,
+        )
+    }
+}
+
 #[derive(Default)]
 struct RelationshipDefinitions {
     languages: HashSet<String>,
@@ -774,6 +892,7 @@ fn search_call_sites_with_references(
     if options.limit == Some(0) {
         return Ok((Vec::new(), Vec::new()));
     }
+    let reuse_symbol_sources = search_context.is_some();
     let query = parse_symbol_query(name);
     let mut candidate_options = options.clone();
     // The CLI's --no-limit sentinel historically allows 50,000 literal
@@ -843,18 +962,27 @@ fn search_call_sites_with_references(
         }
         for (file_path, mut chunks) in chunks_by_file {
             let matches = file_matches.entry(file_path.clone()).or_insert_with(|| {
-                files
-                    .read_to_string(&file_path)
-                    .map(|text| {
-                        matching_symbol_lines_with_go_generics(
-                            &file_path,
-                            &text,
-                            &chunks[0].language,
-                            &query,
-                            definitions.go_generic_function,
-                        )
-                    })
-                    .unwrap_or_default()
+                if reuse_symbol_sources {
+                    cached_symbol_lines(
+                        &files,
+                        &file_path,
+                        &chunks[0].language,
+                        &query,
+                        definitions.go_generic_function,
+                    )
+                } else {
+                    files
+                        .read_to_string(&file_path)
+                        .map(|text| {
+                            ParsedSymbolSource::new(&file_path, text, &chunks[0].language)
+                                .matching_lines(
+                                    &chunks[0].language,
+                                    &query,
+                                    definitions.go_generic_function,
+                                )
+                        })
+                        .unwrap_or_default()
+                }
             });
             chunks.sort_by_key(|chunk| {
                 (
@@ -940,24 +1068,17 @@ fn matching_symbol_lines(
     language: &str,
     query: &SymbolQuery<'_>,
 ) -> Vec<SymbolLine> {
-    matching_symbol_lines_with_go_generics(path, text, language, query, false)
+    ParsedSymbolSource::new(path, text.to_string(), language).matching_lines(language, query, false)
 }
 
-fn matching_symbol_lines_with_go_generics(
-    path: &std::path::Path,
+fn matching_symbol_lines_in_source(
     text: &str,
+    source: &str,
+    tree: Option<&tree_sitter::Tree>,
     language: &str,
     query: &SymbolQuery<'_>,
     go_generic_function: bool,
 ) -> Vec<SymbolLine> {
-    let tree = crate::chunking::parse_source_tree(path, text, language);
-    let fallback;
-    let source = if tree.is_some() {
-        text
-    } else {
-        fallback = mask_non_code(text, language);
-        &fallback
-    };
     let normalized = query.name.to_ascii_lowercase();
     if normalized.is_empty() {
         return Vec::new();
@@ -969,7 +1090,7 @@ fn matching_symbol_lines_with_go_generics(
     let mut matches = BTreeMap::<usize, SymbolLine>::new();
     for (start, _) in lower.match_indices(&normalized) {
         let end = start + normalized.len();
-        let node = if let Some(tree) = &tree {
+        let node = if let Some(tree) = tree {
             let Some(node) = tree.root_node().descendant_for_byte_range(start, end) else {
                 continue;
             };
@@ -2906,6 +3027,50 @@ void phantomCpp() {}
         assert_eq!(callers[0].start_line, 2);
         assert!(callers[0].preview.contains("fn run()"));
         assert!(callers[0].preview.contains("parse();"));
+    }
+
+    #[test]
+    fn context_symbol_sources_keep_query_qualifiers_and_observe_live_edits() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = Path::new("calls.rs");
+        let source = "fn run() {\n    Client::first();\n    Other::first();\n    Client::second();\n    let text = \"Client::second()\";\n}\n";
+        std::fs::write(root.join(path), source).unwrap();
+        for (query, expected_line) in [
+            ("Client::first", 2),
+            ("Other::first", 3),
+            ("Client::second", 4),
+        ] {
+            let matches = cached_symbol_lines(
+                &crate::workspace_file::RootHandle::new(&root),
+                path,
+                "rust",
+                &parse_symbol_query(query),
+                false,
+            );
+            assert_eq!(matches.len(), 1, "{query}");
+            assert_eq!(matches[0].line, expected_line, "{query}");
+            assert!(matches[0].is_call, "{query}");
+        }
+
+        std::fs::write(
+            root.join(path),
+            source.replace("Client::second();", "Server::second();"),
+        )
+        .unwrap();
+        let matches = |query: &str| {
+            cached_symbol_lines(
+                &crate::workspace_file::RootHandle::new(&root),
+                path,
+                "rust",
+                &parse_symbol_query(query),
+                false,
+            )
+        };
+        assert!(matches("Client::second").is_empty());
+        assert_eq!(matches("Server::second")[0].line, 4);
+        std::fs::remove_file(root.join(path)).unwrap();
+        assert!(matches("Server::second").is_empty());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ use crate::workspace_file::RootHandle;
 
 const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COVERAGE_CACHE_ENTRIES: usize = 32;
+const MAX_COVERAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_UNINDEXED_FILES: usize = 4_096;
 const REGEX_PARALLEL_BATCH_FILES: usize = 256;
 
@@ -40,6 +41,7 @@ enum CoverageConsumer {
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct CoverageKey {
     workspace_id: String,
+    index_dir: PathBuf,
     consumer: CoverageConsumer,
     skip_gitignore: bool,
     publication: PublicationStamp,
@@ -57,17 +59,51 @@ struct PublicationStamp {
 /// Snapshot paths without chunks. `None` means there are too many to enumerate.
 type Coverage = Option<Arc<Vec<PathBuf>>>;
 
-fn coverage_cache() -> &'static Mutex<HashMap<CoverageKey, Coverage>> {
-    static CACHE: OnceLock<Mutex<HashMap<CoverageKey, Coverage>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+struct CachedCoverage {
+    unindexed: Coverage,
+    // Regex needs snapshot membership, not saved hashes.
+    snapshot_paths: HashSet<String>,
 }
 
-fn remember_coverage(key: CoverageKey, coverage: Coverage) -> Coverage {
-    if let Ok(mut cache) = coverage_cache().lock() {
-        if cache.len() >= MAX_COVERAGE_CACHE_ENTRIES {
-            cache.clear();
+impl CachedCoverage {
+    fn retained_bytes(&self, key: &CoverageKey) -> usize {
+        let mut bytes = std::mem::size_of::<(CoverageKey, Arc<Self>, usize)>()
+            + std::mem::size_of::<Self>()
+            // Cache links and the entry Arc's allocation header.
+            + 4 * std::mem::size_of::<usize>()
+            + key.workspace_id.capacity()
+            + key.index_dir.capacity()
+            // Reserve bucket slack and control bytes without assuming a load factor.
+            + 2 * self.snapshot_paths.capacity() * (std::mem::size_of::<String>() + 1)
+            + 16
+            + self.snapshot_paths.iter().map(String::capacity).sum::<usize>();
+        if let Some(paths) = &self.unindexed {
+            bytes += 2 * std::mem::size_of::<usize>()
+                + std::mem::size_of::<Vec<PathBuf>>()
+                + paths.capacity() * std::mem::size_of::<PathBuf>()
+                + paths.iter().map(PathBuf::capacity).sum::<usize>();
         }
-        cache.insert(key, coverage.clone());
+        bytes
+    }
+}
+
+fn coverage_cache() -> &'static Mutex<crate::byte_cache::ByteCache<CoverageKey, Arc<CachedCoverage>>>
+{
+    static CACHE: OnceLock<Mutex<crate::byte_cache::ByteCache<CoverageKey, Arc<CachedCoverage>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(crate::byte_cache::ByteCache::new(
+            MAX_COVERAGE_CACHE_ENTRIES,
+            MAX_COVERAGE_CACHE_BYTES,
+        ))
+    })
+}
+
+fn remember_coverage(key: CoverageKey, coverage: CachedCoverage) -> Arc<CachedCoverage> {
+    let bytes = coverage.retained_bytes(&key);
+    let coverage = Arc::new(coverage);
+    if let Ok(mut cache) = coverage_cache().lock() {
+        cache.insert(key, coverage.clone(), bytes);
     }
     coverage
 }
@@ -308,22 +344,22 @@ fn unindexed_matching_paths(
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
     let publication = publication_stamp(workspace)?;
-    let snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).ok()?;
-    let coverage = cached_unindexed_paths(
+    let coverage = cached_coverage(
         workspace,
         CoverageConsumer::Regex,
         options,
         publication.clone(),
-        Some(&snapshot),
     )?;
+    let recorded = coverage.unindexed.as_ref()?;
     // A new file over the indexing limit does not change the publication.
-    let unrecorded = unrecorded_regex_paths(workspace, &snapshot, coverage.len(), options)?;
+    let unrecorded =
+        unrecorded_regex_paths(workspace, &coverage.snapshot_paths, recorded.len(), options)?;
     if publication_stamp(workspace)? != publication {
         return None;
     }
     let files = RootHandle::new(&workspace.root);
     let mut paths = Vec::new();
-    for rel in coverage.iter().chain(&unrecorded) {
+    for rel in recorded.iter().chain(&unrecorded) {
         if options.is_cancelled() {
             return Some(Vec::new());
         }
@@ -362,44 +398,37 @@ pub(crate) fn unindexed_literal_candidates(
     workspace: &Workspace,
     options: &SearchOptions,
 ) -> Coverage {
-    cached_unindexed_paths(
+    cached_coverage(
         workspace,
         CoverageConsumer::Literal,
         options,
         publication_stamp(workspace)?,
-        None,
     )
+    .and_then(|coverage| coverage.unindexed.clone())
 }
 
-fn cached_unindexed_paths(
+fn cached_coverage(
     workspace: &Workspace,
     consumer: CoverageConsumer,
     options: &SearchOptions,
     publication: PublicationStamp,
-    snapshot: Option<&MerkleSnapshot>,
-) -> Coverage {
+) -> Option<Arc<CachedCoverage>> {
     let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
     if use_overlay && workspace.worktree_overlay_is_stale().ok()? {
         return None;
     }
     let key = CoverageKey {
         workspace_id: workspace.id.clone(),
+        index_dir: workspace.index_dir.clone(),
         consumer,
         skip_gitignore: options.skip_gitignore,
         publication,
     };
     if let Some(coverage) = coverage_cache().lock().ok()?.get(&key) {
-        return coverage.clone();
+        return Some(coverage.clone());
     }
 
-    let loaded;
-    let snapshot = match snapshot {
-        Some(snapshot) => snapshot,
-        None => {
-            loaded = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).ok()?;
-            &loaded
-        }
-    };
+    let snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).ok()?;
     let covered = chunk_backed_paths(workspace, use_overlay)?;
     // Stores commit before the snapshot is saved. Never pair chunks from one
     // publication with the file list of another.
@@ -413,7 +442,13 @@ fn cached_unindexed_paths(
         }
         recorded.push(PathBuf::from(path));
         if recorded.len() > MAX_UNINDEXED_FILES {
-            return remember_coverage(key, None);
+            return Some(remember_coverage(
+                key,
+                CachedCoverage {
+                    unindexed: None,
+                    snapshot_paths: HashSet::new(),
+                },
+            ));
         }
     }
     if consumer == CoverageConsumer::Literal {
@@ -429,7 +464,18 @@ fn cached_unindexed_paths(
     if options.is_cancelled() {
         return None;
     }
-    remember_coverage(key, Some(Arc::new(recorded)))
+    let snapshot_paths = if consumer == CoverageConsumer::Regex {
+        snapshot.files.into_keys().collect()
+    } else {
+        HashSet::new()
+    };
+    Some(remember_coverage(
+        key,
+        CachedCoverage {
+            unindexed: Some(Arc::new(recorded)),
+            snapshot_paths,
+        },
+    ))
 }
 
 /// Returns `None` while this index or its base carries a publication marker,
@@ -511,7 +557,7 @@ fn may_contain_text(files: &RootHandle, path: &std::path::Path) -> bool {
 /// Walk with the current ignore rules to find files missing from the snapshot.
 fn unrecorded_regex_paths(
     workspace: &Workspace,
-    snapshot: &MerkleSnapshot,
+    snapshot_paths: &HashSet<String>,
     recorded: usize,
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
@@ -525,7 +571,12 @@ fn unrecorded_regex_paths(
             continue;
         }
         let relative = entry.path().strip_prefix(&workspace.root).ok()?;
-        if snapshot.files.contains_key(&index_path_string(relative)) {
+        #[cfg(unix)]
+        let normalized = relative.to_string_lossy();
+        #[cfg(not(unix))]
+        let normalized: std::borrow::Cow<'_, str> =
+            std::borrow::Cow::Owned(index_path_string(relative));
+        if snapshot_paths.contains::<str>(normalized.as_ref()) {
             continue;
         }
         unrecorded.push(relative.to_path_buf());
@@ -1576,6 +1627,35 @@ mod tests {
         // New ignore rules take effect without waiting for another publication.
         std::fs::write(root.path().join(".gitignore"), "created.rs\n").unwrap();
         assert_eq!(regex_paths(), HashSet::from([PathBuf::from("indexed.rs")]));
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_bypasses_warmed_coverage_during_incomplete_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let source = root.path().join("indexed.rs");
+        std::fs::write(&source, "pub fn committed_regex_marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let options = SearchOptions::default();
+        let before =
+            regex_search_with_options(&workspace, "committed_regex_marker", &options).unwrap();
+        assert_eq!(before.len(), 1);
+
+        std::fs::write(&source, "pub fn pending_regex_marker() {}\n").unwrap();
+        std::fs::write(
+            workspace.indexing_incomplete_path(),
+            "publication pending\n",
+        )
+        .unwrap();
+        let hits = regex_search_with_options(&workspace, "pending_regex_marker", &options).unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("indexed.rs"));
+        assert!(hits[0].preview.contains("pending_regex_marker"));
     }
 
     #[test]
