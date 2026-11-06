@@ -133,15 +133,20 @@ def main() -> int:
         warmer = mcp_helpers.McpClient(binary, env, corpus)
         clients.append(warmer)
         warmer.initialize()
-        status = warmer.call("ig_status", {})
-        workspaces = [item for item in status.get("workspaces", [])
-                      if Path(item["workspace_root"]).resolve() == corpus]
-        if not workspaces or workspaces[0].get("ready_to_query") is not True:
-            raise RuntimeError(f"corpus is not ready to query: {corpus}")
-        if any(workspaces[0].get(field) for field in (
-            "indexing_in_progress", "enhancing_in_progress", "indexing_stalled", "enhancing_stalled"
-        )):
-            raise RuntimeError(f"corpus must be idle before measuring: {corpus}")
+        readiness_deadline = time.monotonic() + 30
+        while True:
+            status = warmer.call("ig_status", {})
+            workspaces = [item for item in status.get("workspaces", [])
+                          if Path(item["workspace_root"]).resolve() == corpus]
+            ready = bool(workspaces) and workspaces[0].get("ready_to_query") is True
+            idle = ready and not any(workspaces[0].get(field) for field in (
+                "indexing_in_progress", "enhancing_in_progress", "indexing_stalled", "enhancing_stalled"
+            ))
+            if idle:
+                break
+            if time.monotonic() >= readiness_deadline:
+                raise RuntimeError(f"corpus did not become ready and idle: {corpus}")
+            time.sleep(0.1)
 
         fingerprints: dict[str, str] = {}
 
