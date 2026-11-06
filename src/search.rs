@@ -252,6 +252,52 @@ pub struct SearchContext {
     glob_path_filters: RefCell<HashMap<GlobPathFilterCacheKey, GlobPathQueryFilter>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ContextStoreReadStamp {
+    #[cfg(unix)]
+    sqlite: (i64, ContextStoreFileIdentity),
+    #[cfg(unix)]
+    base_sqlite: Option<(i64, ContextStoreFileIdentity)>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct ContextStoreFileIdentity {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+#[cfg(unix)]
+fn context_sqlite_read_stamp(
+    sqlite: &Connection,
+    path: &Path,
+) -> Option<(i64, ContextStoreFileIdentity)> {
+    use std::os::unix::fs::MetadataExt;
+
+    // data_version observes other connections' commits; identity also detects
+    // staged replacements while this connection still has the old file open.
+    let version = sqlite
+        .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+        .ok()?;
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some((
+        version,
+        ContextStoreFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        },
+    ))
+}
+
 /// Semantic candidates by vector key: the chunk, its best adjusted score across
 /// tiers, the tiers that returned it, and the neural tier's own adjusted score.
 type SemanticCandidatesById = HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>, Option<f32>)>;
@@ -620,13 +666,37 @@ impl SearchContext {
         Ok(result)
     }
 
+    pub(crate) fn context_store_read_stamp(&self) -> Option<ContextStoreReadStamp> {
+        #[cfg(unix)]
+        {
+            let sqlite = context_sqlite_read_stamp(&self.sqlite, &self.sqlite_path)?;
+            let base_sqlite = match (&self.base_sqlite, &self.base_sqlite_path) {
+                (Some(sqlite), Some(path)) => Some(context_sqlite_read_stamp(sqlite, path)?),
+                (None, None) => None,
+                _ => return None,
+            };
+            Some(ContextStoreReadStamp {
+                sqlite,
+                base_sqlite,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    pub(crate) fn file_is_missing(&self, file_path: &Path) -> bool {
+        self.workspace_files().is_missing(file_path)
+    }
+
     pub(crate) fn representative_hit_for_file(
         &self,
         file_path: &Path,
         task: &str,
         skip_gitignore: bool,
     ) -> Result<Option<SearchHit>> {
-        if self.workspace_files().is_missing(file_path) {
+        if self.file_is_missing(file_path) {
             return Ok(None);
         }
         let mut chunks = query_chunks_for_file(&self.sqlite, file_path, skip_gitignore)?;

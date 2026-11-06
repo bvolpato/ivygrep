@@ -20,7 +20,9 @@ use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
 use crate::indexer::reconcile_worktree_overlay;
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
-use crate::search::{SearchContext, SearchOptions, hybrid_search_with_context};
+use crate::search::{
+    ContextStoreReadStamp, SearchContext, SearchOptions, hybrid_search_with_context,
+};
 use crate::symbols::{
     likely_definition_names, search_symbol_definitions_with_context,
     search_symbol_relationships_with_context,
@@ -33,6 +35,8 @@ const TARGET_CONTEXT_ITEMS: usize = 14;
 const MAX_ANCHOR_SYMBOLS: usize = 3;
 const RRF_K: f64 = 10.0;
 const SEED_CHUNK_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const GRAPH_HYDRATION_CACHE_ENTRIES: usize = 64;
+const GRAPH_HYDRATION_CACHE_BYTES: usize = 1024 * 1024;
 type SeedChunkKey = (PathBuf, [u8; 32]);
 type SeedChunkCell = Arc<OnceLock<Arc<Vec<SeedChunk>>>>;
 
@@ -491,11 +495,18 @@ pub(crate) fn build_context_bundle_with_search_context(
         .take(12)
         .cloned()
         .collect::<Vec<_>>();
+    // Transient seeds revisit files through multiple graph edges.
+    let mut hydration = ContextGraphHydration::new(
+        search_context,
+        task,
+        base_options.skip_gitignore,
+        !transient_seeds.is_empty(),
+    );
     add_transient_graph_candidates(
         workspace,
         task,
         &transient_seeds,
-        search_context,
+        &mut hydration,
         base_options,
         &mut candidates,
     );
@@ -512,11 +523,7 @@ pub(crate) fn build_context_bundle_with_search_context(
     match expand_context_graph(workspace, search_context, &seed_paths, base_options) {
         Ok(expansions) => {
             for (rank, expansion) in expansions.into_iter().enumerate() {
-                match search_context.representative_hit_for_file(
-                    &expansion.file_path,
-                    task,
-                    base_options.skip_gitignore,
-                ) {
+                match hydration.hit(&expansion.file_path) {
                     Ok(Some(mut hit)) => {
                         if expansion.kind == FileEdgeKind::Documentation
                             && !graph_support_matches_task(&hit, task, expansion.kind)
@@ -546,11 +553,7 @@ pub(crate) fn build_context_bundle_with_search_context(
         Ok(expansions) => {
             let mut test_hits = Vec::new();
             for expansion in expansions {
-                match search_context.representative_hit_for_file(
-                    &expansion.file_path,
-                    task,
-                    base_options.skip_gitignore,
-                ) {
+                match hydration.hit(&expansion.file_path) {
                     Ok(Some(hit)) => {
                         let path_overlap = task_path_overlap(&hit.file_path, task);
                         if path_overlap > 0 || hit_matches_task(&hit, task) {
@@ -586,6 +589,7 @@ pub(crate) fn build_context_bundle_with_search_context(
         Err(error) => tracing::debug!("context test graph expansion failed: {error:#}"),
     }
 
+    drop(hydration);
     drop(graph_timer);
     let _timer = crate::performance::StageTimer::start("context_budget");
     Ok(assemble_bundle(
@@ -734,11 +738,109 @@ fn seed_chunk_score(chunk: &SeedChunk, line: Option<usize>, terms: &[String]) ->
             .sum::<usize>()
 }
 
+struct ContextGraphHydration<'a> {
+    context: &'a SearchContext,
+    task: &'a str,
+    skip_gitignore: bool,
+    // Advancing the initial stamp on a miss could bless older cached hits.
+    cache: Option<(
+        ContextStoreReadStamp,
+        crate::byte_cache::ByteCache<PathBuf, SearchHit>,
+    )>,
+    cache_hits: usize,
+    cache_misses: usize,
+}
+
+impl<'a> ContextGraphHydration<'a> {
+    fn new(
+        context: &'a SearchContext,
+        task: &'a str,
+        skip_gitignore: bool,
+        cache_enabled: bool,
+    ) -> Self {
+        Self {
+            context,
+            task,
+            skip_gitignore,
+            cache: cache_enabled
+                .then(|| context.context_store_read_stamp())
+                .flatten()
+                .map(|stamp| {
+                    (
+                        stamp,
+                        crate::byte_cache::ByteCache::new(
+                            GRAPH_HYDRATION_CACHE_ENTRIES,
+                            GRAPH_HYDRATION_CACHE_BYTES,
+                        ),
+                    )
+                }),
+            cache_hits: 0,
+            cache_misses: 0,
+        }
+    }
+
+    fn hit(&mut self, path: &Path) -> Result<Option<SearchHit>> {
+        let cached = self
+            .cache
+            .as_mut()
+            .and_then(|(_, cache)| cache.get(path))
+            .cloned();
+        if let Some(hit) = cached {
+            if self.context.file_is_missing(path) {
+                if let Some((_, cache)) = self.cache.as_mut() {
+                    cache.remove(&path.to_path_buf());
+                }
+                return Ok(None);
+            }
+            let current = self.context.context_store_read_stamp();
+            if current.as_ref() == self.cache.as_ref().map(|(initial, _)| initial) {
+                self.cache_hits += 1;
+                return Ok(Some(hit));
+            }
+            self.cache = None;
+        }
+
+        self.cache_misses += 1;
+        let result = self
+            .context
+            .representative_hit_for_file(path, self.task, self.skip_gitignore);
+        if result.is_err() {
+            self.cache = None;
+        } else if let Ok(Some(hit)) = &result {
+            let bytes = std::mem::size_of::<(PathBuf, SearchHit)>()
+                + path.as_os_str().len()
+                + hit.file_path.capacity()
+                + hit.preview.capacity()
+                + hit.reason.capacity()
+                + hit.sources.capacity() * std::mem::size_of::<String>()
+                + hit.sources.iter().map(String::capacity).sum::<usize>();
+            if let Some((_, cache)) = self.cache.as_mut()
+                && cache.fits(bytes)
+            {
+                cache.insert(path.to_path_buf(), hit.clone(), bytes);
+            }
+        }
+        result
+    }
+}
+
+impl Drop for ContextGraphHydration<'_> {
+    fn drop(&mut self) {
+        tracing::debug!(
+            target: "ivygrep::performance",
+            cache_hits = self.cache_hits,
+            cache_misses = self.cache_misses,
+            cache_enabled = self.cache.is_some(),
+            "context graph hydration completed"
+        );
+    }
+}
+
 fn add_transient_graph_candidates(
     workspace: &Workspace,
     task: &str,
     seeds: &[ContextSeed],
-    search_context: &SearchContext,
+    hydration: &mut ContextGraphHydration<'_>,
     options: &SearchOptions,
     candidates: &mut BTreeMap<(PathBuf, usize, usize), Candidate>,
 ) {
@@ -796,26 +898,22 @@ fn add_transient_graph_candidates(
                 score: 0.0,
                 cochange_count: 0,
             };
-            let hit = search_context
-                .representative_hit_for_file(&file_path, task, options.skip_gitignore)
+            let hit = hydration.hit(&file_path).ok().flatten().or_else(|| {
+                context_seed_hit(
+                    &workspace.root,
+                    &ContextSeed {
+                        file_path: file_path.clone(),
+                        line: None,
+                        git_revision: None,
+                        reason: expansion.reason(),
+                        source: edge.kind.source_label().to_string(),
+                        priority: 0,
+                    },
+                    task,
+                )
                 .ok()
                 .flatten()
-                .or_else(|| {
-                    context_seed_hit(
-                        &workspace.root,
-                        &ContextSeed {
-                            file_path: file_path.clone(),
-                            line: None,
-                            git_revision: None,
-                            reason: expansion.reason(),
-                            source: edge.kind.source_label().to_string(),
-                            priority: 0,
-                        },
-                        task,
-                    )
-                    .ok()
-                    .flatten()
-                });
+            });
             let Some(mut hit) = hit else {
                 continue;
             };
@@ -2144,6 +2242,83 @@ fn language_fence(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn graph_hydration_observes_external_commits_corruption_and_source_deletion() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path().canonicalize().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let path = Path::new("lib.rs");
+        let source = "pub fn before_marker() {}\n";
+        fs::write(root.join(path), source).unwrap();
+        let other_path = Path::new("other.rs");
+        fs::write(root.join(other_path), "pub fn other_marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(&root).unwrap();
+        let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+        let context = SearchContext::load(&workspace, None, false).unwrap();
+        let writer = rusqlite::Connection::open(workspace.sqlite_path()).unwrap();
+        let mut hydration = ContextGraphHydration::new(&context, "marker", false, true);
+
+        let mut first = hydration.hit(path).unwrap().unwrap();
+        assert!(first.preview.contains("before_marker"));
+        first.sources.push("edge-specific source".to_string());
+        assert!(hydration.hit(path).unwrap().unwrap().sources.is_empty());
+
+        fs::remove_file(root.join(path)).unwrap();
+        assert!(hydration.hit(path).unwrap().is_none());
+        fs::write(root.join(path), source).unwrap();
+        assert!(
+            hydration
+                .hit(path)
+                .unwrap()
+                .unwrap()
+                .preview
+                .contains("before_marker")
+        );
+
+        let updated = "pub fn after_marker() {}\n";
+        fs::write(root.join(path), updated).unwrap();
+        writer
+            .execute(
+                "UPDATE chunks SET text = ?1 WHERE file_path = ?2",
+                rusqlite::params![updated.as_bytes(), "lib.rs"],
+            )
+            .unwrap();
+        assert!(
+            hydration
+                .hit(other_path)
+                .unwrap()
+                .unwrap()
+                .preview
+                .contains("other_marker")
+        );
+        assert!(
+            hydration
+                .hit(path)
+                .unwrap()
+                .unwrap()
+                .preview
+                .contains("after_marker")
+        );
+        writer
+            .execute(
+                "UPDATE chunks SET text = ?1 WHERE file_path = ?2",
+                rusqlite::params![vec![0x28_u8, 0xb5, 0x2f, 0xfd, 0], "lib.rs"],
+            )
+            .unwrap();
+        assert!(
+            hydration
+                .hit(path)
+                .unwrap_err()
+                .to_string()
+                .contains("decompress indexed chunk")
+        );
+        fs::remove_file(root.join(path)).unwrap();
+        assert!(hydration.hit(path).unwrap().is_none());
+    }
 
     #[test]
     fn parsed_context_inputs_share_one_value_and_content_edits_use_new_chunks() {
