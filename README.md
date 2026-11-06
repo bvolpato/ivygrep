@@ -276,6 +276,8 @@ The printed URL contains that token. Keep terminal output and logs that capture 
 The browser opens through an owner-only redirect file in the app home. This keeps the token out of process arguments.
 To skip the browser, set `IVYGREP_NO_BROWSER=1`.
 
+Web searches can only select registered workspaces. To make a new directory available, run `ig --add PATH` from the CLI.
+
 Non-loopback listeners use plain HTTP. Use a trusted network, Tailscale, or an encrypted tunnel.
 Never expose the listener directly to the internet.
 Indexed file contents can appear in snippets. This includes dotfiles that your ignore rules permit.
@@ -303,6 +305,8 @@ Without an interactive terminal, the command stops unless you pass `--yes`.
 An already indexed, healthy directory does not prompt on a plain `ig --add`.
 `ig --add --force` rebuilds it, and `--skip-gitignore` may add ignored files,
 so those cases prompt too.
+
+The same confirmation applies when `--all --skip-gitignore` expands a broad index or a linked worktree needs to build or expand one for its main checkout.
 
 The daemon also removes the index of a directory that stays missing for seven days (`IVYGREP_INDEX_GC_GRACE_SECS`), and the overlay of a worktree removed with `git worktree remove` after ten minutes.
 

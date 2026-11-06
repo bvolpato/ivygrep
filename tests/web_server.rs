@@ -245,6 +245,17 @@ fn paths_and_sources(search: &serde_json::Value) -> (Vec<String>, BTreeSet<Strin
     (paths, sources)
 }
 
+fn tracked_roots(port: u16, cookie: &str) -> BTreeSet<String> {
+    let status: serde_json::Value =
+        serde_json::from_str(&http_get(port, cookie, "/api/status")).unwrap();
+    status["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["root"].as_str().unwrap().to_string())
+        .collect()
+}
+
 #[cfg(unix)]
 #[test]
 #[serial]
@@ -285,6 +296,7 @@ fn web_search_previews_do_not_follow_replaced_parent_symlinks() {
     let port = port_from_url(&url);
     let cookie = session_cookie(port, &url);
     let auth = [("Cookie", cookie.as_str())];
+    let roots_before = tracked_roots(port, &cookie);
     let root = percent_encode(&repo.canonicalize().unwrap().to_string_lossy());
     let file = http_request(
         port,
@@ -325,18 +337,140 @@ fn web_search_previews_do_not_follow_replaced_parent_symlinks() {
     );
     assert_eq!(redirected.status, 400, "{}", redirected.body);
     assert!(!redirected.body.contains("OUTSIDE_WEB_PREVIEW_SENTINEL"));
-    let context = http_request(
-        port,
-        "GET",
-        &format!("/api/search?workspace={root}&mode=context&q=preview_boundary"),
-        &auth,
+    for endpoint in ["search", "search/stream"] {
+        for workspace in [root.as_str(), "__all__"] {
+            for mode in ["hybrid", "literal", "regex", "context"] {
+                let response = http_request(
+                    port,
+                    "GET",
+                    &format!("/api/{endpoint}?workspace={workspace}&mode={mode}&q=SENTINEL"),
+                    &auth,
+                );
+                assert!(
+                    !response.body.contains("OUTSIDE_WEB_PREVIEW_SENTINEL"),
+                    "{endpoint}/{workspace}/{mode}: {}",
+                    response.body
+                );
+                if endpoint == "search/stream" {
+                    assert!(response.body.contains(r#""ok":false"#), "{}", response.body);
+                }
+                assert_eq!(
+                    tracked_roots(port, &cookie),
+                    roots_before,
+                    "{endpoint}/{workspace}/{mode} registered the redirected workspace"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn search_does_not_reregister_a_removed_worktree_base_without_consent() {
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().join("main");
+    let linked = tmp.path().join("linked");
+    let home = tmp.path().join("indexes");
+    std::fs::create_dir(&base).unwrap();
+    create_repo(&base);
+    git(
+        &base,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    std::fs::write(base.join("only-main.txt"), "main_only_marker\n").unwrap();
+    let command = || {
+        let mut cmd = Command::new(bin());
+        cmd.current_dir(&linked)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1");
+        cmd
+    };
+    assert!(
+        command()
+            .args(["--add", ".", "--hash", "--no-watch"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let _daemon = ChildGuard(
+        command()
+            .arg("--daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let url = run_web_until_ready(&home, &linked, "web_marker_search_target");
+    let port = port_from_url(&url);
+    let cookie = session_cookie(port, &url);
+    let auth = [("Cookie", cookie.as_str())];
+    let workspace = percent_encode(&linked.canonicalize().unwrap().to_string_lossy());
+    let search =
+        format!("/api/search?workspace={workspace}&q=web_marker_search_target&mode=literal");
+    assert!(
+        http_request(port, "GET", &search, &auth)
+            .body
+            .contains("web.rs")
     );
     assert!(
-        context.body.contains("workspace is not tracked"),
-        "{}",
-        context.body
+        command()
+            .arg("--rm")
+            .arg(&base)
+            .output()
+            .unwrap()
+            .status
+            .success()
     );
-    assert!(!context.body.contains("OUTSIDE_WEB_PREVIEW_SENTINEL"));
+
+    let file = format!(
+        "/api/file?workspace={}&path=only-main.txt",
+        percent_encode(&base.canonicalize().unwrap().to_string_lossy())
+    );
+    assert_eq!(http_request(port, "GET", &file, &auth).status, 400);
+    let response = http_request(port, "GET", &format!("{search}&skip_gitignore=1"), &auth);
+    assert!(
+        response.body.contains("worktree base is not tracked"),
+        "{}",
+        response.body
+    );
+    assert_eq!(http_request(port, "GET", &file, &auth).status, 400);
+    #[cfg(unix)]
+    {
+        let search_args = ["--literal", "web_marker_search_target"];
+        for skip_gitignore in [false, true] {
+            for args in [
+                &["--all", "--literal", "web_marker_search_target"][..],
+                &search_args,
+                &["--interactive", "web_marker_search_target"],
+                &["--add", ".", "--hash"],
+            ] {
+                let mut cmd = command();
+                if skip_gitignore {
+                    cmd.arg("--skip-gitignore");
+                }
+                let refused = cmd
+                    .env("HOME", &base)
+                    .arg("--no-watch")
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .output()
+                    .unwrap();
+                assert!(!refused.status.success(), "{args:?}");
+                assert!(String::from_utf8_lossy(&refused.stderr).contains("Pass --yes"));
+                assert_eq!(http_request(port, "GET", &file, &auth).status, 400);
+            }
+        }
+        let allowed = command()
+            .env("HOME", &base)
+            .args(["--yes", "--skip-gitignore", "--no-watch"])
+            .args(search_args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(allowed.status.success(), "{allowed:?}");
+        assert_eq!(http_request(port, "GET", &file, &auth).status, 200);
+    }
 }
 
 #[test]
@@ -416,6 +550,33 @@ fn web_server_serves_status_search_and_file() {
     let auth = [("Cookie", cookie.as_str())];
     assert_eq!(http_request(port, "GET", "/", &auth).status, 200);
 
+    let outside = tempdir().unwrap();
+    std::fs::write(outside.path().join("private.txt"), "outside_marker\n").unwrap();
+    let outside = percent_encode(&outside.path().canonicalize().unwrap().to_string_lossy());
+    let roots_before = tracked_roots(port, &cookie);
+    for endpoint in ["search", "search/stream"] {
+        for mode in ["hybrid", "literal", "regex", "context"] {
+            let url = format!("/api/{endpoint}?workspace={outside}&mode={mode}&q=outside_marker");
+            let response = http_request(port, "GET", &url, &auth);
+            assert!(
+                response.body.contains("workspace is not tracked"),
+                "{mode}: {}",
+                response.body
+            );
+            assert!(!response.body.contains("private.txt"));
+            if endpoint == "search/stream" {
+                assert!(response.body.contains(r#""ok":false"#), "{}", response.body);
+            }
+            assert_eq!(
+                tracked_roots(port, &cookie),
+                roots_before,
+                "{endpoint}/{mode} registered an untracked workspace"
+            );
+        }
+    }
+    let file = format!("/api/file?workspace={outside}&path=private.txt");
+    assert_eq!(http_request(port, "GET", &file, &auth).status, 400);
+
     let status_response = http_request(port, "GET", "/api/status", &auth);
     assert_eq!(status_response.status, 200);
     assert_eq!(
@@ -451,7 +612,11 @@ fn web_server_serves_status_search_and_file() {
                 .ends_with(repo.path().file_name().unwrap().to_str().unwrap()))
     );
 
-    let workspace = percent_encode(&repo.path().canonicalize().unwrap().display().to_string());
+    let workspace = percent_encode(&format!(
+        "{}{}",
+        repo.path().canonicalize().unwrap().display(),
+        std::path::MAIN_SEPARATOR
+    ));
     let search_path =
         format!("/api/search?q=web_marker_search_target&workspace={workspace}&limit=5");
     let search: serde_json::Value =

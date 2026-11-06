@@ -615,8 +615,8 @@ def main() -> None:
         "workers": args.workers, "mutation_interval_seconds": args.mutation_interval,
         "cooldown_seconds": args.cooldown, "requested_restarts": args.restarts,
         "warmup_seconds_per_epoch": args.warmup,
-        "transport": "direct-daemon-rpc-no-cli-fallback", "resource_budgets": budgets,
-        "epochs": [], "passed": False,
+        "transport": "direct-daemon-rpc-with-cached-and-uncached-queries", "resource_budgets": budgets,
+        "mutation_checks": [], "epochs": [], "passed": False,
     }
     if sys.platform == "darwin":
         report["resource_sampling"] = macos_process.METRICS
@@ -647,7 +647,8 @@ def main() -> None:
                 else:
                     probe.write_text(expected + "\n")
                 daemon = start_daemon(binary, cwd=repo, env=env, bench_home=home)
-                watcher_observed_probe(home, repo, expected)
+                verify_mutation_state(home, repo, expected, overlay=False,
+                                      stage=f"epoch-{epoch}-startup", report=report)
                 record: dict[str, Any] = {"epoch": epoch, "pid": daemon.proc.pid, "queries": 0,
                                          "query_errors": 0, "errors": [], "samples": [],
                                          "mutations": 0, "correctness_checks": 1}
@@ -695,11 +696,15 @@ def main() -> None:
                                                           **process_sample(daemon.proc.pid)})
                                 next_sample = now + 1
                             if now >= next_check:
-                                watcher_observed_probe(home, repo, expected)
+                                stage = f"epoch-{epoch}-check-{record['correctness_checks']}"
+                                verify_mutation_state(home, repo, expected, overlay=False,
+                                                      stage=f"{stage}-update", report=report)
                                 probe.unlink()
-                                watcher_observed_probe(home, repo, None)
+                                verify_mutation_state(home, repo, None, overlay=False,
+                                                      stage=f"{stage}-delete", report=report)
                                 probe.write_text(expected + "\n")
-                                watcher_observed_probe(home, repo, expected)
+                                verify_mutation_state(home, repo, expected, overlay=False,
+                                                      stage=f"{stage}-restore", report=report)
                                 record["correctness_checks"] += 3
                                 next_check = time.monotonic() + args.check_interval
                             stop.wait(0.02)
@@ -707,7 +712,8 @@ def main() -> None:
                         stop.set()
                         for future in futures:
                             future.result(timeout=35)
-                watcher_observed_probe(home, repo, expected)
+                verify_mutation_state(home, repo, expected, overlay=False,
+                                      stage=f"epoch-{epoch}-final", report=report)
                 record["correctness_checks"] += 1
                 record["resource_gate"] = resource_gate(record["samples"], budgets)
                 record["latency_sample_count"] = len(latencies)
@@ -738,7 +744,9 @@ def main() -> None:
                 shutil.copyfile(log, args.output.with_suffix(".daemon.log"))
             report["duration_seconds"] = time.monotonic() - started
             args.output.write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({key: value for key, value in report.items() if key != "epochs"}, indent=2))
+    summary = {key: value for key, value in report.items() if key not in {"epochs", "mutation_checks"}}
+    summary["mutation_check_count"] = len(report["mutation_checks"])
+    print(json.dumps(summary, indent=2))
     if failure is not None:
         raise RuntimeError(f"soak validation failed; evidence: {args.output}") from failure
 

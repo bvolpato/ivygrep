@@ -1047,6 +1047,7 @@ fn literal_search_walk_paths(
     path_matcher: &PathGlobMatcher,
 ) -> Result<Vec<(PathBuf, PathBuf)>> {
     let mut paths = Vec::new();
+    let files = crate::workspace_file::RootHandle::new(&workspace.root);
     for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
         if options.is_cancelled() {
             return Ok(Vec::new());
@@ -1065,10 +1066,11 @@ fn literal_search_walk_paths(
             .as_ref()
             .is_some_and(|scope| !scope.matches(rel_path))
             || !path_matcher.matches(rel_path)
-            || options.type_filter.as_deref().is_some_and(|filter| {
-                let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
-                crate::chunking::language_for_path(rel_path) != Some(expected)
-            })
+            || !crate::regex_search::matches_live_file_type(
+                &files,
+                rel_path,
+                options.type_filter.as_deref(),
+            )
         {
             continue;
         }
@@ -1213,10 +1215,6 @@ fn substring_candidate_files(
             .as_ref()
             .is_some_and(|scope| !scope.matches(path))
             || !path_matcher.matches(path)
-            || options.type_filter.as_deref().is_some_and(|filter| {
-                let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
-                crate::chunking::language_for_path(path) != Some(expected)
-            })
     };
     let mut paths = HashSet::new();
     for (index, searcher) in ctx.searchers.iter().enumerate() {
@@ -1248,6 +1246,13 @@ fn substring_candidate_files(
             if ctx.is_shadowed_base_file(index, &path)
                 || (!options.skip_gitignore && ignored)
                 || filtered_out(&path)
+                || options.type_filter.as_deref().is_some_and(|filter| {
+                    !doc.get_first(ctx.fields.language)
+                        .and_then(|value| tantivy::schema::Value::as_str(&value))
+                        .is_some_and(|language| {
+                            crate::regex_search::type_filter_matches_language(language, filter)
+                        })
+                })
             {
                 continue;
             }
@@ -1257,11 +1262,18 @@ fn substring_candidate_files(
     // Also verify files the lexical index skipped, such as minified bundles.
     // Their visibility comes from the indexer, so excluded paths stay hidden.
     if let Some(unindexed) = crate::regex_search::unindexed_literal_candidates(workspace, options) {
+        let files = crate::workspace_file::RootHandle::new(&workspace.root);
         paths.extend(
             unindexed
-                .recorded
                 .iter()
-                .filter(|path| !filtered_out(path))
+                .filter(|path| {
+                    !filtered_out(path)
+                        && crate::regex_search::matches_live_file_type(
+                            &files,
+                            path,
+                            options.type_filter.as_deref(),
+                        )
+                })
                 .cloned(),
         );
     }

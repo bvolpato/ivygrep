@@ -1914,6 +1914,7 @@ fn execute_ivygrep_search(
             scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             skip_gitignore: args.skip_gitignore.unwrap_or(false),
             force_neural: false,
+            hash_only: false,
             disable_memory_expansion: false,
         })
     };

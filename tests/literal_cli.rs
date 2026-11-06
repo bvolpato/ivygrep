@@ -85,7 +85,7 @@ fn literal_unicode_case_folding_does_not_lose_indexed_files() {
     let home = temporary.path().join("home");
     let root = temporary.path().join("repo");
     std::fs::create_dir_all(root.join(".git")).unwrap();
-    std::fs::write(root.join("unicode.txt"), "Kelvin\nKit\naxİ\n").unwrap();
+    std::fs::write(root.join("unicode.txt"), "Kelvin\nKit\naxİ\nſet\n").unwrap();
     let indexed = command(&home, &root)
         .args(["--add", ".", "--hash", "--no-watch"])
         .output()
@@ -98,6 +98,14 @@ fn literal_unicode_case_folding_does_not_lose_indexed_files() {
             &root,
             &["--literal", "--no-watch", "--json", "-n", "2", query],
         );
+        assert_eq!(
+            result_paths(&matches),
+            [PathBuf::from("unicode.txt")],
+            "{query}"
+        );
+    }
+    for query in ["kit", "set", "(?i:kit)"] {
+        let matches = run(&home, &root, &["--regex", "--no-watch", "--json", query]);
         assert_eq!(
             result_paths(&matches),
             [PathBuf::from("unicode.txt")],

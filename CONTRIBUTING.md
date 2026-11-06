@@ -21,7 +21,7 @@ Required:
 - Python 3.12 or newer for repository harnesses
 - [uv](https://docs.astral.sh/uv/) for scripts with embedded dependencies
 - ShellCheck for full script validation
-- Node.js 22.23.4 or newer and pnpm 11.0.0 when changing `web/` or validating Markdown
+- Node.js 22.23.4 or newer and pnpm 11.28.9 when changing `web/` or validating Markdown
 
 Repository toolchain configuration installs `rustfmt` and Clippy automatically.
 

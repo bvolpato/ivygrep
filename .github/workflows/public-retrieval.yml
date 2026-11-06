@@ -103,6 +103,30 @@ jobs:
             tests.test_bench_file_localization \
             -v
 
+      - name: Fetch evidence publication commits
+        run: |
+          set -euo pipefail
+          manifest=benchmarks/evidence/manifest.json
+          commits="$(jq -r '
+            [.evidence[]?.publication_commit, .release_history_publication_commit]
+            | map(select(. != null))
+            | if all(.[]; type == "string" and test("^[0-9a-fA-F]{40}$"))
+              then .[] | ascii_downcase
+              else error("invalid publication commit")
+              end
+          ' "$manifest")"
+          while IFS= read -r commit; do
+            [[ -n "$commit" ]] || continue
+            if [[ ! "$commit" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::Invalid evidence publication commit in $manifest"
+              exit 1
+            fi
+            if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$commit"
+            fi
+            git cat-file -e "$commit^{commit}"
+          done <<< "$commits"
+
       - name: Verify benchmark dashboard
         run: |
           python3 scripts/render_evidence_dashboard.py
@@ -146,7 +170,7 @@ jobs:
   matrix:
     name: Run pinned public matrix
     if: github.event_name != 'pull_request'
-    uses: ./.github/workflows/retrieval-matrix.yml
+    uses: $/.github/workflows/retrieval-matrix.yml
     with:
       checkout_ref: ${{ inputs.release_tag || github.sha }}
       profile: ${{ (github.event_name == 'schedule' || inputs.release_tag != '') && 'public-core' || inputs.profile }}

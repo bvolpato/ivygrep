@@ -4,11 +4,33 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [1.3.1] - 2026-10-28
+### Security
+
+- Web searches can select registered workspace roots only. A request for an untracked directory no longer creates an index or makes its files available through the Web API.
+- Model and dataset download helpers retain the patched certifi trust roots after the Hugging Face Hub upgrade and preserve explicit CA settings.
+- CI uses patched Node.js 22.23.4 and uv 0.13.6 bootstrap binaries to reject certificate chains containing compromised emSign intermediate keys. These critical bootstrap exceptions do not disable the seven-day dependency cutoff.
 
 ### Changed
 
 - Dependabot uses seven-day cooldowns, and configured npm and uv resolutions reject newly published package releases until they are seven days old. pnpm 11 enforces the cutoff without falling back to a too-new version.
+- Refresh Rust, frontend, and benchmark-tool dependencies and pinned validation tools. pnpm 11.28.9 fixes lockfile updates that failed with `ERR_PNPM_MISSING_TIME` while the release-age guard was enabled.
+
+### Fixed
+
+- Context searches in the Web UI now accept a file or directory inside a registered non-Git workspace. If a checkout changes while a context request waits, the daemon uses the replacement index.
+- `--all` and linked-worktree searches ask before rebuilding an index of the home directory, one of its ancestors, or the filesystem root. They also ask before `--skip-gitignore` expands such an index, even when a daemon runs the search.
+- Daemon searches honor `--hash` even when a neural model is already loaded. They can update hash vectors without starting a neural worker.
+- Literal `--type text` includes text files with unknown extensions. Regex searches find Unicode case-insensitive matches that have no matching ASCII trigram, and find new files even when a reindex leaves the index unchanged.
+
+### Testing
+
+- Sustained daemon mutation checks verify cached and uncached searches, SQLite contents, and Merkle snapshots after updates, deletions, restores, and restarts. A live-file filter can no longer hide stale persistent entries from the soak.
+- The daemon recovery test reads the active watcher job PID instead of racing the legacy PID file's publication.
+
+## [1.3.1] - 2026-10-28
+
+### Changed
+
 - Release retrieval checks audit candidate coverage consistently across search modes and retain per-query metrics when a validation gate fails. Final top-20 recall remains a separate metric.
 - `ig --status` no longer reads every page of a large SQLite store. It measured the store tiers (stored chunks, graph, auxiliary) with three full `dbstat` passes, which took 450 seconds for an index with an 8.3 GB store. The MCP status tool, the web UI, and the progress display of a first index ran the same passes. A status listing now measures the tiers in one pass, and only for a store up to 256 MiB. For a larger store, `index_components` has no `stored_chunks_bytes`, `graph_bytes`, or `sqlite_auxiliary_bytes`, and the text output shows the size of the whole store. `ig --doctor` always measures the tiers. The legacy call graph check reads only the legacy tables, so a current store costs no pass.
 - A search, `ig --interactive`, or `ig --add` that would index your home directory, a directory that contains it, or the filesystem root now asks for confirmation first. A search in the wrong directory could start hours of indexing and use many gigabytes. Without a terminal, `ig` does not build that index and reports the reason. Pass `--yes` (`-y`) to build it without the question. An index of such a directory that already exists is used as before, unless the command rebuilds it (`--add --force`) or adds the ignored files to it (`--skip-gitignore`).
@@ -44,7 +66,6 @@ All notable changes to ivygrep are documented in this file.
 
 ### Security
 
-- CI uses patched Node.js 22.23.4 and uv 0.13.5 bootstrap binaries to reject certificate chains containing compromised emSign intermediate keys. These critical bootstrap exceptions do not disable the seven-day dependency cutoff.
 - Update zstd to 0.14.3 and zstd-safe to 8.2.0, including Tantivy's transitive dependencies, to fix stream context data leaks and memory safety advisories. Narrow versioned Tantivy forks preserve existing compressed indexes and the pinned search implementation.
 - Update the Windows clipboard dependency to unyanked clipboard-win 5.4.2, which fixes out-of-bounds reads of malformed HTML clipboard fragments. IvyGrep uses plain-text clipboard writes.
 - Update Markdown rendering to markdown-it 15.0.3 to fix quadratic parsing of multiline link references.

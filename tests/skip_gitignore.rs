@@ -181,6 +181,38 @@ fn start_daemon(repo: &std::path::Path, home: &std::path::Path) -> Daemon {
 }
 
 #[cfg(unix)]
+#[test]
+fn all_indices_requires_confirmation_before_expanding_a_home_index() {
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let (repo, home) = indexed_ignored_workspace(tmp.path());
+    let search = |mode: &[&str]| {
+        let mut command = skip_gitignore_search(&repo, &home, false);
+        command.env("HOME", &repo).arg("--all").args(mode);
+        command
+    };
+    search(&["--literal", "--regex"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Pass --yes"));
+    let _daemon = start_daemon(&repo, &home);
+    for mode in [&[][..], &["--literal"], &["--regex"], &["--interactive"]] {
+        search(mode)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("Pass --yes"));
+    }
+    search(&["--literal"])
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("secret.txt"));
+    search(&["--literal"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("secret.txt"));
+}
+
+#[cfg(unix)]
 struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
 
 #[cfg(unix)]

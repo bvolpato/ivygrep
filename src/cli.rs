@@ -31,7 +31,7 @@ use crate::search::{
 use crate::search_service::{FileSearchBatch, HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
-    resolve_workspace_and_scope,
+    resolve_workspace_and_scope_with_base,
 };
 
 fn parse_context_lines(value: &str) -> std::result::Result<usize, String> {
@@ -1544,7 +1544,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         Some(path) => path.clone(),
         None => env::current_dir()?,
     };
-    let (workspace, resolved_scope_filter) = resolve_workspace_and_scope(&query_path)?;
+    let (workspace, resolved_scope_filter) = resolve_query_workspace(&cli, &query_path)?;
     let scope_filter = (!cli.all_indices)
         .then_some(resolved_scope_filter)
         .flatten();
@@ -1600,7 +1600,6 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         Some(WorkspaceIndexState::NotIndexed | WorkspaceIndexState::Unhealthy)
     ) || (!cli.all_indices && adds_ignored_files(&workspace, cli.skip_gitignore))
     {
-        // This query is about to build an index.
         confirm_broad_index(&workspace.root, cli.yes)?;
     }
 
@@ -1881,6 +1880,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         // slow for every query. Users can `ig --add .` to force re-index.
     }
 
+    if cli.all_indices && (!cli.regex || cli.literal || search_via_daemon) {
+        confirm_broad_all(cli.skip_gitignore, cli.yes)?;
+    }
     if cli.skip_gitignore && (!cli.regex || cli.literal) {
         let search_runs_locally =
             context_args.is_some() || cli.symbol || cli.refs || cli.callers || cli.lexical_only;
@@ -1903,9 +1905,6 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 && ws.quick_index_health().is_queryable()
             {
                 continue;
-            }
-            if cli.all_indices {
-                confirm_broad_index(&ws.root, cli.yes)?;
             }
             tracing::info!(
                 "Re-indexing {} to include gitignore entities as requested",
@@ -2153,7 +2152,8 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             scope_is_file,
             skip_gitignore: cli.skip_gitignore,
             force_neural: cli.force_neural,
-            disable_memory_expansion: cli.no_memory_expansion_internal || cli.hash,
+            hash_only: cli.hash,
+            disable_memory_expansion: cli.no_memory_expansion_internal,
         };
         let local_options = SearchOptions {
             limit: backend_limit,
@@ -3016,6 +3016,60 @@ fn adds_ignored_files(workspace: &Workspace, skip_gitignore: bool) -> bool {
     skip_gitignore && !workspace_index_matches_skip_gitignore(workspace, true)
 }
 
+fn confirm_broad_build(root: &Path, force: bool, skip_gitignore: bool) -> Result<()> {
+    if current_broad_root(root).is_some() {
+        let workspace = Workspace::resolve_registered(root)?;
+        if force
+            || adds_ignored_files(&workspace, skip_gitignore)
+            || !workspace_is_indexed(&workspace)
+        {
+            confirm_broad_index(root, false)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_query_workspace(
+    cli: &Cli,
+    path: &Path,
+) -> Result<(Workspace, Option<crate::workspace::WorkspaceScope>)> {
+    let (workspace, scope, base) = resolve_workspace_and_scope_with_base(path)?;
+    if !cli.all_indices
+        && !cli.yes
+        && let Some(base) = base
+    {
+        confirm_broad_build(&base, false, cli.skip_gitignore)?;
+    }
+    Ok((workspace, scope))
+}
+
+/// Ask before any selected broad index is built or expanded, including worktree bases.
+pub(crate) fn confirm_broad_all(skip_gitignore: bool, assume_yes: bool) -> Result<()> {
+    if assume_yes {
+        return Ok(());
+    }
+    let home = dirs::home_dir().map(|home| config::canonicalize_lossy(&home).unwrap_or(home));
+    let broad = |root: &Path| broad_root(root, home.as_deref()).is_some();
+    let mut broad_roots = std::collections::BTreeSet::new();
+    for root in crate::workspace::list_indexed_workspace_roots()?.0 {
+        // A linked checkout can rebuild its base even after the user removed the base index.
+        if root.join(".git").is_file()
+            && let Ok((_, Some(base))) =
+                Workspace::resolve_registered_with_main_worktree_root(&root)
+            && broad(&base)
+        {
+            broad_roots.insert(base);
+        }
+        if broad(&root) {
+            broad_roots.insert(root);
+        }
+    }
+    for root in broad_roots {
+        confirm_broad_build(&root, false, skip_gitignore)?;
+    }
+    Ok(())
+}
+
 /// `--add` builds an index unless a current one exists. `--force` always
 /// rebuilds it, and `--skip-gitignore` can add the ignored files to it.
 fn confirm_broad_add(
@@ -3024,16 +3078,14 @@ fn confirm_broad_add(
     skip_gitignore: bool,
     assume_yes: bool,
 ) -> Result<()> {
-    let root = crate::workspace::detect_workspace_root(path)?;
-    if current_broad_root(&root).is_none() {
+    if assume_yes {
         return Ok(());
     }
-    let workspace = Workspace::resolve(&root)?;
-    if !force && workspace_is_indexed(&workspace) && !adds_ignored_files(&workspace, skip_gitignore)
-    {
-        return Ok(());
+    let (workspace, base) = Workspace::resolve_with_main_worktree_root(path)?;
+    if let Some(base) = base {
+        confirm_broad_build(&base, false, skip_gitignore)?;
     }
-    confirm_broad_index(&root, assume_yes)
+    confirm_broad_build(&workspace.root, force, skip_gitignore)
 }
 
 #[cfg(test)]

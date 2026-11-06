@@ -10,7 +10,10 @@ repository, prepares hash vectors, and issues concurrent requests over the real
 daemon protocol. There is
 no CLI search fallback. It verifies exact indexed probe revisions, deletion and
 recreation, then repeats after offline changes and process restarts. A stable
-probe query also exercises result-cache invalidation.
+probe query also exercises result-cache invalidation. Each correctness checkpoint
+checks an uncached query, SQLite contents, and the Merkle snapshot too. A deleted
+probe must disappear from the persistent index, even if live-file filtering
+already keeps it out of search results.
 
 Every process epoch first runs the same query/mutation workload for 30 seconds to
 initialize lazy thread pools, then gets independent resource samples for its share

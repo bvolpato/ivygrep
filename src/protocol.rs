@@ -16,7 +16,7 @@ fn is_zero(value: &usize) -> bool {
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 10;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 11;
 /// Older clients can omit the literal output mode and retain hit limits.
 /// This lets long-lived MCP sessions keep using a newer daemon.
 pub const MIN_DAEMON_PROTOCOL_VERSION: u32 = 8;
@@ -98,6 +98,8 @@ pub enum DaemonRequest {
         skip_gitignore: bool,
         #[serde(default)]
         force_neural: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        hash_only: bool,
         #[serde(default)]
         disable_memory_expansion: bool,
     },

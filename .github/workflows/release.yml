@@ -28,7 +28,7 @@ jobs:
   retrieval-gate:
     name: Validate release retrieval
     needs: preflight
-    uses: ./.github/workflows/retrieval-matrix.yml
+    uses: $/.github/workflows/retrieval-matrix.yml
     with:
       checkout_ref: ${{ github.sha }}
 
@@ -107,7 +107,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -452,9 +452,9 @@ jobs:
 
       - name: Install uv for neural model caching
         if: matrix.cuda || matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: 0.13.5
+          version: 0.13.6
           enable-cache: false
 
       - name: Cache pinned neural model through Xet
@@ -631,9 +631,9 @@ jobs:
           merge-multiple: false
 
       - name: Install uv for MCP bundle packaging
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: 0.13.5
+          version: 0.13.6
           enable-cache: false
 
       - name: Build MCP bundle and Registry metadata
