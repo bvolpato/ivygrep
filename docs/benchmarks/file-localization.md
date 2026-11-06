@@ -82,7 +82,7 @@ uv run scripts/bench_file_localization.py \
   --tasks benchmarks/public/file_localization_tasks.jsonl \
   --binary target/release/ig \
   --cache-dir /tmp/ivygrep-file-localization-cache \
-  --mode blended --baseline lexical \
+  --mode hash --baseline lexical \
   --limit 30 --timeout-secs 120 --max-query-chars 2000 \
   --output docs/benchmarks/file-localization-hash-$(date +%F).json
 ```
@@ -105,39 +105,38 @@ under `docs/benchmarks/`.
 
 ## Results
 
-Latest committed run: `docs/benchmarks/file-localization-hash-2026-08-21.json`
-(`ivygrep 1.2.12`, hash-only build, 30 tasks, 8,000-token packs, 50-file lists).
-With a hash-only build, `blended` routes to hash vectors + lexical fusion; no
-neural vectors are involved.
+Latest run: [`file-localization-hash-2026-11-05.json`](file-localization-hash-2026-11-05.json)
+(`ivygrep 1.3.1`, source commit `f898466`, frozen binary SHA-256
+`a092363f49d2c70a17fed221825eb46f1b954e4fe3fc68000a57a7aed1c06074`, 30
+tasks, 8,000-token packs, 50-file lists). The task file SHA-256 is
+`0eb0e0d1585f4bb159d7cff4a944b8bf9cf756bb1ba480b0f8ea444ec51a2006`.
 
 | Mode | Tasks | Acc@1 | Acc@5 | Acc@10 | R@10 | R@20 | MRR | Pack R | Pack P | Pack hit |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| blended | 30/30 | 0.433 | 0.667 | 0.733 | 0.631 | 0.692 | 0.515 | 0.642 | 0.080 | 0.733 |
-| lexical | 30/30 | 0.400 | 0.667 | 0.733 | 0.672 | 0.717 | 0.493 | 0.650 | 0.082 | 0.733 |
-| delta | | +0.033 | +0.000 | +0.000 | -0.042 | -0.025 | +0.022 | -0.008 | -0.002 | +0.000 |
+| hash | 30/30 | 0.367 | 0.767 | 0.767 | 0.706 | 0.706 | 0.524 | 0.675 | 0.090 | 0.767 |
+| lexical | 30/30 | 0.367 | 0.767 | 0.767 | 0.689 | 0.706 | 0.522 | 0.675 | 0.090 | 0.767 |
+| delta | | +0.000 | +0.000 | +0.000 | +0.017 | +0.000 | +0.003 | +0.000 | +0.000 | +0.000 |
 
-Per language (blended vs lexical):
+Per language (hash vs lexical):
 
-| Language | Tasks | blended Acc@1 | blended Acc@5 | blended R@10 | blended MRR | blended Pack R | lexical Acc@5 | lexical MRR |
+| Language | Tasks | hash Acc@1 | hash Acc@5 | hash R@10 | hash MRR | hash Pack R | lexical Acc@5 | lexical MRR |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| python | 12 | 0.583 | 0.833 | 0.806 | 0.661 | 0.806 | 0.833 | 0.601 |
-| rust | 10 | 0.200 | 0.400 | 0.375 | 0.301 | 0.258 | 0.400 | 0.299 |
-| typescript | 8 | 0.500 | 0.750 | 0.688 | 0.562 | 0.875 | 0.750 | 0.573 |
+| python | 12 | 0.417 | 0.917 | 0.847 | 0.614 | 0.847 | 0.917 | 0.607 |
+| rust | 10 | 0.100 | 0.500 | 0.400 | 0.253 | 0.308 | 0.500 | 0.253 |
+| typescript | 8 | 0.625 | 0.875 | 0.875 | 0.729 | 0.875 | 0.875 | 0.729 |
 
-Reading: `blended` on a hash-only build is hash vectors fused with lexical
-retrieval, so the delta over `lexical` is small by construction (+0.033
-Acc@1, +0.022 MRR, -0.042 R@10). Rust tasks are the weak spot: 5 of the
-8 tasks with no gold file in the top 10 are ripgrep/fd/bat issues whose text
-describes runtime behaviour rather than code identifiers. Context packs
-averaged 4,230 tokens and contained a gold file for 73% of tasks.
-Seven of the 30 issue texts quote a gold file path verbatim (tracebacks or
-module references), which is typical of real issues and is left in place.
+The hash and lexical routes tie on Acc@1, Acc@5, Acc@10, Recall@20, pack
+recall, and pack hit. Hash has small differences on Recall@10 (+0.017) and
+MRR (+0.003), which do not establish a general retrieval-quality improvement.
+Rust scores are lower than Python and TypeScript in this sample. Context packs
+averaged 4,172 tokens and contained a gold file for 77% of tasks. Seven of the
+30 issue texts quote a gold file path verbatim (tracebacks or module
+references), which is typical of real issues and is left in place.
 
-Run-to-run variance: a preceding run of the same binary and harness on the
-same tasks (three queries differed only in how reporter home directories were
-redacted) scored blended Acc@5 0.700 and MRR 0.516 versus 0.667 and 0.515
-here. ANN index construction is not bit-reproducible, so expect one task to
-move on Acc@k between runs; treat differences below 0.05 as noise.
+The 2026-08-21 report used `ivygrep 1.2.12`, a dirty checkout, and blended
+mode. Although it used the same task-file hash, its binary and retrieval route
+differ, so it is not a paired comparison. The hash and lexical results above
+use the same frozen binary, task set, queries, and context budget.
 
 Reference point for scale only (different corpus and task set, not
 comparable): the LocAgent and SweRank papers report a BM25 file-level Acc@5 of
