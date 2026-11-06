@@ -914,9 +914,9 @@ def render_html(dashboard: dict) -> str:
       <article class="report-card"><h2>Index footprint</h2><div class="metric-value">{footprint_card}</div></article>
       <article class="report-card"><h2>Index throughput</h2><div class="metric-value">{throughput_card}</div></article>
     </section>
-    <section class="report-card"><h2>Benchmark artifacts</h2><div class="table-wrap"><table><thead><tr><th>Artifact</th><th>Kind</th><th>Publication</th><th>SHA-256</th></tr></thead><tbody>{evidence_rows}</tbody></table></div></section>
-    <section class="report-card"><h2>Versioned histories</h2><p>Every point carries unit, context, variance status, and source metadata. Immutable links appear only for pinned bytes.</p><div class="table-wrap"><table><thead><tr><th>Metric family</th><th>Points</th><th>Unavailable</th></tr></thead><tbody>{history_rows}</tbody></table></div></section>
-    <section class="report-card"><h2>History points</h2><div class="table-wrap"><table><thead><tr><th>Family</th><th>Comparable series</th><th>Revision/tag</th><th>Value</th><th>Variance</th><th>Artifact</th></tr></thead><tbody>{rendered_points}</tbody></table></div></section>
+    <section class="report-card"><h2>Benchmark artifacts</h2><div class="report-table-wrap"><table class="report-table"><thead><tr><th>Artifact</th><th>Kind</th><th>Publication</th><th>SHA-256</th></tr></thead><tbody>{evidence_rows}</tbody></table></div></section>
+    <section class="report-card"><h2>Versioned histories</h2><p>Every point carries unit, context, variance status, and source metadata. Immutable links appear only for pinned bytes.</p><div class="report-table-wrap"><table class="report-table"><thead><tr><th>Metric family</th><th>Points</th><th>Unavailable</th></tr></thead><tbody>{history_rows}</tbody></table></div></section>
+    <section class="report-card"><h2>History points</h2><div class="report-table-wrap"><table class="report-table"><thead><tr><th>Family</th><th>Comparable series</th><th>Revision/tag</th><th>Value</th><th>Variance</th><th>Artifact</th></tr></thead><tbody>{rendered_points}</tbody></table></div></section>
   </main>
 </body>
 </html>
