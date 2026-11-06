@@ -31,7 +31,7 @@ pub(super) struct CleanGitCheckout {
     index_hash: String,
     ignore_controls: IgnoreControls,
     ignore_state: String,
-    tracked_paths: BTreeSet<String>,
+    tracked_records: Vec<u8>,
 }
 
 impl CleanGitCheckout {
@@ -41,7 +41,8 @@ impl CleanGitCheckout {
         let paths = git_paths(root)?;
         let index_hash = file_hash(&paths.index)?;
         let config = git_core_config(root);
-        let (ignore_controls, tracked_paths) = git_ignore_controls(root, &paths, config.as_ref())?;
+        let (ignore_controls, tracked_records) =
+            git_ignore_controls(root, &paths, config.as_ref())?;
         let ignore_state = ignore_controls_state(&ignore_controls)?;
         let state = format!(
             "{head}\n{index_hash}\n{}\n{ignore_state}\n{CLEAN_GIT_STATE_VERSION}",
@@ -54,7 +55,7 @@ impl CleanGitCheckout {
             index_hash,
             ignore_controls,
             ignore_state,
-            tracked_paths,
+            tracked_records,
         })
     }
 
@@ -81,8 +82,21 @@ impl CleanGitCheckout {
         let Ok(snapshot) = MerkleSnapshot::load(&workspace.merkle_snapshot_path()) else {
             return false;
         };
+        // Clean reuse needs no membership set. Build it only to certify an index.
+        let Some(tracked_paths) = self
+            .tracked_records
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                let relative = Path::new(std::str::from_utf8(record.get(2..)?).ok()?);
+                Some(index_path_string(relative))
+            })
+            .collect::<Option<BTreeSet<_>>>()
+        else {
+            return false;
+        };
         snapshot.files.iter().all(|(path, hash)| {
-            self.tracked_paths.contains(path)
+            tracked_paths.contains(path)
                 && MerkleSnapshot::path_matches_metadata_snapshot(&workspace.root.join(path), hash)
         })
     }
@@ -290,7 +304,7 @@ fn parse_git_bool(value: &str) -> Option<bool> {
 
 /// Git status cannot observe edits hidden by index flags. Collect tracked
 /// .ignore files here too: their whitelist rules can include Git-ignored code.
-fn tracked_ignore_controls(root: &Path) -> Option<(Vec<PathBuf>, BTreeSet<String>)> {
+fn tracked_ignore_controls(root: &Path) -> Option<(Vec<PathBuf>, Vec<u8>)> {
     let output = std::process::Command::new("git")
         .args(["ls-files", "-z", "-v", "--cached", "--recurse-submodules"])
         .current_dir(root)
@@ -300,7 +314,6 @@ fn tracked_ignore_controls(root: &Path) -> Option<(Vec<PathBuf>, BTreeSet<String
         return None;
     }
     let mut controls = Vec::new();
-    let mut tracked_paths = BTreeSet::new();
     for record in output
         .stdout
         .split(|byte| *byte == 0)
@@ -314,9 +327,8 @@ fn tracked_ignore_controls(root: &Path) -> Option<(Vec<PathBuf>, BTreeSet<String
         if relative.file_name().is_some_and(|name| name == ".ignore") {
             controls.push(root.join(relative));
         }
-        tracked_paths.insert(index_path_string(relative));
     }
-    Some((controls, tracked_paths))
+    Some((controls, output.stdout))
 }
 
 /// Ignore files that the walker can read. The bool marks controls whose
@@ -328,9 +340,9 @@ fn git_ignore_controls(
     root: &Path,
     paths: &GitPaths,
     config: Option<&GitCoreConfig>,
-) -> Option<(IgnoreControls, BTreeSet<String>)> {
+) -> Option<(IgnoreControls, Vec<u8>)> {
     let mut controls = IgnoreControls::new();
-    let (tracked_controls, tracked_paths) = tracked_ignore_controls(root)?;
+    let (tracked_controls, tracked_records) = tracked_ignore_controls(root)?;
     for path in tracked_controls {
         controls.insert(path, true);
     }
@@ -390,7 +402,7 @@ fn git_ignore_controls(
         let independent = path.file_name().is_some_and(|name| name == ".ignore");
         controls.entry(path).or_insert(independent);
     }
-    Some((controls, tracked_paths))
+    Some((controls, tracked_records))
 }
 
 /// Hashes the contents of the ignore files. `None` if a file cannot be read
@@ -594,6 +606,52 @@ mod tests {
             None
         );
         assert_eq!(parse_clean_head(b"# branch.head main\n"), None);
+    }
+
+    #[test]
+    fn tracked_ignore_controls_rejects_uncertain_source_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        fs::write(root.path().join("source.rs"), "pub fn tracked() {}\n").unwrap();
+        git(&["add", "source.rs"]);
+        assert!(tracked_ignore_controls(root.path()).is_some());
+
+        for (flag, reset) in [
+            ("--assume-unchanged", "--no-assume-unchanged"),
+            ("--skip-worktree", "--no-skip-worktree"),
+        ] {
+            git(&["update-index", flag, "source.rs"]);
+            assert!(
+                tracked_ignore_controls(root.path()).is_none(),
+                "{flag} must prevent source certification"
+            );
+            git(&["update-index", reset, "source.rs"]);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let name = std::ffi::OsString::from_vec(b"invalid-\xff.rs".to_vec());
+            // Some filesystems, such as APFS, reject non-UTF-8 names.
+            if fs::write(root.path().join(name), "pub fn invalid_name() {}\n").is_err() {
+                return;
+            }
+            git(&["add", "."]);
+            assert!(tracked_ignore_controls(root.path()).is_none());
+        }
     }
 
     #[test]

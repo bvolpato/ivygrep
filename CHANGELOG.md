@@ -12,6 +12,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Changed
 
+- Clean Git index rechecks defer tracked-file membership allocation until an index needs certification. Source and ignore validation remain active. See the [time, CPU, and memory measurements](docs/benchmarks/clean-git-reuse.md).
 - Context packs reuse successful indexed-file lookups during transient graph expansion. Reuse checks source presence, SQLite changes, and store identity. See the [performance measurements and memory tradeoffs](docs/benchmarks/graph-hydration.md).
 - Context packs score each representative chunk once and share unchanged source parses during relationship lookup. Every reuse still requires a fresh contained file read. See the [before/after measurements](docs/benchmarks/hotpaths.md).
 - Regex searches reuse bounded index-publication metadata and use hash lookups for saved paths. They still discover new files and apply current ignore rules on every request.
