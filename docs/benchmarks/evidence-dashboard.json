@@ -2,16 +2,16 @@
   "evidence": [
     {
       "id": "current-head-relevance",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/82041ff72b03a1d89ebbf2a79f81ddd86e031940/docs/benchmarks/current-head-relevance.json",
       "kind": "quality",
-      "label": "Historical self-repository retrieval snapshot",
+      "label": "Current self-repository retrieval screen",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
-      "sha256": "16434e8582d2ecdff2b16ab7817977391444bf90223c0824cba825e054d8409d",
-      "source_commit": "edada76caca9e70f28992e26a9ff4bb42d190343",
+      "publication_commit": "82041ff72b03a1d89ebbf2a79f81ddd86e031940",
+      "publication_status": "pinned",
+      "sha256": "38928ae7dd0e0d256971c49f25ffa0d17623d8d67ee22a5da1d2298cc5bcd39d",
+      "source_commit": "f898466fe9205680a4fa5d1ea765f53003ba80b2",
       "summary": {
-        "binary_sha256": "d0ab8a7617075792a41db245d2073b67e91ebcfbe8b819e5b9d1455d34de89f7",
+        "binary_sha256": "a092363f49d2c70a17fed221825eb46f1b954e4fe3fc68000a57a7aed1c06074",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "6b877037ff957ca5ee5093e0aa55472a5cd40163c50741f37664e1daabeb8654"
@@ -34,7 +34,7 @@
             "candidate_budget_misses": [],
             "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 9548.82205487229,
+            "elapsed_ms": 3557.4154989990348,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -46,10 +46,10 @@
             "mean_final_recall": 0.94,
             "mean_hybrid_deep_recall": 0.98,
             "mean_mrr": 0.9066666666666667,
-            "mean_ndcg10": 0.8679440283152121,
+            "mean_ndcg10": 0.8696291523244517,
             "mean_p1": 0.84,
-            "mean_p5": 0.19200000000000003,
-            "mean_recall5": 0.88,
+            "mean_p5": 0.2,
+            "mean_recall5": 0.9,
             "mode": "foreground",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
@@ -189,7 +189,7 @@
                 "final_recall": 1.0,
                 "id": "workspace-config",
                 "mrr": 1.0,
-                "ndcg10": 0.5997368403740738,
+                "ndcg10": 0.641864940605065,
                 "neural_executed": false
               },
               {
@@ -299,7 +299,7 @@
             "candidate_budget_misses": [],
             "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 8841.837993822992,
+            "elapsed_ms": 3845.906105998438,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -311,10 +311,10 @@
             "mean_final_recall": 0.94,
             "mean_hybrid_deep_recall": 0.98,
             "mean_mrr": 0.9066666666666667,
-            "mean_ndcg10": 0.8679440283152121,
+            "mean_ndcg10": 0.8696291523244517,
             "mean_p1": 0.84,
-            "mean_p5": 0.19200000000000003,
-            "mean_recall5": 0.88,
+            "mean_p5": 0.2,
+            "mean_recall5": 0.9,
             "mode": "hash-enriched",
             "neural_queries_executed": 0,
             "neural_queries_unobservable": 0,
@@ -454,7 +454,7 @@
                 "final_recall": 1.0,
                 "id": "workspace-config",
                 "mrr": 1.0,
-                "ndcg10": 0.5997368403740738,
+                "ndcg10": 0.641864940605065,
                 "neural_executed": false
               },
               {
@@ -564,7 +564,7 @@
             "candidate_budget_misses": [],
             "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 12944.79703111574,
+            "elapsed_ms": 9187.284435000038,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -576,10 +576,10 @@
             "mean_final_recall": 0.94,
             "mean_hybrid_deep_recall": 0.98,
             "mean_mrr": 0.9066666666666667,
-            "mean_ndcg10": 0.8679440283152121,
+            "mean_ndcg10": 0.8696291523244517,
             "mean_p1": 0.84,
-            "mean_p5": 0.19200000000000003,
-            "mean_recall5": 0.88,
+            "mean_p5": 0.2,
+            "mean_recall5": 0.9,
             "mode": "neural",
             "neural_queries_executed": 25,
             "neural_queries_unobservable": 0,
@@ -719,7 +719,7 @@
                 "final_recall": 1.0,
                 "id": "workspace-config",
                 "mrr": 1.0,
-                "ndcg10": 0.5997368403740738,
+                "ndcg10": 0.641864940605065,
                 "neural_executed": true
               },
               {
@@ -1988,12 +1988,12 @@
     },
     {
       "id": "million-scale-current",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/e888613ba00c05784141f7dc7ef2fb67ddbd95f2/docs/benchmarks/public-million-current.json",
       "kind": "scale",
       "label": "Latest measured release million-chunk confirmation",
       "path": "docs/benchmarks/public-million-current.json",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
+      "publication_commit": "e888613ba00c05784141f7dc7ef2fb67ddbd95f2",
+      "publication_status": "pinned",
       "sha256": "f69cbbca61a952c53a1654a03a2b30643135d27deeb3c01df86a9a5d7ec9c729",
       "source_commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba",
       "summary": {
@@ -2027,13 +2027,13 @@
     },
     {
       "id": "release-workflow",
-      "immutable_url": null,
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/f898466fe9205680a4fa5d1ea765f53003ba80b2/.github/workflows/release.yml",
       "kind": "portability",
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
-      "publication_commit": null,
-      "publication_status": "not pinned to an immutable revision",
-      "sha256": "6219d87eba0bd89ef894124feb05722e049d6c04c68cfdff474df2fd90a75251",
+      "publication_commit": "f898466fe9205680a4fa5d1ea765f53003ba80b2",
+      "publication_status": "pinned",
+      "sha256": "23d38aa4b9fa78fae987eec52446b54cbd28269eb955648f8358be139e363382",
       "source_commit": null,
       "summary": {
         "artifact_acceptance": true,
@@ -23971,8 +23971,8 @@
           "scope": "synthetic hash-only scale and footprint measurement"
         },
         "evidence_id": "million-scale-current",
-        "immutable_url": null,
-        "publication_commit": null,
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/e888613ba00c05784141f7dc7ef2fb67ddbd95f2/docs/benchmarks/public-million-current.json",
+        "publication_commit": "e888613ba00c05784141f7dc7ef2fb67ddbd95f2",
         "series": "million-chunk/latest-measured-release/final-index",
         "source_commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba",
         "unit": "bytes",
@@ -24288,8 +24288,8 @@
           "scope": "synthetic hash-only scale and footprint measurement"
         },
         "evidence_id": "million-scale-current",
-        "immutable_url": null,
-        "publication_commit": null,
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/e888613ba00c05784141f7dc7ef2fb67ddbd95f2/docs/benchmarks/public-million-current.json",
+        "publication_commit": "e888613ba00c05784141f7dc7ef2fb67ddbd95f2",
         "series": "million-chunk/latest-measured-release/chunks-per-second",
         "source_commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba",
         "unit": "chunks/s",
@@ -24609,8 +24609,8 @@
           "scope": "synthetic hash-only scale and footprint measurement"
         },
         "evidence_id": "million-scale-current",
-        "immutable_url": null,
-        "publication_commit": null,
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/e888613ba00c05784141f7dc7ef2fb67ddbd95f2/docs/benchmarks/public-million-current.json",
+        "publication_commit": "e888613ba00c05784141f7dc7ef2fb67ddbd95f2",
         "series": "million-chunk/latest-measured-release/warm-cli-p95",
         "source_commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba",
         "unit": "ms",
@@ -24926,8 +24926,8 @@
           "scope": "synthetic hash-only scale and footprint measurement"
         },
         "evidence_id": "million-scale-current",
-        "immutable_url": null,
-        "publication_commit": null,
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/e888613ba00c05784141f7dc7ef2fb67ddbd95f2/docs/benchmarks/public-million-current.json",
+        "publication_commit": "e888613ba00c05784141f7dc7ef2fb67ddbd95f2",
         "series": "million-chunk/latest-measured-release/peak-rss",
         "source_commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba",
         "unit": "bytes",
@@ -33370,10 +33370,10 @@
     "source": "https://api.github.com/repos/bvolpato/ivygrep/releases"
   },
   "release_history_artifact": {
-    "immutable_url": null,
+    "immutable_url": "https://github.com/bvolpato/ivygrep/blob/6c3060c0faf1dae6fe4f0ec2d2d45708ea88e867/docs/benchmarks/release-artifact-history.json",
     "path": "docs/benchmarks/release-artifact-history.json",
-    "publication_commit": null,
-    "publication_status": "not pinned to an immutable revision",
+    "publication_commit": "6c3060c0faf1dae6fe4f0ec2d2d45708ea88e867",
+    "publication_status": "pinned",
     "sha256": "0e06255d971d1ec06e778641e0226b0dbe3711a7b743ec085ddcf58a48eed80f"
   },
   "schema_version": 1

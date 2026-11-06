@@ -4,9 +4,9 @@
     {
       "id": "current-head-relevance",
       "kind": "quality",
-      "label": "Historical self-repository retrieval snapshot",
+      "label": "Current self-repository retrieval screen",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": "35a5f3e8663363a6affcd22670b803dee444c2a6"
+      "publication_commit": "82041ff72b03a1d89ebbf2a79f81ddd86e031940"
     },
     {
       "id": "public-retrieval-baseline",
@@ -62,16 +62,16 @@
       "kind": "scale",
       "label": "Latest measured release million-chunk confirmation",
       "path": "docs/benchmarks/public-million-current.json",
-      "publication_commit": "c9397f620e4fc9eaa8fd557e71b0df69ba8975fe"
+      "publication_commit": "e888613ba00c05784141f7dc7ef2fb67ddbd95f2"
     },
     {
       "id": "release-workflow",
       "kind": "portability",
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
-      "publication_commit": "68d730fc4c64c6061044bdf3cc9b0d8b15d27c40"
+      "publication_commit": "f898466fe9205680a4fa5d1ea765f53003ba80b2"
     }
   ],
   "release_history": "docs/benchmarks/release-artifact-history.json",
-  "release_history_publication_commit": "fa1fe9d589dde51082e1f180cd69f5beaf57bd2c"
+  "release_history_publication_commit": "6c3060c0faf1dae6fe4f0ec2d2d45708ea88e867"
 }
