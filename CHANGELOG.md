@@ -4,6 +4,8 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-10
+
 ### Security
 
 - Web searches can select registered workspace roots only. A request for an untracked directory no longer creates an index or makes its files available through the Web API.
@@ -12,9 +14,9 @@ All notable changes to ivygrep are documented in this file.
 
 ### Changed
 
-- Clean Git index rechecks defer tracked-file membership allocation until an index needs certification. Source and ignore validation remain active. See the [time, CPU, and memory measurements](docs/benchmarks/clean-git-reuse.md).
-- Context packs reuse successful indexed-file lookups during transient graph expansion. Reuse checks source presence, SQLite changes, and store identity. See the [performance measurements and memory tradeoffs](docs/benchmarks/graph-hydration.md).
-- Context packs score each representative chunk once and share unchanged source parses during relationship lookup. Every reuse still requires a fresh contained file read. See the [before/after measurements](docs/benchmarks/hotpaths.md).
+- Clean Git index rechecks defer tracked-file membership allocation until an index needs certification. Source and ignore validation remain active. See the [time, CPU, and memory measurements](https://github.com/bvolpato/ivygrep/blob/v1.3.2/docs/benchmarks/clean-git-reuse.md).
+- Context packs reuse successful indexed-file lookups during transient graph expansion. Reuse checks source presence, SQLite changes, and store identity. See the [performance measurements and memory tradeoffs](https://github.com/bvolpato/ivygrep/blob/v1.3.2/docs/benchmarks/graph-hydration.md).
+- Context packs score each representative chunk once and share unchanged source parses during relationship lookup. Every reuse still requires a fresh contained file read. See the [before/after measurements](https://github.com/bvolpato/ivygrep/blob/v1.3.2/docs/benchmarks/hotpaths.md).
 - Regex searches reuse bounded index-publication metadata and use hash lookups for saved paths. They still discover new files and apply current ignore rules on every request.
 - Dependabot uses seven-day cooldowns, and configured npm and uv resolutions reject newly published package releases until they are seven days old. pnpm 11 enforces the cutoff without falling back to a too-new version.
 - Refresh Rust, frontend, and benchmark-tool dependencies and pinned validation tools. pnpm 11.28.9 fixes lockfile updates that failed with `ERR_PNPM_MISSING_TIME` while the release-age guard was enabled.
