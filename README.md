@@ -57,8 +57,7 @@ With `--since`, it resolves the selected ref and finds its Git merge base with
 `HEAD`. The pack includes changes committed on the current branch since that
 base, plus staged, unstaged, and untracked files. The selected ref does not act
 as the diff base itself.
-Deleted changes can contribute Git history labeled `git_deleted` to a context
-pack. The unreleased deletion fix excludes missing files from current search results.
+Context packs can include Git history for deleted files, labeled `git_deleted`. Since v1.3.1, search excludes files it confirms are missing from the workspace.
 The pack can include definitions, callers, dependencies, tests, configuration, and documentation.
 It trims the rendered Markdown to the requested estimated token budget. It does not generate an answer or modify files.
 

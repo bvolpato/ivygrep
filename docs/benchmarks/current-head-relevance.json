@@ -1,7 +1,7 @@
 {
   "binary": {
-    "sha256": "a092363f49d2c70a17fed221825eb46f1b954e4fe3fc68000a57a7aed1c06074",
-    "version": "ivygrep 1.3.1"
+    "sha256": "3e2d84dfc54472ded36c7252b7eefbf2c1152f9a175b3331371b9ac3b9f4a84c",
+    "version": "ivygrep 1.3.2"
   },
   "fixture": {
     "path": "tests/fixtures/ivygrep_relevance_queries.json",
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "9a8cc279e58048250632dd96c2018f915789bc6e99ae8d5cef7770ea6409187f"
   },
-  "ivygrep_commit": "f898466fe9205680a4fa5d1ea765f53003ba80b2",
+  "ivygrep_commit": "f78c25f92574cd111b6c9f77f8f136ad141cad7a",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -26,7 +26,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 3557.4154989990348,
+      "elapsed_ms": 5300.084916991182,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -291,7 +291,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 3845.906105998438,
+      "elapsed_ms": 5488.677834044211,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -556,7 +556,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 9187.284435000038,
+      "elapsed_ms": 8030.552875017747,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -575,7 +575,7 @@
       "mode": "neural",
       "neural_queries_executed": 25,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 22,
+      "neural_queries_with_results": 21,
       "no_hit_queries": 0,
       "queries": 25,
       "query_metrics": [
@@ -810,9 +810,9 @@
     }
   },
   "runtime": {
-    "machine": "x86_64",
-    "release": "6.17.0-1025-oem",
-    "system": "Linux"
+    "machine": "arm64",
+    "release": "25.6.0",
+    "system": "Darwin"
   },
   "schema_version": 1,
   "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing and verified neural execution. This is not a public-code, million-chunk, or agent-task benchmark.",
@@ -828,6 +828,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "305b53a5718181e4f1d56ca8caca48a9cd282c8e064f563f2757530b65e48d62"
+    "sha256": "b74704a4cff451d354d368cf74c4fc2e8cf21f894129f17f18326348584e2e39"
   }
 }
