@@ -1048,25 +1048,68 @@ fn assemble_bundle(
     task: &str,
     workspace: &Path,
     budget_tokens: usize,
-    anchor_symbols: Vec<String>,
+    mut anchor_symbols: Vec<String>,
     change_scope: Option<ContextChangeScope>,
     mut referenced_paths: Vec<ContextInputPath>,
     mut candidates: Vec<Candidate>,
 ) -> ContextBundle {
-    let change_scope = change_scope.map(|scope| bound_change_scope(scope, budget_tokens));
+    let mut change_scope = change_scope.map(|scope| bound_change_scope(scope, budget_tokens));
     let referenced_path_limit = (budget_tokens / 64).clamp(1, 32);
-    let referenced_paths_truncated = referenced_paths.len() > referenced_path_limit;
+    let mut truncated = referenced_paths.len() > referenced_path_limit;
     referenced_paths.truncate(referenced_path_limit);
-    let fixed_header_tokens = estimated_header_tokens(
+    let candidate_count = candidates.len();
+    let estimate_header = |task: &str,
+                           anchors: &[String],
+                           scope: Option<&ContextChangeScope>,
+                           paths: &[ContextInputPath]| {
+        estimated_header_tokens(
+            task,
+            workspace,
+            budget_tokens,
+            anchors,
+            candidate_count,
+            scope,
+            paths,
+        )
+    };
+    let mut fixed_header_tokens = estimate_header(
         "",
-        workspace,
-        budget_tokens,
         &anchor_symbols,
-        candidates.len(),
         change_scope.as_ref(),
         &referenced_paths,
     );
-    let task_budget = budget_tokens.saturating_sub(fixed_header_tokens).min(1_024);
+    let per_item_budget = (budget_tokens / 4).clamp(96, 400);
+    // When the header already overflows, reserve space for a snippet plus its path and reasons.
+    let header_budget = if !candidates.is_empty()
+        && fixed_header_tokens.saturating_add(estimate_tokens(task).min(1_024)) > budget_tokens
+    {
+        budget_tokens - (budget_tokens / 2).min(per_item_budget + 64)
+    } else {
+        budget_tokens
+    };
+    while fixed_header_tokens > header_budget {
+        if !anchor_symbols.is_empty() {
+            anchor_symbols.pop();
+        } else if !referenced_paths.is_empty() {
+            referenced_paths.pop();
+        } else if let Some(scope) = &mut change_scope {
+            if scope.changes.pop().is_some() {
+                scope.changes_truncated = true;
+            } else {
+                change_scope = None;
+            }
+        } else {
+            break;
+        }
+        truncated = true;
+        fixed_header_tokens = estimate_header(
+            "",
+            &anchor_symbols,
+            change_scope.as_ref(),
+            &referenced_paths,
+        );
+    }
+    let task_budget = header_budget.saturating_sub(fixed_header_tokens).min(1_024);
     let (output_task, task_truncated, _) = truncate_to_token_budget(task, task_budget, task);
     candidates.sort_by(|left, right| {
         right
@@ -1075,7 +1118,6 @@ fn assemble_bundle(
             .then_with(|| left.hit.file_path.cmp(&right.hit.file_path))
             .then_with(|| left.hit.start_line.cmp(&right.hit.start_line))
     });
-    let candidate_count = candidates.len();
     let required_roles = candidates
         .iter()
         .flat_map(|candidate| candidate.roles.iter().copied())
@@ -1111,17 +1153,14 @@ fn assemble_bundle(
     );
 
     let mut items: Vec<ContextItem> = Vec::new();
-    let mut used_tokens = estimated_header_tokens(
+    let mut used_tokens = estimate_header(
         &output_task,
-        workspace,
-        budget_tokens,
         &anchor_symbols,
-        candidate_count,
         change_scope.as_ref(),
         &referenced_paths,
     );
     let mut file_counts = HashMap::<PathBuf, usize>::new();
-    let mut truncated = task_truncated || referenced_paths_truncated;
+    truncated |= task_truncated;
     for candidate in ordered {
         if items.len() == MAX_ITEMS || used_tokens >= budget_tokens {
             truncated = true;
@@ -1156,16 +1195,15 @@ fn assemble_bundle(
         let item_number = items.len() + 1;
         let wrapper_tokens = estimate_tokens(&render_markdown_item(item_number, &item));
         let remaining = budget_tokens.saturating_sub(used_tokens.saturating_add(wrapper_tokens));
-        if remaining < 64 {
+        if remaining == 0 {
             truncated = true;
-            break;
+            continue;
         }
-        let per_item_budget = (budget_tokens / 4).clamp(96, 400).min(remaining);
         let (preview, preview_truncated, start_offset) =
-            truncate_to_token_budget(&candidate.hit.preview, per_item_budget, task);
+            truncate_to_token_budget(&candidate.hit.preview, per_item_budget.min(remaining), task);
         if preview_truncated && estimate_tokens(&preview) < 32 {
             truncated = true;
-            break;
+            continue;
         }
         item.preview = preview;
         item.start_line = item.start_line.saturating_add(start_offset);
@@ -1293,7 +1331,12 @@ fn finalize_bundle_metrics(bundle: &mut ContextBundle) {
     bundle.coverage = coverage;
 
     for _ in 0..4 {
-        let estimated = estimate_tokens(&render_markdown(bundle));
+        let (markdown, header_truncated) = render_markdown_with_status(bundle);
+        if header_truncated && !bundle.truncated {
+            bundle.truncated = true;
+            continue;
+        }
+        let estimated = estimate_tokens(&markdown);
         if estimated == bundle.used_tokens {
             break;
         }
@@ -2082,10 +2125,16 @@ fn trim_leading_lines(text: &str) -> (String, usize) {
 }
 
 pub fn render_markdown(bundle: &ContextBundle) -> String {
+    render_markdown_with_status(bundle).0
+}
+
+fn render_markdown_with_status(bundle: &ContextBundle) -> (String, bool) {
     let mut output = String::new();
     output.push_str("# ivygrep context\n\n");
     output.push_str(&format!("Task: {}\n\n", bundle.task));
+    let workspace_start = output.len();
     output.push_str(&format!("Workspace: {}\n\n", bundle.workspace.display()));
+    let workspace_end = output.len();
     if let Some(scope) = &bundle.change_scope {
         let since = scope.since.as_deref().map_or_else(
             || "HEAD".to_string(),
@@ -2123,11 +2172,9 @@ pub fn render_markdown(bundle: &ContextBundle) -> String {
                 crate::workspace::index_path_string(&change.file_path),
             ));
         }
-        if scope.total_changes > change_limit {
-            output.push_str(&format!(
-                "- ... {} more\n",
-                scope.total_changes - change_limit
-            ));
+        let shown = scope.changes.len().min(change_limit);
+        if scope.total_changes > shown {
+            output.push_str(&format!("- ... {} more\n", scope.total_changes - shown));
         }
         output.push('\n');
     }
@@ -2181,10 +2228,28 @@ pub fn render_markdown(bundle: &ContextBundle) -> String {
         bundle.items.len()
     ));
     output.push_str("\n## Evidence\n");
+    let header_truncated = bundle.anchor_symbols.is_empty()
+        && bundle.referenced_paths.is_empty()
+        && bundle.change_scope.is_none()
+        && estimate_tokens(&output) > bundle.budget_tokens;
+    if header_truncated {
+        // The optional lists are already empty. Keep the full workspace in JSON.
+        output.replace_range(workspace_start..workspace_end, "");
+        if estimate_tokens(&output) > bundle.budget_tokens {
+            // Library callers can request less than the CLI's minimum budget.
+            output = format!(
+                "Context truncated ({} token budget).\n",
+                bundle.budget_tokens
+            );
+            if estimate_tokens(&output) > bundle.budget_tokens {
+                output.clear();
+            }
+        }
+    }
     for (index, item) in bundle.items.iter().enumerate() {
         output.push_str(&render_markdown_item(index.saturating_add(1), item));
     }
-    output
+    (output, header_truncated)
 }
 
 fn render_markdown_item(index: usize, item: &ContextItem) -> String {
@@ -2695,6 +2760,81 @@ mod tests {
             bundle.used_tokens,
             estimate_tokens(&render_markdown(&bundle))
         );
+    }
+
+    #[test]
+    fn long_trace_paths_and_header_metadata_leave_room_for_evidence() {
+        let paths = (0..4)
+            .map(|index| ContextInputPath {
+                file_path: PathBuf::from(format!(
+                    "src/{}frame_{index}.py",
+                    "nested_directory/".repeat(12)
+                )),
+                line: Some(42),
+            })
+            .collect::<Vec<_>>();
+        let workspace = PathBuf::from(format!("/{}", "界".repeat(300)));
+        let task = paths
+            .iter()
+            .map(|p| format!("File \"{}\", line 42", p.file_path.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let primary_path = paths[0].file_path.to_str().unwrap();
+        let mut primary = candidate(primary_path, 42, ContextRole::Primary, "return result", 1.0);
+        primary
+            .reasons
+            .insert("mentioned at line 42 in task or stack trace".to_string());
+        primary.hit.sources.push("task_input".to_string());
+        let long_scope = ContextChangeScope {
+            since: Some("long_branch_".repeat(100)),
+            base_commit: None,
+            dirty_worktree: false,
+            total_changes: 0,
+            changes_truncated: false,
+            changes: Vec::new(),
+        };
+        for (workspace, anchors, scope) in [
+            (Path::new("/repo"), vec![], None),
+            (
+                workspace.as_path(),
+                vec!["long_anchor_".repeat(100)],
+                Some(long_scope),
+            ),
+        ] {
+            let bundle = assemble_bundle(
+                &task,
+                workspace,
+                256,
+                anchors,
+                scope,
+                paths.clone(),
+                vec![primary.clone()],
+            );
+            assert!(bundle.truncated);
+            assert_eq!(bundle.workspace, workspace);
+            assert_eq!(bundle.items[0].preview, "return result");
+            assert_eq!(
+                bundle.used_tokens,
+                estimate_tokens(&render_markdown(&bundle))
+            );
+            assert!(bundle.used_tokens <= 256, "{bundle:#?}");
+        }
+    }
+
+    #[test]
+    fn fitting_workspace_is_preserved_and_small_library_budgets_can_render() {
+        let workspace = PathBuf::from(format!("/{}", "界".repeat(65)));
+        let bundle = assemble_bundle("review", &workspace, 256, vec![], None, vec![], vec![]);
+        assert!(!bundle.truncated);
+        assert!(render_markdown(&bundle).contains(&format!("Workspace: {}", workspace.display())));
+
+        for budget in 0..256 {
+            let bundle =
+                assemble_bundle("review", &workspace, budget, vec![], None, vec![], vec![]);
+            let rendered = render_markdown(&bundle);
+            assert_eq!(bundle.used_tokens, estimate_tokens(&rendered));
+            assert!(bundle.used_tokens <= budget, "{rendered}");
+        }
     }
 
     #[test]

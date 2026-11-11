@@ -684,6 +684,10 @@ fn insert_task_path(
     skip_gitignore: bool,
     workspace_files: &mut Option<Vec<PathBuf>>,
 ) {
+    static BARE_VERSION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[vV]?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z.+-]+)?$")
+            .expect("valid version regex")
+    });
     let line = line.filter(|line| *line > 0);
     let normalized_separators = raw_path.replace('\\', "/");
     let raw_path = Path::new(&normalized_separators);
@@ -720,6 +724,9 @@ fn insert_task_path(
         external_path = false;
     }
     if !root.join(&relative).is_file() {
+        if line.is_none() && BARE_VERSION.is_match(&normalized_separators) {
+            return;
+        }
         let files = workspace_files.get_or_insert_with(|| {
             crate::walker::source_walker(root, skip_gitignore)
                 .build()
@@ -814,6 +821,36 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn bare_versions_skip_filename_discovery_but_explicit_files_and_locations_resolve() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("archive")).unwrap();
+        fs::write(root.path().join("archive/1.3.3"), "old release").unwrap();
+        fs::write(root.path().join("2.0"), "current release").unwrap();
+
+        let mut paths = BTreeSet::new();
+        let mut workspace_files = None;
+        for version in ["1.3.3", "v1.3.3-rc.1+build", "2.0"] {
+            insert_task_path(
+                &mut paths,
+                root.path(),
+                version,
+                None,
+                false,
+                &mut workspace_files,
+            );
+        }
+        assert!(workspace_files.is_none());
+        assert_eq!(paths, BTreeSet::from([(PathBuf::from("2.0"), None)]));
+        assert_eq!(
+            referenced_task_paths(root.path(), "see 1.3.3:7 and archive/1.3.3", false),
+            vec![ContextInputPath {
+                file_path: PathBuf::from("archive/1.3.3"),
+                line: Some(7)
+            }]
+        );
+    }
 
     #[test]
     fn parses_stack_trace_paths_and_prefers_line_numbers() {
