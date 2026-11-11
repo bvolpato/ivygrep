@@ -762,6 +762,9 @@ fn scan_regex_file(
     let Ok(file) = files.open(path) else {
         return Ok(None);
     };
+    // Walked files and indexed candidates share the same relative path in JSON.
+    #[cfg(windows)]
+    let path = PathBuf::from(index_path_string(path));
     let mut hits = Vec::new();
     let mut hit_count = 0;
     let mut total_score = 0.0;
