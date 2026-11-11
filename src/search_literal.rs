@@ -17,6 +17,10 @@ pub(super) enum FileSearchMode {
     Files,
     FileNames,
     SingleFileName,
+    FilesWithPreviews {
+        file_limit: usize,
+        hits_per_file: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -30,6 +34,17 @@ struct RankedFile<'a> {
 impl RankedFile<'_> {
     fn score(&self) -> usize {
         self.matches.min(MAX_LITERAL_FILE_SCORE)
+    }
+
+    fn without_previews(&self) -> FileSearchResult {
+        FileSearchResult {
+            file_path: self.relative.clone(),
+            total_score: self.score() as f32,
+            hit_count: self.matches,
+            more_hits_in_file: self.matches,
+            hit_count_is_lower_bound: self.matches_are_lower_bound,
+            hits: Vec::new(),
+        }
     }
 }
 
@@ -112,6 +127,10 @@ pub(super) fn search_files(
     if max_files == 0 || query_lower.contains('\n') {
         return Ok(Vec::new());
     }
+    let max_files = match mode {
+        FileSearchMode::FilesWithPreviews { .. } => max_files.min(super::MAX_SEARCH_RESULT_LIMIT),
+        _ => max_files,
+    };
     let search = FileSearch {
         files: crate::workspace_file::RootHandle::new(root),
         matcher: LineMatcher::new(query_lower),
@@ -166,17 +185,13 @@ pub(super) fn search_files(
         return Ok(Vec::new());
     }
 
-    if mode != FileSearchMode::Files {
+    if matches!(
+        mode,
+        FileSearchMode::FileNames | FileSearchMode::SingleFileName
+    ) {
         return Ok(selected
             .into_iter()
-            .map(|file| FileSearchResult {
-                file_path: file.relative.clone(),
-                total_score: file.score() as f32,
-                hit_count: file.matches,
-                more_hits_in_file: file.matches,
-                hit_count_is_lower_bound: file.matches_are_lower_bound,
-                hits: Vec::new(),
-            })
+            .map(|file| file.without_previews())
             .collect());
     }
 
@@ -228,13 +243,40 @@ impl<'a> FileSearch<'a> {
     }
 
     fn read_selected_files(&self, selected: Vec<RankedFile<'a>>) -> Vec<FileSearchResult> {
+        let mut remaining_previews = self.max_files;
+        let mut remaining_files = match self.mode {
+            FileSearchMode::FilesWithPreviews { file_limit, .. } => file_limit.min(selected.len()),
+            _ => selected.len(),
+        };
+        let preview_limits: Vec<_> = selected
+            .iter()
+            .map(|file| match self.mode {
+                FileSearchMode::FilesWithPreviews { hits_per_file, .. } if remaining_files > 0 => {
+                    remaining_files -= 1;
+                    // Reserve one hit for each remaining result. Files fetched only
+                    // to count additional matches need no previews.
+                    let limit = file
+                        .matches
+                        .min(hits_per_file)
+                        .min(remaining_previews - remaining_files);
+                    remaining_previews -= limit;
+                    limit
+                }
+                FileSearchMode::FilesWithPreviews { .. } => 0,
+                _ => DEFAULT_LITERAL_PREVIEWS_PER_FILE,
+            })
+            .collect();
         let results: Vec<_> = selected
             .into_par_iter()
-            .map(|file| {
+            .zip(preview_limits)
+            .map(|(file, preview_limit)| {
+                if preview_limit == 0 {
+                    return (Some(file.without_previews()), false);
+                }
                 let result =
                     self.read_matching_content(file.absolute)
                         .and_then(|(content, count)| {
-                            self.result_for_content(file.relative, &content, count)
+                            self.result_for_content(file.relative, &content, count, preview_limit)
                         });
                 let changed = result.as_ref().map_or(0, |result| result.hit_count) != file.matches;
                 (result, changed)
@@ -280,13 +322,14 @@ impl<'a> FileSearch<'a> {
         relative: &Path,
         content: &str,
         match_count: usize,
+        preview_limit: usize,
     ) -> Option<FileSearchResult> {
         let hits = literal_hits_in_content(
             content,
             relative,
             self.query_lower,
             self.context,
-            DEFAULT_LITERAL_PREVIEWS_PER_FILE,
+            preview_limit,
             self.options,
         );
         if hits.is_empty() {
@@ -306,6 +349,20 @@ impl<'a> FileSearch<'a> {
     fn reselect_live_files(&self) -> Vec<FileSearchResult> {
         // Reconsider all candidates when a selected file changes. Streaming
         // counts gate preview reads, and retained results use one content snapshot.
+        let preview_limit = match self.mode {
+            // Every retained file could enter the display limit after an edit.
+            FileSearchMode::FilesWithPreviews {
+                file_limit,
+                hits_per_file,
+            } => {
+                let candidates = self.paths.len().min(self.max_files).max(1);
+                let shown = candidates.min(file_limit).max(1);
+                hits_per_file
+                    .min(super::MAX_SEARCH_RESULT_LIMIT / candidates)
+                    .min(self.max_files / shown)
+            }
+            _ => DEFAULT_LITERAL_PREVIEWS_PER_FILE,
+        };
         let results = self
             .paths
             .par_iter()
@@ -319,7 +376,8 @@ impl<'a> FileSearch<'a> {
                         && self.would_select(&heap, relative, count.matches)
                         && let Some((content, count)) = self.read_matching_content(absolute)
                         && self.would_select(&heap, relative, count)
-                        && let Some(result) = self.result_for_content(relative, &content, count)
+                        && let Some(result) =
+                            self.result_for_content(relative, &content, count, preview_limit)
                     {
                         insert_ranked(&mut heap, RankedResult(result), self.max_files);
                     }
@@ -338,7 +396,16 @@ impl<'a> FileSearch<'a> {
         results
             .into_sorted_vec()
             .into_iter()
-            .map(|result| result.0)
+            .enumerate()
+            .map(|(rank, RankedResult(mut file))| {
+                if let FileSearchMode::FilesWithPreviews { file_limit, .. } = self.mode
+                    && rank >= file_limit
+                {
+                    file.hits.clear();
+                    file.more_hits_in_file = file.hit_count;
+                }
+                file
+            })
             .collect()
     }
 
@@ -594,6 +661,38 @@ mod tests {
             names,
             [Path::new("b.txt"), Path::new("c.txt"), Path::new("a.txt")]
         );
+    }
+
+    #[test]
+    fn ranked_files_reserve_previews_for_each_displayed_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let paths = [("a.txt", 9), ("b.txt", 4), ("c.txt", 1)]
+            .into_iter()
+            .map(|(name, lines)| {
+                let path = root.join(name);
+                std::fs::write(&path, "needle\n".repeat(lines)).unwrap();
+                (PathBuf::from(name), path)
+            })
+            .collect::<Vec<_>>();
+        let files = search_files(
+            &root,
+            "needle",
+            0,
+            3,
+            &paths,
+            &SearchOptions::default(),
+            FileSearchMode::FilesWithPreviews {
+                file_limit: 2,
+                hits_per_file: 5,
+            },
+        )
+        .unwrap();
+        let counts: Vec<_> = files
+            .iter()
+            .map(|file| (file.hit_count, file.hits.len(), file.more_hits_in_file))
+            .collect();
+        assert_eq!(counts, [(9, 2, 7), (4, 1, 3), (1, 0, 1)]);
     }
 
     #[test]

@@ -31,10 +31,11 @@ use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
 use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::{
-    DaemonRequest, DaemonResponse, FileSearchResult, SearchHit, group_hits_by_file,
+    DaemonRequest, DaemonResponse, FileSearchResult, LiteralSearchOutput, MAX_HITS_PER_FILE,
+    SearchHit, group_hits_by_file,
 };
 use crate::regex_search::regex_search_with_options;
-use crate::search::{SearchOptions, hybrid_search_outcome, literal_search};
+use crate::search::{SearchOptions, hybrid_search_outcome, literal_file_search};
 use crate::symbols::{SymbolSearchMode, search_symbols_with_options};
 use crate::workspace::{
     Workspace, WorkspaceMetadata, WorkspaceStatus, resolve_workspace_and_scope,
@@ -57,12 +58,10 @@ const TOOL_IG_STATUS: &str = "ig_status";
 const DEFAULT_HITS_FILE_LIMIT: usize = 10;
 /// Hits kept per result file in hits mode unless `hits_per_file` overrides it.
 const DEFAULT_HITS_PER_FILE: usize = 3;
-const MAX_HITS_PER_FILE: usize = 100;
 /// Hits fetched per requested result file for ranked modes (hybrid, symbol
 /// definitions). Keeps the default retrieval cost equal to the CLI default.
 const RANKED_HIT_OVERFETCH: usize = 5;
-/// Hits fetched per requested result file for enumerating modes (literal,
-/// regex, references, callers), whose matches cluster inside few files.
+/// Candidate budget per requested file for literal, regex, references, and callers.
 const ENUMERATING_HIT_OVERFETCH: usize = 20;
 const MIN_ENUMERATING_HIT_BUDGET: usize = 200;
 
@@ -1776,6 +1775,7 @@ fn execute_ivygrep_search(
 
     let literal = args.literal.unwrap_or(false);
     let regex = args.regex.unwrap_or(false);
+    let file_name_only = args.file_name_only.unwrap_or(false);
     let symbol_mode = if args.symbol.unwrap_or(false) {
         Some(SymbolSearchMode::Definitions)
     } else if args.refs.unwrap_or(false) {
@@ -1785,10 +1785,18 @@ fn execute_ivygrep_search(
     } else {
         None
     };
-    // `limit` counts result files. Retrieval APIs count hits, so over-fetch a
-    // bounded hit budget and group/cap afterwards.
+    // Over-fetch to count matches before the display limit. Literal
+    // searches retrieve ranked files directly, so dense files use one slot each.
     let file_limit = args.limit.unwrap_or(DEFAULT_HITS_FILE_LIMIT);
     let hits_per_file = args.hits_per_file.unwrap_or(DEFAULT_HITS_PER_FILE);
+    let literal_output = if file_name_only {
+        LiteralSearchOutput::FileNames
+    } else {
+        LiteralSearchOutput::FilesWithPreviews {
+            file_limit,
+            hits_per_file,
+        }
+    };
     let ranked_mode = !literal
         && !regex
         && !matches!(
@@ -1881,7 +1889,7 @@ fn execute_ivygrep_search(
             limit: search_limit,
             context: args.context.unwrap_or(2),
             type_filter: args.type_filter.clone(),
-            output: crate::protocol::LiteralSearchOutput::Hits,
+            output: literal_output,
             include_globs: include_globs.clone(),
             exclude_globs: exclude_globs.clone(),
             scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
@@ -1893,6 +1901,7 @@ fn execute_ivygrep_search(
             path: Some(workspace.root.clone()),
             pattern: query.to_string(),
             limit: search_limit,
+            file_name_only: false,
             context: args.context.unwrap_or(2),
             type_filter: args.type_filter.clone(),
             include_globs: include_globs.clone(),
@@ -1919,14 +1928,18 @@ fn execute_ivygrep_search(
         })
     };
     let mut search_warnings = Vec::new();
-    let daemon_hits = if let Some(daemon_request) = daemon_request {
+    let daemon_results = if let Some(daemon_request) = daemon_request {
         // Tag the search so a client-side timeout or a cancelled MCP request
         // cancels it on the daemon instead of leaving the work running for a
         // caller that gave up.
         match cancellation.daemon_search(&daemon_request)? {
-            Some(DaemonResponse::SearchResults { hits, warnings }) => {
+            Some(DaemonResponse::SearchResults { hits, warnings }) if !literal => {
                 search_warnings = warnings;
-                Some(hits)
+                Some(SearchRows::Hits(hits))
+            }
+            Some(DaemonResponse::LiteralFiles { files, warnings }) if literal => {
+                search_warnings = warnings;
+                Some(SearchRows::Files(files))
             }
             Some(DaemonResponse::Error { message }) => {
                 tracing::warn!("MCP daemon search unavailable, searching locally: {message}");
@@ -1946,14 +1959,29 @@ fn execute_ivygrep_search(
         bail!("request cancelled");
     }
 
-    let mut hits = if let Some(hits) = daemon_hits {
-        hits
+    let results = if let Some(results) = daemon_results {
+        results
     } else if let Some(mode) = symbol_mode {
-        search_symbols_with_options(&workspace, query, mode, &search_options)?
+        SearchRows::Hits(search_symbols_with_options(
+            &workspace,
+            query,
+            mode,
+            &search_options,
+        )?)
     } else if literal {
-        literal_search(&workspace, query, &search_options)?
+        SearchRows::Files(literal_file_search(
+            &workspace,
+            query,
+            &search_options,
+            literal_output,
+            false,
+        )?)
     } else if regex {
-        regex_search_with_options(&workspace, query, &search_options)?
+        SearchRows::Hits(regex_search_with_options(
+            &workspace,
+            query,
+            &search_options,
+        )?)
     } else {
         // Load a neural query model only after neural vectors exist; a new
         // index returns hash results without downloading/loading model assets.
@@ -1969,25 +1997,36 @@ fn execute_ivygrep_search(
         {
             let _ = workspace.trigger_background_search_enhancement(query_uses_neural);
         }
-        hits
+        SearchRows::Hits(hits)
     };
-
-    if !literal && !regex {
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    }
 
     let BoundedHits {
         files: mut grouped,
         total_matches,
         truncated,
-    } = bound_hits_by_file(&hits, file_limit, hits_per_file, hit_budget);
+    } = match results {
+        SearchRows::Hits(mut hits) => {
+            if !literal && !regex {
+                hits.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            bound_hits_by_file(&hits, file_limit, hits_per_file, hit_budget)
+        }
+        SearchRows::Files(mut files) => {
+            let total_matches = files.len();
+            files.truncate(file_limit);
+            BoundedHits {
+                files,
+                total_matches,
+                truncated: total_matches > file_limit || total_matches >= hit_budget,
+            }
+        }
+    };
     let verbose = args.verbose.unwrap_or(false);
     let first_line_only = args.first_line_only.unwrap_or(false);
-    let file_name_only = args.file_name_only.unwrap_or(false);
 
     if !verbose {
         for file in &mut grouped {
@@ -2107,8 +2146,8 @@ fn local_context_pack(
 /// Ranked modes return score-ordered chunks spread across files, so a small
 /// multiple of `file_limit` fills the file list; the floor matches the CLI
 /// default so the default MCP call costs the same as `ig <query>`. Enumerating
-/// modes (literal, regex, references, callers) cluster many hits per file and
-/// need a deeper budget to reach `file_limit` distinct files.
+/// modes can cluster many hits per file. Literal search uses the budget for
+/// counting matching files and bounding previews across the displayed results.
 fn hits_mode_hit_budget(file_limit: usize, ranked_mode: bool) -> usize {
     let budget = if ranked_mode {
         file_limit
@@ -2120,6 +2159,11 @@ fn hits_mode_hit_budget(file_limit: usize, ranked_mode: bool) -> usize {
             .max(MIN_ENUMERATING_HIT_BUDGET)
     };
     budget.min(crate::search::MAX_SEARCH_RESULT_LIMIT)
+}
+
+enum SearchRows {
+    Hits(Vec<SearchHit>),
+    Files(Vec<FileSearchResult>),
 }
 
 struct BoundedHits {

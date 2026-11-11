@@ -993,6 +993,17 @@ pub(crate) fn literal_file_search_with_context(
     let mode = match (output, all_indices, paths.len()) {
         (LiteralSearchOutput::FileNames, false, 1) => literal::FileSearchMode::SingleFileName,
         (LiteralSearchOutput::FileNames, _, _) => literal::FileSearchMode::FileNames,
+        (
+            LiteralSearchOutput::FilesWithPreviews {
+                file_limit,
+                hits_per_file,
+            },
+            _,
+            _,
+        ) => literal::FileSearchMode::FilesWithPreviews {
+            file_limit: file_limit.min(MAX_SEARCH_RESULT_LIMIT),
+            hits_per_file: hits_per_file.clamp(1, crate::protocol::MAX_HITS_PER_FILE),
+        },
         _ => literal::FileSearchMode::Files,
     };
     let files = literal::search_files(

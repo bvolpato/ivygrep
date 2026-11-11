@@ -655,6 +655,36 @@ class MillionBenchmarkTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertTrue(result["warm_distinct_p95_ratio"]["significant_regression"])
 
+    def test_p95_preserves_query_and_trial_pairs(self):
+        values = self.report_inputs()["paired_baseline"]["queries"]["warm_distinct"]["latency_samples_ms"][:100]
+
+        def trial(trial_id, factor, reverse=False):
+            samples = [(str(i), ms * factor) for i, ms in enumerate(values)]
+            if reverse:
+                samples.reverse()
+            result = artifact([ms for _, ms in samples])
+            result["trial_id"] = trial_id
+            result["queries"]["warm_distinct"]["latency_sample_ids"] = [key for key, _ in samples]
+            return result
+
+        baseline = [trial("first", 1), trial("second", 2), trial("third", 3)]
+        current = [trial("third", 3.9, True), trial("second", 2.6, True), trial("first", 1.3, True)]
+        comparison = comparator.compare_runs(baseline, current, 1.10, None, None, 0)
+        self.assertFalse(comparison["passed"])
+        ratio = comparison["warm_distinct_p95_ratio"]
+        self.assertAlmostEqual(ratio["ci95_lower"], 1.30)
+        self.assertAlmostEqual(ratio["ci95_upper"], 1.30)
+
+        # One slow run may reflect host load. Give entire trials a chance
+        # to drop out of the sample when estimating the lower bound.
+        current = [trial("first", 1), trial("second", 2), trial("third", 4.5)]
+        comparison = comparator.compare_runs(baseline, current, 1.10, None, None, 0)
+        self.assertTrue(comparison["passed"])
+
+        current[0]["queries"]["warm_distinct"]["latency_sample_ids"][0] = "different query"
+        with self.assertRaisesRegex(ValueError, "different sample IDs"):
+            comparator.query_p95_ratio(baseline, current, "warm_distinct")
+
     def test_comparison_rejects_filtered_path_regression_when_warm_path_is_stable(self):
         baseline = artifact([100.0] * 40)
         current = artifact([100.0] * 40)
@@ -795,6 +825,8 @@ class MillionBenchmarkTest(unittest.TestCase):
         self.assertEqual(profile.call_args.args[3], distinct_cases)
         self.assertEqual(result["cli_warm_distinct"]["samples"], 3)
         self.assertEqual(result["concurrent"]["samples"], 3)
+        self.assertEqual(set(result["concurrent"]["latency_sample_ids"]), {q + "#0" for q in concurrent_queries})
+        self.assertEqual(result["cache_replay"]["latency_sample_ids"], [f"{distinct_queries[0]}#{i}" for i in range(3)])
         self.assertEqual(len(set(cli_warm_queries)), 3)
         self.assertEqual(len(set(concurrent_queries)), 3)
         self.assertFalse(set(daemon_queries) & set(cli_warm_queries))

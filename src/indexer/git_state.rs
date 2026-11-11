@@ -4,12 +4,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::merkle::{MerkleSnapshot, normalized_indexable_content};
+use crate::merkle::{MerkleSnapshot, metadata_file_hash, normalized_indexable_content};
 use crate::workspace::{Workspace, index_path_string};
 
-// Older markers checked only Git state, which cannot detect a transient
-// untracked file that was indexed and deleted between two clean checks.
-const CLEAN_GIT_STATE_VERSION: &str = "indexed-sources-v1";
+// Older certificates could accept working-file edits hidden by Git clean filters.
+const CLEAN_GIT_STATE_VERSION: &str = "indexed-sources-v2";
 
 pub(super) fn files_have_same_contents(left: &Path, right: &Path) -> bool {
     match (fs::read(left), fs::read(right)) {
@@ -31,6 +30,8 @@ pub(super) struct CleanGitCheckout {
     index_hash: String,
     ignore_controls: IgnoreControls,
     ignore_state: String,
+    converted_paths: Vec<u8>,
+    converted_state: String,
     tracked_records: Vec<u8>,
 }
 
@@ -44,8 +45,10 @@ impl CleanGitCheckout {
         let (ignore_controls, tracked_records) =
             git_ignore_controls(root, &paths, config.as_ref())?;
         let ignore_state = ignore_controls_state(&ignore_controls)?;
+        let converted_paths = converted_source_paths(root)?;
+        let converted_state = converted_sources_state(root, &converted_paths)?;
         let state = format!(
-            "{head}\n{index_hash}\n{}\n{ignore_state}\n{CLEAN_GIT_STATE_VERSION}",
+            "{head}\n{index_hash}\n{}\n{ignore_state}\n{CLEAN_GIT_STATE_VERSION}\n{converted_state}",
             git_sparse_checkout_state(root, config.as_ref()),
         );
         Some(Self {
@@ -55,6 +58,8 @@ impl CleanGitCheckout {
             index_hash,
             ignore_controls,
             ignore_state,
+            converted_paths,
+            converted_state,
             tracked_records,
         })
     }
@@ -64,24 +69,21 @@ impl CleanGitCheckout {
     }
 
     /// Whether the checkout is still clean at the same commit, with the same
-    /// Git index and the same ignore file contents. An edit, a commit, a
-    /// checkout, and a staging operation each change one of them. This check
-    /// starts one Git process. It does not read the Git configuration or list
-    /// the ignore files again.
+    /// Git index, ignore files, and working-file metadata for converted sources.
+    /// This check starts one Git process.
     pub(super) fn is_unchanged(&self, root: &Path) -> bool {
         clean_git_head(root).as_deref() == Some(self.head.as_str())
             && file_hash(&self.index).as_deref() == Some(self.index_hash.as_str())
             && ignore_controls_state(&self.ignore_controls).as_deref()
                 == Some(self.ignore_state.as_str())
+            && converted_sources_state(root, &self.converted_paths).as_deref()
+                == Some(self.converted_state.as_str())
     }
 
     /// Git's clean status proves contents only for tracked paths. Also check
     /// the actual indexed inputs: an untracked create/read/delete can leave
     /// Git unchanged, and a tracked edit/read/restore changes source metadata.
-    fn matches_indexed_sources(&self, workspace: &Workspace) -> bool {
-        let Ok(snapshot) = MerkleSnapshot::load(&workspace.merkle_snapshot_path()) else {
-            return false;
-        };
+    fn matches_indexed_sources(&self, workspace: &Workspace, snapshot: &MerkleSnapshot) -> bool {
         // Clean reuse needs no membership set. Build it only to certify an index.
         let Some(tracked_paths) = self
             .tracked_records
@@ -106,6 +108,23 @@ pub(super) fn indexed_git_state_path(workspace: &Workspace) -> PathBuf {
     workspace.index_dir.join("indexed_git_state")
 }
 
+pub(super) fn legacy_converted_sources_need_rebuild(
+    root: &Path,
+    indexed_state: Option<&str>,
+    checkout: Option<&CleanGitCheckout>,
+) -> bool {
+    let Some(state) = indexed_state else {
+        return false;
+    };
+    // The old base refresh could save new file metadata over old indexed
+    // text. For affected repositories a Merkle diff cannot repair that state.
+    state.lines().nth(4) != Some(CLEAN_GIT_STATE_VERSION)
+        && match checkout {
+            Some(checkout) => !checkout.converted_paths.is_empty(),
+            None => converted_source_paths(root).is_none_or(|paths| !paths.is_empty()),
+        }
+}
+
 /// Records the state that `expected` captured before indexing, if the
 /// checkout did not change while the index was built.
 pub(super) fn record_indexed_git_state(
@@ -114,7 +133,8 @@ pub(super) fn record_indexed_git_state(
 ) -> bool {
     if let Some(checkout) = expected
         && checkout.is_unchanged(&workspace.root)
-        && checkout.matches_indexed_sources(workspace)
+        && let Ok(snapshot) = MerkleSnapshot::load(&workspace.merkle_snapshot_path())
+        && checkout.matches_indexed_sources(workspace, &snapshot)
         && fs::write(indexed_git_state_path(workspace), checkout.state()).is_ok()
     {
         return true;
@@ -137,14 +157,23 @@ pub(super) fn refresh_clean_base_metadata(workspace: &Workspace) -> Result<bool>
     match base_index_checkout_state(workspace) {
         BaseIndexCheckoutState::Current => Ok(true),
         BaseIndexCheckoutState::Stale => Ok(false),
-        BaseIndexCheckoutState::MetadataChanged => {
+        BaseIndexCheckoutState::MetadataChanged(checkout) => {
             let skip_gitignore = workspace
                 .read_metadata()?
                 .is_some_and(|metadata| metadata.skip_gitignore);
-            let expected = CleanGitCheckout::capture(&workspace.root);
-            MerkleSnapshot::build(&workspace.root, skip_gitignore)?
-                .save(&workspace.merkle_snapshot_path())?;
-            Ok(record_indexed_git_state(workspace, expected.as_ref()))
+            let snapshot = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+            // Preserve the previous snapshot for incremental indexing if an
+            // input changed while the replacement metadata was being collected.
+            if !checkout.is_unchanged(&workspace.root)
+                || converted_source_paths(&workspace.root).as_deref()
+                    != Some(checkout.converted_paths.as_slice())
+                || !checkout.matches_indexed_sources(workspace, &snapshot)
+            {
+                return Ok(false);
+            }
+            snapshot.save(&workspace.merkle_snapshot_path())?;
+            fs::write(indexed_git_state_path(workspace), checkout.state())?;
+            Ok(true)
         }
     }
 }
@@ -196,6 +225,25 @@ struct GitPaths {
 }
 
 fn git_paths(root: &Path) -> Option<GitPaths> {
+    // Most main checkouts use the default paths. Ask Git to resolve linked
+    // worktrees, separate Git directories, and explicit environment overrides.
+    let dot_git = root.join(".git");
+    if dot_git.is_dir()
+        && !dot_git.join("commondir").try_exists().ok()?
+        && [
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+        ]
+        .iter()
+        .all(|key| std::env::var_os(key).is_none())
+    {
+        return Some(GitPaths {
+            index: dot_git.join("index"),
+            info_exclude: dot_git.join("info/exclude"),
+        });
+    }
     let output = std::process::Command::new("git")
         .args([
             "rev-parse",
@@ -217,6 +265,57 @@ fn git_paths(root: &Path) -> Option<GitPaths> {
         index,
         info_exclude,
     })
+}
+
+/// Git compares cleaned blobs with the index. Two different source texts can
+/// have the same blob under ident expansion, a filter, or an encoding rule.
+/// Ask Git for tracked paths with any of these attributes so its normal
+/// precedence, including global rules and submodules, applies.
+fn converted_source_paths(root: &Path) -> Option<Vec<u8>> {
+    let output = git_with_own_pathspecs(root)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--recurse-submodules",
+            "--",
+            ":(exclude,attr:!ident !filter !working-tree-encoding)",
+        ])
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+fn git_with_own_pathspecs(root: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root);
+    for key in [
+        "GIT_LITERAL_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+        "GIT_ICASE_PATHSPECS",
+    ] {
+        command.env_remove(key);
+    }
+    command
+}
+
+fn converted_sources_state(root: &Path, paths: &[u8]) -> Option<String> {
+    let mut hash = xxhash_rust::xxh3::Xxh3::new();
+    for relative in paths
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        hash.update(relative);
+        hash.update(b"\0");
+        match fs::symlink_metadata(root.join(std::str::from_utf8(relative).ok()?)) {
+            Ok(metadata) => hash.update(metadata_file_hash(&metadata).as_bytes()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hash.update(b"missing"),
+            Err(_) => return None,
+        }
+        hash.update(b"\0");
+    }
+    Some(format!("{:032x}", hash.digest128()))
 }
 
 fn file_hash(path: &Path) -> Option<String> {
@@ -373,7 +472,7 @@ fn git_ignore_controls(
 
     // `--directory` keeps Git out of ignored directories. The walker does not
     // enter them either, so their ignore files cannot change what is indexed.
-    let ignored_controls = std::process::Command::new("git")
+    let ignored_controls = git_with_own_pathspecs(root)
         .args([
             "ls-files",
             "-z",
@@ -385,7 +484,6 @@ fn git_ignore_controls(
             ":(glob)**/.gitignore",
             ":(glob)**/.ignore",
         ])
-        .current_dir(root)
         .output()
         .ok()?;
     if !ignored_controls.status.success() {
@@ -481,7 +579,7 @@ fn git_sparse_checkout_state(root: &Path, config: Option<&GitCoreConfig>) -> Str
 
 enum BaseIndexCheckoutState {
     Current,
-    MetadataChanged,
+    MetadataChanged(Box<CleanGitCheckout>),
     Stale,
 }
 
@@ -513,8 +611,9 @@ fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
     let same_head = indexed_state.lines().next() == current_state.lines().next();
     let same_sparse_checkout = indexed_state.lines().nth(2) == current_state.lines().nth(2);
     let same_ignore_state = indexed_state.lines().nth(3) == current_state.lines().nth(3);
-    if same_head && same_sparse_checkout && same_ignore_state {
-        BaseIndexCheckoutState::MetadataChanged
+    let same_converted_sources = indexed_state.lines().nth(5) == current_state.lines().nth(5);
+    if same_head && same_sparse_checkout && same_ignore_state && same_converted_sources {
+        BaseIndexCheckoutState::MetadataChanged(Box::new(checkout))
     } else {
         BaseIndexCheckoutState::Stale
     }

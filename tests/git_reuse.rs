@@ -33,7 +33,7 @@ fn git(root: &Path, args: &[&str]) {
 
 fn assert_clean(root: &Path) {
     let output = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["--no-optional-locks", "status", "--porcelain"])
         .current_dir(root)
         .output()
         .unwrap();
@@ -380,6 +380,122 @@ fn git_reuse_observes_assume_unchanged_and_present_skip_worktree_files() {
         fs::write(&source, "pub fn next_flag_marker() {}\n").unwrap();
         index_workspace_for_watcher(&workspace, &model).unwrap();
         assert_found(&workspace, "next_flag_marker", true);
+    }
+}
+
+#[test]
+#[serial]
+fn git_reuse_observes_working_text_hidden_by_content_conversion() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let reindex = |root: &Path| {
+        assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(root)
+            .env("IVYGREP_HOME", home.path())
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .env("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT", "1")
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .args(["--hash", "--no-watch", "--add", "."])
+            .assert()
+            .success();
+    };
+    for control in [".gitattributes", ".git/info/attributes", "external"] {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-b", "main"]);
+        let source = root.join("revision.md");
+        let (attributes, rule, old, new) = if control == "external" {
+            let attributes = parent.path().join("attributes");
+            git(
+                &root,
+                &[
+                    "config",
+                    "core.attributesFile",
+                    attributes.to_str().unwrap(),
+                ],
+            );
+            git(
+                &root,
+                &[
+                    "config",
+                    "filter.comments.clean",
+                    "git stripspace --strip-comments",
+                ],
+            );
+            (
+                attributes,
+                "*.md filter=comments\n",
+                "# originalquartzmarker\n",
+                "# freshkangaroomarkerx\n",
+            )
+        } else {
+            (
+                root.join(control),
+                "*.md ident\n",
+                "$Id: originalquartzmarker $\n",
+                "$Id: freshkangaroomarkerx $\n",
+            )
+        };
+        fs::write(attributes, rule).unwrap();
+        fs::write(&source, old).unwrap();
+        git(&root, &["add", "."]);
+        git(
+            &root,
+            &["commit", "-m", "Add a source with Git content conversion"],
+        );
+        let workspace = Workspace::resolve(&root).unwrap();
+        reindex(&root);
+        assert_found(&workspace, "originalquartzmarker", true);
+        assert!(workspace.index_dir.join("indexed_git_state").is_file());
+
+        let index = root.join(".git/index");
+        let before = fs::read(&index).unwrap();
+        fs::write(&source, new).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3))
+            .unwrap();
+        assert_clean(&root);
+        assert_eq!(fs::read(index).unwrap(), before);
+        if control == ".gitattributes" {
+            // Older base refreshes could save the new metadata while the
+            // search stores still held text from before the normalized edit.
+            let marker = workspace.index_dir.join("indexed_git_state");
+            let state = fs::read_to_string(&marker).unwrap();
+            let prefix = state.lines().take(4).collect::<Vec<_>>().join("\n");
+            fs::write(marker, format!("{prefix}\nindexed-sources-v1")).unwrap();
+            ivygrep::merkle::MerkleSnapshot::build(&root, false)
+                .unwrap()
+                .save(&workspace.merkle_snapshot_path())
+                .unwrap();
+        }
+        if control == ".git/info/attributes" {
+            let linked = parent.path().join("linked");
+            git(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    linked.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            fs::write(linked.join("revision.md"), new).unwrap();
+            reindex(&linked);
+            assert_found(
+                &Workspace::resolve(&linked).unwrap(),
+                "freshkangaroomarkerx",
+                true,
+            );
+        } else {
+            reindex(&root);
+        }
+        assert_found(&workspace, "freshkangaroomarkerx", true);
+        assert_found(&workspace, "originalquartzmarker", false);
     }
 }
 

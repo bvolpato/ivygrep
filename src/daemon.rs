@@ -32,7 +32,7 @@ use crate::protocol::{
     LiteralSearchOutput, MIN_DAEMON_PROTOCOL_VERSION, SearchHit, WorkspaceRuntimeStatus,
     group_hits_by_file,
 };
-use crate::regex_search::regex_search_with_options;
+use crate::regex_search::{regex_file_name_search_with_options, regex_search_with_options};
 use crate::search::{
     DEFAULT_SEARCH_LIMIT, NeuralQueryVectorJob, SearchContext, SearchOptions,
     hybrid_search_with_context_and_neural_job, literal_file_search_with_context,
@@ -187,19 +187,21 @@ fn finish_cancellable_search(
     }
 }
 
-enum LiteralSearchOutcome {
+enum DaemonSearchOutcome {
     Hits(SearchOutcome),
     Files(FileSearchOutcome),
 }
 
-fn cancelled_literal_search_outcome(
+fn cancelled_search_with_output(
     cancellation: Option<&SearchCancellation>,
     warnings: Vec<String>,
-    output: LiteralSearchOutput,
+    return_files: bool,
 ) -> DaemonResponse {
-    match (output, cancelled_search_outcome(cancellation, warnings)) {
-        (LiteralSearchOutput::Hits, response) => response,
-        (_, DaemonResponse::SearchResults { warnings, .. }) => DaemonResponse::LiteralFiles {
+    match (
+        return_files,
+        cancelled_search_outcome(cancellation, warnings),
+    ) {
+        (true, DaemonResponse::SearchResults { warnings, .. }) => DaemonResponse::LiteralFiles {
             files: Vec::new(),
             warnings,
         },
@@ -207,15 +209,15 @@ fn cancelled_literal_search_outcome(
     }
 }
 
-fn finish_cancellable_literal_search(
-    result: std::result::Result<LiteralSearchOutcome, String>,
+fn finish_search_with_output(
+    result: std::result::Result<DaemonSearchOutcome, String>,
     cancellation: Option<&SearchCancellation>,
 ) -> DaemonResponse {
     match result {
-        Ok(LiteralSearchOutcome::Hits(outcome)) => {
+        Ok(DaemonSearchOutcome::Hits(outcome)) => {
             finish_cancellable_search(Ok(outcome), cancellation)
         }
-        Ok(LiteralSearchOutcome::Files(mut outcome)) => {
+        Ok(DaemonSearchOutcome::Files(mut outcome)) => {
             if cancellation.is_some_and(SearchCancellation::is_cancelled) {
                 match deadline_warning(cancellation) {
                     Some(warning) => outcome.warnings.push(warning),
@@ -364,7 +366,7 @@ struct WatchEventFilter {
     workspace: Workspace,
     skip_gitignore: bool,
     git_exclude_path: Option<PathBuf>,
-    root_gitignore: Option<ignore::gitignore::Gitignore>,
+    ignore_builder: Option<ignore::WalkBuilder>,
     /// Same rule as the file walker, so events below a nested worktree or
     /// clone never reach the enclosing workspace's index.
     nested_checkouts: crate::workspace::NestedCheckouts,
@@ -998,7 +1000,7 @@ impl WatchEventFilter {
             workspace: workspace.clone(),
             skip_gitignore: false,
             git_exclude_path: None,
-            root_gitignore: None,
+            ignore_builder: None,
             nested_checkouts: crate::workspace::NestedCheckouts::default(),
             checkout_markers: HashSet::new(),
         };
@@ -1016,9 +1018,13 @@ impl WatchEventFilter {
             .is_some_and(|metadata| metadata.skip_gitignore);
         self.git_exclude_path = crate::workspace::git_common_dir(&self.workspace.root)
             .map(|common_dir| common_dir.join("info/exclude"));
-        self.root_gitignore = (!self.skip_gitignore)
-            .then(|| build_root_gitignore(&self.workspace.root, self.git_exclude_path.as_deref()))
-            .flatten();
+        self.ignore_builder = (!self.skip_gitignore).then(|| {
+            crate::walker::source_ignore_builder(
+                &self.workspace.root,
+                false,
+                self.git_exclude_path.as_deref(),
+            )
+        });
     }
 
     fn change_for_event(&mut self, event: &notify::Event) -> WatchChange {
@@ -1041,7 +1047,10 @@ impl WatchEventFilter {
             self.refresh();
             return WatchChange::FullReconciliation;
         }
-        let markers = self.checkout_marker_change(event);
+        // A parent or global ignore file can change outside the watched root.
+        // Share directory rules within this event and reload them on the next.
+        let mut ignore = None;
+        let markers = self.checkout_marker_change(event, &mut ignore);
         if markers.appeared_over_indexed_files {
             return WatchChange::FullReconciliation;
         }
@@ -1050,9 +1059,10 @@ impl WatchEventFilter {
         // path. The index update then finds it gone, which costs nothing for
         // a deleted worktree, or still there, which makes it scan the
         // workspace and take the files back.
-        let paths = self
-            .paths_to_reindex(event)
-            .into_iter()
+        let paths = event
+            .paths
+            .iter()
+            .filter_map(|path| self.path_to_reindex(path, event.kind, &mut ignore))
             .chain(markers.disappeared)
             .collect::<HashSet<_>>();
         if paths.is_empty() {
@@ -1068,7 +1078,11 @@ impl WatchEventFilter {
     /// entry gives its files back to this workspace. Neither touches a source
     /// file, and everything below `.git` is ignored, so only the entry itself
     /// can tell. Only events for a path named `.git` cost anything here.
-    fn checkout_marker_change(&mut self, event: &notify::Event) -> CheckoutMarkerChange {
+    fn checkout_marker_change(
+        &mut self,
+        event: &notify::Event,
+        ignore: &mut Option<ignore::IncrementalIgnore>,
+    ) -> CheckoutMarkerChange {
         use notify::EventKind;
         use notify::event::ModifyKind;
         // A `.git` directory is busy, and some backends report that as a
@@ -1097,10 +1111,7 @@ impl WatchEventFilter {
                 || dir.parent().is_some_and(|parent| {
                     self.nested_checkouts.contains(&self.workspace.root, parent)
                 })
-                || (!self.skip_gitignore
-                    && self.root_gitignore.as_ref().is_some_and(|gitignore| {
-                        gitignore.matched_path_or_any_parents(dir, true).is_ignore()
-                    }))
+                || self.is_ignored(rel_dir, true, ignore)
             {
                 continue;
             }
@@ -1157,19 +1168,35 @@ impl WatchEventFilter {
             .unwrap_or(true)
     }
 
-    fn paths_to_reindex(&self, event: &notify::Event) -> Vec<PathBuf> {
-        event
-            .paths
-            .iter()
-            .filter(|path| self.path_should_reindex(path))
-            .filter_map(|path| self.normalize_watch_path(path).map(|(_, rel)| rel))
-            .collect()
-    }
-
-    fn path_should_reindex(&self, path: &Path) -> bool {
-        let Some((normalized_path, rel)) = self.normalize_watch_path(path) else {
+    fn is_ignored(
+        &self,
+        rel: &Path,
+        is_dir: bool,
+        ignore: &mut Option<ignore::IncrementalIgnore>,
+    ) -> bool {
+        let Some(builder) = &self.ignore_builder else {
             return false;
         };
+        let matcher = ignore.get_or_insert_with(|| crate::walker::source_ignore_matcher(builder));
+        let (matched, error) = matcher.matched_with_errors(rel, is_dir);
+        if error.is_some_and(|error| !crate::walker::is_ignore_pattern_warning(&error)) {
+            // A failed read cannot establish that this event is safe to drop.
+            *ignore = None;
+            return false;
+        }
+        matched.is_ignore()
+    }
+
+    fn path_to_reindex(
+        &self,
+        path: &Path,
+        kind: notify::EventKind,
+        ignore: &mut Option<ignore::IncrementalIgnore>,
+    ) -> Option<PathBuf> {
+        use notify::EventKind;
+        use notify::event::{CreateKind, RemoveKind};
+
+        let (normalized_path, rel) = self.normalize_watch_path(path)?;
         if rel.as_os_str().is_empty()
             || is_always_ignored_watch_path(&rel)
             || crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized_path)
@@ -1177,19 +1204,26 @@ impl WatchEventFilter {
                 .nested_checkouts
                 .contains(&self.workspace.root, &normalized_path)
         {
-            return false;
+            return None;
         }
 
-        if !self.skip_gitignore
-            && let Some(gitignore) = &self.root_gitignore
-            && gitignore
-                .matched_path_or_any_parents(&normalized_path, normalized_path.is_dir())
-                .is_ignore()
-        {
-            return false;
+        if self.skip_gitignore {
+            return Some(rel);
         }
+        let is_dir = match kind {
+            EventKind::Create(CreateKind::File) | EventKind::Remove(RemoveKind::File) => false,
+            EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => true,
+            _ => normalized_path
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.is_dir()),
+        };
+        (!self.is_ignored(&rel, is_dir, ignore)).then_some(rel)
+    }
 
-        true
+    #[cfg(test)]
+    fn path_should_reindex(&self, path: &Path) -> bool {
+        self.path_to_reindex(path, notify::EventKind::Any, &mut None)
+            .is_some()
     }
 
     fn normalize_watch_path(&self, path: &Path) -> Option<(PathBuf, PathBuf)> {
@@ -4957,6 +4991,7 @@ async fn handle_request_with_cancellation(
             path,
             pattern,
             limit,
+            file_name_only,
             context,
             type_filter,
             include_globs,
@@ -5006,7 +5041,11 @@ async fn handle_request_with_cancellation(
             {
                 Ok(Some(leases)) => leases,
                 Ok(None) => {
-                    return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
+                    return cancelled_search_with_output(
+                        cancellation.as_ref(),
+                        workspace_warnings,
+                        file_name_only,
+                    );
                 }
                 Err(response) => return response,
             };
@@ -5017,34 +5056,61 @@ async fn handle_request_with_cancellation(
             } = search_leases;
             // Bound concurrent heavy regex work (see #58).
             let Some(permit) = state.acquire_search_permit(cancellation.as_ref()).await else {
-                return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
+                return cancelled_search_with_output(
+                    cancellation.as_ref(),
+                    workspace_warnings,
+                    file_name_only,
+                );
             };
             let state_clone = state.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let _mode_leases = mode_leases;
-                let mut batch = SearchBatch::new(workspace_warnings);
-                if options.is_cancelled() {
-                    return Ok(batch.finish_partial(options.bounded_limit()));
+                let prepare = |workspace: &Workspace| -> Result<()> {
+                    if ensure_queryable_workspace(&state_clone, workspace, skip_gitignore)? {
+                        state_clone.refresh_workspace_watcher(workspace)?;
+                    }
+                    Ok(())
+                };
+                if file_name_only {
+                    let mut batch =
+                        FileSearchBatch::new(workspace_warnings, options.bounded_limit());
+                    for workspace in &workspaces {
+                        if options.is_cancelled() {
+                            break;
+                        }
+                        let result = prepare(workspace).and_then(|()| {
+                            regex_file_name_search_with_options(workspace, &pattern, &options)
+                        });
+                        batch.record(&workspace.root, all_indices, result);
+                    }
+                    return if options.is_cancelled() {
+                        Ok(DaemonSearchOutcome::Files(batch.finish_partial()))
+                    } else {
+                        batch
+                            .finish()
+                            .map(DaemonSearchOutcome::Files)
+                            .map_err(|err| err.to_string())
+                    };
                 }
+                let mut batch = SearchBatch::new(workspace_warnings);
                 let mut workspace_options = options.clone();
                 if all_indices {
                     workspace_options.context = 0;
                 }
                 for workspace in &workspaces {
                     if options.is_cancelled() {
-                        return Ok(batch.finish_partial(options.bounded_limit()));
+                        break;
                     }
-                    let result = (|| {
-                        if ensure_queryable_workspace(&state_clone, workspace, skip_gitignore)? {
-                            state_clone.refresh_workspace_watcher(workspace)?;
-                        }
+                    let result = prepare(workspace).and_then(|()| {
                         regex_search_with_options(workspace, &pattern, &workspace_options)
-                    })();
+                    });
                     batch.record(&workspace.root, all_indices, result);
                 }
                 if options.is_cancelled() {
-                    return Ok(batch.finish_partial(options.bounded_limit()));
+                    return Ok(DaemonSearchOutcome::Hits(
+                        batch.finish_partial(options.bounded_limit()),
+                    ));
                 }
                 let mut outcome =
                     finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
@@ -5060,7 +5126,7 @@ async fn handle_request_with_cancellation(
                         &options,
                     );
                 }
-                Ok(outcome)
+                Ok(DaemonSearchOutcome::Hits(outcome))
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -5068,7 +5134,7 @@ async fn handle_request_with_cancellation(
                 Err(join_err.to_string())
             });
 
-            finish_cancellable_search(result, cancellation.as_ref())
+            finish_search_with_output(result, cancellation.as_ref())
         }
         DaemonRequest::LiteralSearch {
             path,
@@ -5131,10 +5197,10 @@ async fn handle_request_with_cancellation(
             {
                 Ok(Some(leases)) => leases,
                 Ok(None) => {
-                    return cancelled_literal_search_outcome(
+                    return cancelled_search_with_output(
                         cancellation.as_ref(),
                         workspace_warnings,
-                        output,
+                        output != LiteralSearchOutput::Hits,
                     );
                 }
                 Err(response) => return response,
@@ -5149,10 +5215,10 @@ async fn handle_request_with_cancellation(
                 .acquire_search_permit(cancellation.as_ref())
                 .await
             else {
-                return cancelled_literal_search_outcome(
+                return cancelled_search_with_output(
                     cancellation.as_ref(),
                     workspace_warnings,
-                    output,
+                    output != LiteralSearchOutput::Hits,
                 );
             };
             let result = tokio::task::spawn_blocking(move || {
@@ -5170,7 +5236,7 @@ async fn handle_request_with_cancellation(
                     let mut batch = SearchBatch::new(workspace_warnings);
                     for workspace in &workspaces {
                         if options.is_cancelled() {
-                            return Ok(LiteralSearchOutcome::Hits(
+                            return Ok(DaemonSearchOutcome::Hits(
                                 batch.finish_partial(options.bounded_limit()),
                             ));
                         }
@@ -5180,20 +5246,20 @@ async fn handle_request_with_cancellation(
                         batch.record(&workspace.root, all_indices, result);
                     }
                     if options.is_cancelled() {
-                        return Ok(LiteralSearchOutcome::Hits(
+                        return Ok(DaemonSearchOutcome::Hits(
                             batch.finish_partial(options.bounded_limit()),
                         ));
                     }
                     return batch
                         .finish(options.bounded_limit(), HitOrdering::Preserve)
-                        .map(LiteralSearchOutcome::Hits)
+                        .map(DaemonSearchOutcome::Hits)
                         .map_err(|err| err.to_string());
                 }
 
                 let mut batch = FileSearchBatch::new(workspace_warnings, options.bounded_limit());
                 for workspace in &workspaces {
                     if options.is_cancelled() {
-                        return Ok(LiteralSearchOutcome::Files(batch.finish_partial()));
+                        return Ok(DaemonSearchOutcome::Files(batch.finish_partial()));
                     }
                     let result = prepare(workspace).and_then(|context| {
                         literal_file_search_with_context(
@@ -5208,11 +5274,11 @@ async fn handle_request_with_cancellation(
                     batch.record(&workspace.root, all_indices, result);
                 }
                 if options.is_cancelled() {
-                    return Ok(LiteralSearchOutcome::Files(batch.finish_partial()));
+                    return Ok(DaemonSearchOutcome::Files(batch.finish_partial()));
                 }
                 batch
                     .finish()
-                    .map(LiteralSearchOutcome::Files)
+                    .map(DaemonSearchOutcome::Files)
                     .map_err(|err| err.to_string())
             })
             .await
@@ -5221,7 +5287,7 @@ async fn handle_request_with_cancellation(
                 Err(join_err.to_string())
             });
 
-            finish_cancellable_literal_search(result, cancellation.as_ref())
+            finish_search_with_output(result, cancellation.as_ref())
         }
         DaemonRequest::ContextPack {
             path,
@@ -5919,7 +5985,14 @@ fn spawn_watch_heartbeat(control: Arc<WatchControl>) {
                 .details
                 .insert("coalesced_events".to_string(), coalesced_events.to_string());
             update_watcher_job(&control, update);
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // The worker writes phase changes immediately. An idle watcher
+            // only needs to renew the ledger before its liveness record expires.
+            let delay = if phase == "idle" {
+                Duration::from_secs(jobs::WATCHER_HEARTBEAT_TTL_SECS / 2)
+            } else {
+                Duration::from_secs(2)
+            };
+            tokio::time::sleep(delay).await;
         }
     });
 }
@@ -6514,21 +6587,6 @@ fn modified_nanos(metadata: &std::fs::Metadata) -> u128 {
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or(0)
-}
-
-fn build_root_gitignore(
-    root: &Path,
-    git_exclude_path: Option<&Path>,
-) -> Option<ignore::gitignore::Gitignore> {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-    if let Some(git_exclude) = git_exclude_path.filter(|path| path.exists()) {
-        let _ = builder.add(git_exclude);
-    }
-    let gitignore = root.join(".gitignore");
-    if gitignore.exists() {
-        let _ = builder.add(&gitignore);
-    }
-    builder.build().ok()
 }
 
 fn is_always_ignored_watch_path(rel: &Path) -> bool {
@@ -7554,7 +7612,9 @@ mod tests {
         needle: &str,
         expected: bool,
     ) -> bool {
-        for _ in 0..60 {
+        // Replacing an external Git directory can require a second watcher
+        // reconciliation before the linked worktree publishes the new view.
+        for _ in 0..300 {
             if !control.indexing.load(Ordering::Relaxed)
                 && indexed_literal_visible(workspace, needle) == Some(expected)
             {
@@ -11546,6 +11606,7 @@ mod tests {
                 path: None,
                 pattern: "daemon_cross_workspace_marker".to_string(),
                 limit: Some(10),
+                file_name_only: false,
                 context: 1,
                 type_filter: Some("rust".to_string()),
                 include_globs: include.clone(),
@@ -11778,6 +11839,96 @@ mod tests {
         assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
         assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[test]
+    #[serial]
+    fn watch_events_follow_nested_ignore_rules_when_sources_change() {
+        use notify::EventKind;
+        use notify::event::{CreateKind, RemoveKind};
+
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let src = workspace.root.join("src");
+        std::fs::create_dir_all(src.join("build")).unwrap();
+        std::fs::write(workspace.root.join(".gitignore"), "*.rs\n").unwrap();
+        std::fs::write(src.join(".gitignore"), "!*.rs\n").unwrap();
+        std::fs::write(src.join(".ignore"), "build/\n").unwrap();
+
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let mut filter = WatchEventFilter::new(&workspace);
+        let source = src.join("new.rs");
+        std::fs::write(&source, "pub fn watch_nested_marker() {}\n").unwrap();
+        std::fs::write(src.join(".settings.toml"), "enabled = true\n").unwrap();
+        let created = EventKind::Create(CreateKind::File);
+        let event = notify::Event::new(created)
+            .add_path(src.join("build/artifact.txt"))
+            .add_path(src.join(".settings.toml"))
+            .add_path(source.clone());
+        let WatchChange::Paths(paths) = filter.change_for_event(&event) else {
+            panic!("expected the unignored new file");
+        };
+        assert_eq!(
+            paths,
+            HashSet::from([
+                PathBuf::from("src/new.rs"),
+                PathBuf::from("src/.settings.toml")
+            ])
+        );
+        index_workspace_paths_for_watcher(
+            &workspace,
+            model.as_ref(),
+            &paths.into_iter().collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(indexed_file_contains(
+            &workspace,
+            "src/new.rs",
+            "watch_nested_marker"
+        ));
+
+        std::fs::remove_file(&source).unwrap();
+        let removed =
+            notify::Event::new(EventKind::Remove(RemoveKind::File)).add_path(source.clone());
+        assert!(
+            matches!(filter.change_for_event(&removed), WatchChange::Paths(paths)
+            if paths == HashSet::from([PathBuf::from("src/new.rs")]))
+        );
+        std::fs::remove_file(src.join(".gitignore")).unwrap();
+        let rule_removed = notify::Event::new(EventKind::Remove(RemoveKind::File))
+            .add_path(src.join(".gitignore"));
+        assert!(matches!(
+            filter.change_for_event(&rule_removed),
+            WatchChange::FullReconciliation
+        ));
+        assert!(matches!(
+            filter.change_for_event(&notify::Event::new(created).add_path(source)),
+            WatchChange::None
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn watch_events_reload_ignore_rules_above_the_workspace() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let external = parent.path().join(".ignore");
+        std::fs::write(&external, "*.rs\n").unwrap();
+        let workspace = Workspace::resolve(&root).unwrap();
+        let mut filter = WatchEventFilter::new(&workspace);
+        let event = notify::Event::new(notify::EventKind::Any).add_path(root.join("new.rs"));
+        assert!(matches!(filter.change_for_event(&event), WatchChange::None));
+        std::fs::remove_file(external).unwrap();
+        assert!(
+            matches!(filter.change_for_event(&event), WatchChange::Paths(paths)
+            if paths == HashSet::from([PathBuf::from("new.rs")]))
+        );
     }
 
     #[test]
@@ -12232,7 +12383,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn literal_file_output_limits_files_and_compacts_filename_results() {
+    async fn file_output_limits_files_and_compacts_filename_results() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repo = tempdir().unwrap();
@@ -12280,6 +12431,23 @@ mod tests {
                 assert_eq!(files[1].hits.len(), 3);
             }
         }
+
+        let request = serde_json::from_value(serde_json::json!({
+            "type": "regex_search",
+            "path": workspace.root,
+            "pattern": "need.e",
+            "limit": 1,
+            "file_name_only": true
+        }))
+        .unwrap();
+        let response = handle_request(state, request).await;
+        let DaemonResponse::LiteralFiles { files, .. } = response else {
+            panic!("expected compact regex results, got {response:?}");
+        };
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_path, Path::new("b.txt"));
+        assert_eq!(files[0].hit_count, 4);
+        assert!(files[0].hits.is_empty());
     }
 
     fn index_request_for(workspace: &Workspace, skip_gitignore: bool) -> DaemonRequest {

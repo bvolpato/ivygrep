@@ -60,6 +60,8 @@ three times.
 
 ## `public-core` scope
 
+`support_file_spam_rate_at_10` uses source filenames to identify tests, examples, and documentation. Public CoIR exports assign filenames from document positions, so the evaluator records `null` for this metric. A zero in an older CoIR report does not establish that a query avoided support files. Corpora with original paths can still report a measured zero.
+
 `public-core` is the existing 1,000-query regression panel. Its query sets,
 dataset limits, relevance thresholds and release-CI role are unchanged. It is
 not an unseen-query generalization set for the checkout-reference learned reranker.

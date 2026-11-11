@@ -139,6 +139,7 @@ fn cli_searches_a_pasted_prompt_with_operator_words_and_warns() {
     let prompt = "Why does this query return records that are NOT active?\n\nSELECT * FROM records WHERE ready = 1 AND";
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .args(["--json", "--hash", "--no-watch", prompt])
+        .env("RUST_LOG", "ivygrep=trace")
         .arg(&root)
         .env("IVYGREP_HOME", &home)
         .env("IVYGREP_NO_AUTOSPAWN", "1")
@@ -457,6 +458,25 @@ fn cli_file_name_only_json_snapshot() {
 
     let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
     insta::assert_yaml_snapshot!("cli_file_name_only_json", value);
+
+    let regex_output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--json",
+            "--hash",
+            "--regex",
+            "--file-name-only",
+            "calculate_.*tax",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let regex_paths: Vec<String> = serde_json::from_slice(&regex_output).unwrap();
+    assert_eq!(regex_paths, ["rust_repo/src/lib.rs"]);
 }
 
 #[test]

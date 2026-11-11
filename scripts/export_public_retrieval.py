@@ -299,6 +299,7 @@ def export_task(
 
     provenance = {
         "schema_version": 1,
+        "source_file_paths": False,
         "task": task_name,
         "license": task_config["license"],
         "license_source": (f"https://huggingface.co/datasets/{query_corpus_repo}"),

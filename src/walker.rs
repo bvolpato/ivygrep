@@ -13,8 +13,43 @@ use ignore::WalkBuilder;
 /// - Does not require a git repository
 /// - Does not follow symlinks
 pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
+    source_walker_scoped(root, skip_gitignore, None)
+}
+
+pub(crate) fn source_walker_scoped(
+    root: &Path,
+    skip_gitignore: bool,
+    scope: Option<&Path>,
+) -> WalkBuilder {
+    let scope = scope.map(|path| root.join(path));
     let owned_root = owned_storage_root(root);
     let workspace_root = root.to_path_buf();
+    let git_entry = root.join(".git");
+    let may_have_external_common_dir = git_entry.is_file() || git_entry.join("commondir").is_file();
+    let exclude = (!skip_gitignore && may_have_external_common_dir)
+        .then(|| crate::workspace::git_common_dir(root))
+        .flatten()
+        .map(|common_dir| common_dir.join("info/exclude"));
+    let mut walker = source_ignore_builder(root, skip_gitignore, exclude.as_deref());
+    walker.follow_links(false);
+    let nested_checkouts = crate::workspace::NestedCheckouts::new(root);
+    walker.filter_entry(move |entry| {
+        scope.as_ref().is_none_or(|scope| scope.starts_with(entry.path()) || entry.path().starts_with(scope))
+            && entry.file_name() != ".git"
+            && !is_owned_storage_path(&workspace_root, entry.path(), owned_root.as_deref())
+            // A nested worktree or clone is a workspace of its own.
+            && !(entry.depth() > 0
+                && entry.file_type().is_some_and(|kind| kind.is_dir())
+                && nested_checkouts.is_separate_checkout(&workspace_root, entry.path()))
+    });
+    walker
+}
+
+pub(crate) fn source_ignore_builder(
+    root: &Path,
+    skip_gitignore: bool,
+    exclude: Option<&Path>,
+) -> WalkBuilder {
     let mut walker = WalkBuilder::new(root);
     walker.hidden(false);
     walker.git_ignore(!skip_gitignore);
@@ -22,30 +57,22 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     walker.git_global(!skip_gitignore);
     walker.ignore(!skip_gitignore);
     walker.require_git(false);
-    walker.follow_links(false);
-    let nested_checkouts = crate::workspace::NestedCheckouts::new(root);
-    walker.filter_entry(move |entry| {
-        entry.file_name() != ".git"
-            && !is_owned_storage_path(&workspace_root, entry.path(), owned_root.as_deref())
-            // A nested worktree or clone is a workspace of its own.
-            && !(entry.depth() > 0
-                && entry.file_type().is_some_and(|kind| kind.is_dir())
-                && nested_checkouts.is_separate_checkout(&workspace_root, entry.path()))
-    });
-    let git_entry = root.join(".git");
-    let may_have_external_common_dir = git_entry.is_file() || git_entry.join("commondir").is_file();
     if !skip_gitignore
-        && may_have_external_common_dir
-        && let Some(common_dir) = crate::workspace::git_common_dir(root)
+        && let Some(exclude) = exclude
+        && exclude != root.join(".git/info/exclude")
+        && exclude.is_file()
     {
-        let exclude = common_dir.join("info/exclude");
-        let checkout_local_exclude = root.join(".git/info/exclude");
-        if exclude != checkout_local_exclude && exclude.is_file() {
-            walker.current_dir(root);
-            let _ = walker.add_ignore(exclude);
-        }
+        walker.current_dir(root);
+        let _ = walker.add_ignore(exclude);
     }
     walker
+}
+
+pub(crate) fn source_ignore_matcher(walker: &WalkBuilder) -> ignore::IncrementalIgnore {
+    walker
+        .build_matchers()
+        .pop()
+        .expect("source walker has exactly one root")
 }
 
 /// Request-local ignore rules for source paths, including deleted Git files.
@@ -63,10 +90,7 @@ impl SourcePathMatcher {
             root: root.to_path_buf(),
             owned_root: owned_storage_root(root),
             nested_checkouts: crate::workspace::NestedCheckouts::new(root),
-            ignore: source_walker(root, skip_gitignore)
-                .build_matchers()
-                .pop()
-                .expect("source walker has exactly one root"),
+            ignore: source_ignore_matcher(&source_walker(root, skip_gitignore)),
             error: None,
         }
     }

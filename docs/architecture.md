@@ -203,10 +203,7 @@ complete staged recovery, not a replay of an empty or partial Merkle delta.
 These checks add store-opening/counting work even when source discovery is skipped;
 they do not validate every vector payload or compare concurrent enhancement markers.
 
-The clean-checkout reuse marker also certifies that indexed snapshot paths are
-Git-tracked and still match live source metadata. A temporary file indexed and
-deleted between two clean Git checks cannot certify that state. Older markers
-require reconciliation once, and explicit watcher paths bypass the shortcut.
+The clean-checkout reuse marker also certifies that indexed snapshot paths are Git-tracked and still match live source metadata. For paths with Git content-conversion attributes, the marker includes working-file metadata because Git can report a clean checkout after the on-disk text changes. Older certificates require reconciliation. Explicit watcher paths bypass the shortcut.
 
 Starting with v1.3.1, CLI searches and context requests, the TUI, and `ig --add`
 ask before building an index for the home directory, a directory containing
@@ -625,9 +622,9 @@ File-oriented literal searches rank files by matching-line count and path, then 
 
 The hit-oriented literal API retains at most the requested hit count per file and per parallel partial result set. It preserves path and span ordering without materializing every matching snippet.
 
-Literal and regex searches also verify files the indexer recorded without chunks, such as minified bundles. The cache holds paths in the last Merkle snapshot that have no effective chunks in the overlay or base index. The cache key includes the index and base generations and the snapshot file identity. Searches bypass the cache during an unfinished publication. Literal search drops empty files and files with a NUL in the sniffed prefix once per publication.
+Literal and regex searches also verify files the indexer recorded without chunks, such as minified bundles. The literal cache holds the paths without effective chunks in the overlay or base index. It drops empty files and files with a NUL in the sniffed prefix once per publication. Both search modes key their caches by the index and base generations and the snapshot file identity. They bypass the cache during an unfinished publication.
 
-An indexed regex search also walks file names under the current ignore rules. It checks paths absent from the snapshot, including new files and files over the 16 MiB indexing limit. A new file can therefore match even when a reindex has nothing to publish. Above 4,096 unindexed files, literal search keeps indexed candidates and regex search falls back to a full scan.
+An indexed regex search applies the current ignore rules within the requested scope. It checks new files, files without indexed chunks, and files whose current metadata differs from the indexed snapshot. An edit can therefore match before reindexing. A search scoped to one file opens that file directly. If more than 4,096 paths need live verification, regex search scans the requested scope. Filename-only regex searches count matching lines without building previews.
 
 Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,
@@ -1114,6 +1111,8 @@ older protocol (for example a development build with the same build version)
 gets a structured version error from the `Version` probe and restarts it.
 
 Version 10 added file-oriented literal results. Version 11 adds the `hash_only` search option. An older client that omits it keeps automatic model selection. A hash-only request uses hash vectors even if the daemon has a neural model loaded, and it can request only hash vectors from the background queue.
+
+Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Earlier literal output modes retain their behavior.
 
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered

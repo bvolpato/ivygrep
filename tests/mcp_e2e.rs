@@ -730,8 +730,12 @@ fn e2e_mcp_first_call_reports_indexing_instead_of_blocking() {
     assert!(child.wait().unwrap().success());
 }
 
-/// One MCP session answering a single context-pack call for `repo`.
-fn mcp_context_pack(home: &Path, repo: &Path, autospawn: bool) -> (Value, Option<usize>) {
+fn mcp_search(
+    home: &Path,
+    repo: &Path,
+    autospawn: bool,
+    arguments: Value,
+) -> (Value, Option<usize>) {
     let mut command = Command::new(assert_cmd::cargo::cargo_bin("ig"));
     command
         .env("IVYGREP_HOME", home)
@@ -777,11 +781,7 @@ fn mcp_context_pack(home: &Path, repo: &Path, autospawn: bool) -> (Value, Option
         id += 1;
         thread::sleep(Duration::from_millis(100));
     }
-    let response = call(
-        id + 1,
-        json!({"query": "fix refresh_session so expired tokens are rejected",
-               "path": repo.to_string_lossy(), "output": "context_pack", "budget_tokens": 2000}),
-    );
+    let response = call(id + 1, arguments);
     let threads = fs::read_to_string(format!("/proc/{}/status", child.id()))
         .ok()
         .and_then(|status| {
@@ -819,7 +819,9 @@ fn e2e_mcp_context_pack_through_the_daemon_matches_the_in_process_pack() {
     }
     fs::create_dir_all(repo.join(".git")).unwrap();
 
-    let (through_daemon, threads) = mcp_context_pack(&home, &repo, true);
+    let arguments = json!({"query": "fix refresh_session so expired tokens are rejected",
+        "path": repo, "output": "context_pack", "budget_tokens": 2000});
+    let (through_daemon, threads) = mcp_search(&home, &repo, true, arguments.clone());
     let mut daemon = DaemonGuard {
         pid: find_watcher_pid(&home),
     };
@@ -858,9 +860,52 @@ fn e2e_mcp_context_pack_through_the_daemon_matches_the_in_process_pack() {
     while home.join("daemon.pid").exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
-    let (in_process, _) = mcp_context_pack(&home, &repo, false);
+    let (in_process, _) = mcp_search(&home, &repo, false, arguments);
     assert_eq!(
         serde_json::to_string(&through_daemon).unwrap(),
         serde_json::to_string(&in_process).unwrap()
     );
+}
+
+#[test]
+fn e2e_mcp_literal_filenames_rank_dense_files_before_applying_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    for (name, lines) in [("a.txt", 201), ("m.txt", 1), ("z.txt", 350)] {
+        fs::write(repo.join(name), "needle\n".repeat(lines)).unwrap();
+    }
+
+    for (autospawn, limit, expected) in [
+        (false, 2, json!(["z.txt", "a.txt"])),
+        (true, 3, json!(["z.txt", "a.txt", "m.txt"])),
+    ] {
+        let home = tmp.path().join(format!("home-{autospawn}"));
+        let (result, _) = mcp_search(
+            &home,
+            &repo,
+            autospawn,
+            json!({"query": "needle", "path": repo, "literal": true, "file_name_only": true, "limit": limit}),
+        );
+        let daemon = DaemonGuard {
+            pid: find_watcher_pid(&home),
+        };
+        assert_eq!(daemon.pid.is_some(), autospawn);
+        let payload = &result["structuredContent"];
+        assert_eq!(payload["file_paths"], expected, "{result}");
+        assert_eq!(payload["total_matches"], 3);
+        assert_eq!(payload["truncated"], limit < 3);
+        let (detailed, _) = mcp_search(
+            &home,
+            &repo,
+            autospawn,
+            json!({"query": "needle", "path": repo, "literal": true, "limit": limit, "hits_per_file": 5}),
+        );
+        let files = detailed["structuredContent"]["results"].as_array().unwrap();
+        let paths: Vec<_> = files.iter().map(|file| &file["file_path"]).collect();
+        assert_eq!(json!(paths), expected);
+        assert_eq!(files[0]["hits"].as_array().unwrap().len(), 5);
+        assert_eq!(files[0]["hit_count"], 350);
+        assert_eq!(files[0]["more_hits_in_file"], 345);
+    }
 }

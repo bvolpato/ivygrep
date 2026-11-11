@@ -351,6 +351,7 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
   byId("summary").textContent = "Searching...";
   const params = new URLSearchParams({
     q,
+    flat: "true",
     workspace: state.workspace,
     mode: byId<HTMLSelectElement>("mode").value,
     limit: String(currentLimit()),

@@ -191,6 +191,13 @@ def mean_and_variance(values: list[float]) -> dict:
     }
 
 
+def metric_statistics(entries: list[dict], metric: str) -> dict | None:
+    values = [entry[metric] for entry in entries]
+    if metric == "support_file_spam_rate_at_10" and None in values:
+        return None
+    return mean_and_variance([float(value or 0) for value in values])
+
+
 def percentile(values: list[float], percentile_value: float) -> float:
     if not values:
         return 0.0
@@ -233,6 +240,11 @@ def aggregate_runs(results: list[dict], modes: list[str], runs: int) -> dict:
                 ),
             }
             for metric in QUALITY_METRICS:
+                if metric == "support_file_spam_rate_at_10" and any(
+                    entry[metric] is None for entry in entries
+                ):
+                    aggregate[metric] = None
+                    continue
                 aggregate[metric] = (
                     sum(entry[metric] * entry["queries"] for entry in entries)
                     / total_queries
@@ -261,9 +273,7 @@ def aggregate_runs(results: list[dict], modes: list[str], runs: int) -> dict:
         mode_summary[mode] = {
             "runs": run_aggregates,
             "metrics": {
-                metric: mean_and_variance(
-                    [float(item[metric]) for item in run_aggregates]
-                )
+                metric: metric_statistics(run_aggregates, metric)
                 for metric in (
                     *QUALITY_METRICS,
                     *LATENCY_METRICS,
@@ -281,7 +291,7 @@ def summarize_tasks(results: list[dict]) -> dict:
     summary = {}
     for (dataset, mode), entries in sorted(grouped.items()):
         summary.setdefault(dataset, {})[mode] = {
-            metric: mean_and_variance([float(entry[metric] or 0) for entry in entries])
+            metric: metric_statistics(entries, metric)
             for metric in (
                 *QUALITY_METRICS,
                 *LATENCY_METRICS,

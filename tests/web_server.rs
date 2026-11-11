@@ -629,6 +629,16 @@ fn web_server_serves_status_search_and_file() {
             .any(|hit| hit["file_path"].as_str().unwrap().ends_with("web.rs")),
         "search response: {search:#}"
     );
+    assert!(!search["groups"].as_array().unwrap().is_empty());
+    let flat_search: serde_json::Value = serde_json::from_str(&http_get(
+        port,
+        &cookie,
+        &format!("{search_path}&flat=true"),
+    ))
+    .unwrap();
+    assert_eq!(flat_search["hits"], search["hits"]);
+    assert_eq!(flat_search["warnings"], search["warnings"]);
+    assert!(flat_search.get("groups").is_none());
 
     let semantic_query = percent_encode("secure account renewal strategy");
     let alias_search: serde_json::Value = serde_json::from_str(&http_get(
@@ -713,10 +723,21 @@ fn web_server_serves_status_search_and_file() {
     let stream_body = http_get(
         port,
         &cookie,
-        "/api/search/stream?q=web_marker_search_target&limit=5",
+        "/api/search/stream?q=web_marker_search_target&limit=5&flat=true",
     );
-    assert!(stream_body.contains("event: results"), "{stream_body}");
-    assert!(stream_body.contains("web.rs"), "{stream_body}");
+    let stream_results: Vec<serde_json::Value> = stream_body
+        .split("\n\n")
+        .filter_map(|event| event.strip_prefix("event: results\ndata: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect();
+    assert!(!stream_results.is_empty(), "{stream_body}");
+    assert!(
+        stream_results
+            .iter()
+            .all(|value| value.get("groups").is_none())
+    );
+    let hits = stream_results.last().unwrap()["hits"].as_array().unwrap();
+    assert!(hits.iter().any(|hit| hit["file_path"] == absolute_hit_path));
 
     let file_path = format!("/api/file?workspace={workspace}&path=web.rs");
     let file: serde_json::Value =

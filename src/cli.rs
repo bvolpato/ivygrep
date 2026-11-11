@@ -21,7 +21,9 @@ use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, FileSearchResult, LiteralSearchOutput, SearchHit,
     group_hits_by_file,
 };
-use crate::regex_search::{expand_regex_context_absolute, regex_search_with_options};
+use crate::regex_search::{
+    expand_regex_context_absolute, regex_file_name_search_with_options, regex_search_with_options,
+};
 #[cfg(test)]
 use crate::search::literal_search;
 use crate::search::{
@@ -1577,13 +1579,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
     };
     let mut search_via_daemon = false;
 
-    let backend_limit = if cli.no_limit || cli.file_name_only {
-        Some(usize::MAX)
-    } else {
-        cli.limit
-    };
-
-    let display_limit = if cli.no_limit || (cli.file_name_only && cli.limit.is_none()) {
+    let limit = if cli.no_limit || (cli.file_name_only && cli.limit.is_none()) {
         Some(usize::MAX)
     } else {
         cli.limit
@@ -1988,7 +1984,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         std::process::exit(0);
     }
 
-    let mut literal_files = None;
+    let mut file_results = None;
     let hits = if cli.symbol || cli.refs || cli.callers {
         let mode = if cli.symbol {
             crate::symbols::SymbolSearchMode::Definitions
@@ -1998,7 +1994,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             crate::symbols::SymbolSearchMode::Callers
         };
         let options = SearchOptions {
-            limit: backend_limit,
+            limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2019,7 +2015,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: display_limit,
+            limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             output,
@@ -2030,7 +2026,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             skip_gitignore: cli.skip_gitignore,
         };
         let local_options = SearchOptions {
-            limit: display_limit,
+            limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2087,13 +2083,14 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         } else {
             local_literal_search_files(&workspace, cli.all_indices, query, &local_options, output)?
         };
-        literal_files = Some(files);
+        file_results = Some(files);
         Vec::new()
     } else if cli.regex {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
-            limit: backend_limit,
+            limit,
+            file_name_only: cli.file_name_only,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2103,7 +2100,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             skip_gitignore: cli.skip_gitignore,
         };
         let local_options = SearchOptions {
-            limit: backend_limit,
+            limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2115,35 +2112,50 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             cancel_token: None,
         };
 
-        if search_via_daemon {
-            match daemon::request_with_id::<fn(String, usize, usize)>(
+        let response = if search_via_daemon {
+            daemon::request_with_id::<fn(String, usize, usize)>(
                 &request,
                 uuid::Uuid::new_v4(),
                 false,
                 None,
             )
             .await?
-            {
-                Some(DaemonResponse::SearchResults { hits, warnings }) => {
-                    report_search_warnings(&warnings);
-                    hits
+        } else {
+            None
+        };
+        match response {
+            Some(DaemonResponse::LiteralFiles { files, warnings }) if cli.file_name_only => {
+                report_search_warnings(&warnings);
+                file_results = Some(files);
+                Vec::new()
+            }
+            Some(DaemonResponse::SearchResults { hits, warnings }) if !cli.file_name_only => {
+                report_search_warnings(&warnings);
+                hits
+            }
+            Some(DaemonResponse::Error { message }) => bail!(message),
+            _ => {
+                if search_via_daemon {
+                    tracing::warn!("daemon regex search unavailable, falling back to local");
                 }
-                Some(DaemonResponse::Error { message }) => bail!(message),
-                other => {
-                    tracing::warn!(
-                        "daemon regex search unavailable ({other:?}), falling back to local"
-                    );
+                if cli.file_name_only {
+                    file_results = Some(local_file_search(
+                        &workspace,
+                        cli.all_indices,
+                        &local_options,
+                        |ws, options| regex_file_name_search_with_options(ws, query, options),
+                    )?);
+                    Vec::new()
+                } else {
                     local_regex_search_hits(&workspace, cli.all_indices, query, &local_options)?
                 }
             }
-        } else {
-            local_regex_search_hits(&workspace, cli.all_indices, query, &local_options)?
         }
     } else {
         let request = DaemonRequest::Search {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: backend_limit,
+            limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2156,7 +2168,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             disable_memory_expansion: cli.no_memory_expansion_internal,
         };
         let local_options = SearchOptions {
-            limit: backend_limit,
+            limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2262,15 +2274,15 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     &workspace_options,
                 );
             }
-            finish_local_search(batch, backend_limit, HitOrdering::Score)?
+            finish_local_search(batch, limit, HitOrdering::Score)?
         }
     };
 
-    if let Some(files) = literal_files {
+    if let Some(files) = file_results {
         render_file_results(
             files,
             cli.json,
-            display_limit,
+            limit,
             cli.first_line_only,
             cli.file_name_only,
             cli.verbose,
@@ -2279,7 +2291,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         render_hits(
             &hits,
             cli.json,
-            display_limit,
+            limit,
             cli.first_line_only,
             cli.file_name_only,
             cli.verbose,
@@ -2484,6 +2496,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
         .with_target(false)
         .try_init();
 }
@@ -2751,6 +2764,17 @@ fn local_literal_search_files(
     options: &SearchOptions,
     output: LiteralSearchOutput,
 ) -> Result<Vec<FileSearchResult>> {
+    local_file_search(workspace, all_indices, options, |ws, options| {
+        literal_file_search(ws, query, options, output, all_indices)
+    })
+}
+
+fn local_file_search(
+    workspace: &Workspace,
+    all_indices: bool,
+    options: &SearchOptions,
+    search: impl Fn(&Workspace, &SearchOptions) -> Result<Vec<FileSearchResult>>,
+) -> Result<Vec<FileSearchResult>> {
     let workspace_set = select_search_workspaces(workspace, all_indices)?;
     let mut batch = FileSearchBatch::new(workspace_set.warnings, options.bounded_limit());
 
@@ -2763,7 +2787,7 @@ fn local_literal_search_files(
             &ws,
             options.skip_gitignore,
             !all_indices,
-            || literal_file_search(&ws, query, &workspace_options, output, all_indices),
+            || search(&ws, &workspace_options),
         );
         batch.record(&ws.root, all_indices, result);
     }
