@@ -2,16 +2,16 @@
   "evidence": [
     {
       "id": "current-head-relevance",
-      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/7eaa391f10c74e71654cff2ded079f93efc96a7f/docs/benchmarks/current-head-relevance.json",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/f6c645cafee5b8cb8d82f7e5861ef76b3f3a1976/docs/benchmarks/current-head-relevance.json",
       "kind": "quality",
       "label": "Current self-repository retrieval screen",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": "7eaa391f10c74e71654cff2ded079f93efc96a7f",
+      "publication_commit": "f6c645cafee5b8cb8d82f7e5861ef76b3f3a1976",
       "publication_status": "pinned",
-      "sha256": "9bad5ba0e2e04c62ac3024700a14c30cc39648c02dc6153a18cb25728d0c0a9c",
-      "source_commit": "6bed8733015aad4d8a8b4eb0221ae91f31b81c05",
+      "sha256": "e1a089c6de28283fe00bac7eed3eda42ca6426d790c5b97d15b4f14fd23dce04",
+      "source_commit": "0a2013126d00275433b5970d19775cd06f3df577",
       "summary": {
-        "binary_sha256": "122984399f0c4e24418141e54c7d0a6bf46e867394b1af5fa169b86d2318c2ed",
+        "binary_sha256": "4c100e7e7756e86c3c29343860f32b41e8eadbfdc674cb3f5336e7921a24cad5",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "6b877037ff957ca5ee5093e0aa55472a5cd40163c50741f37664e1daabeb8654"
@@ -34,7 +34,7 @@
             "candidate_budget_misses": [],
             "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 40206.35483402293,
+            "elapsed_ms": 40586.098665953614,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -299,7 +299,7 @@
             "candidate_budget_misses": [],
             "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 31233.432457898743,
+            "elapsed_ms": 39435.75895903632,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -564,7 +564,7 @@
             "candidate_budget_misses": [],
             "candidate_recall_audited": true,
             "candidate_recall_misses": [],
-            "elapsed_ms": 65540.97904195078,
+            "elapsed_ms": 83891.84212498367,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",

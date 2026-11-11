@@ -6,7 +6,7 @@
       "kind": "quality",
       "label": "Current self-repository retrieval screen",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": "7eaa391f10c74e71654cff2ded079f93efc96a7f"
+      "publication_commit": "f6c645cafee5b8cb8d82f7e5861ef76b3f3a1976"
     },
     {
       "id": "public-retrieval-baseline",
