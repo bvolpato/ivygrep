@@ -512,6 +512,28 @@ pub fn is_indexable_file(path: &Path, bytes: &[u8]) -> bool {
     true
 }
 
+/// Read indexable source and stop after the first binary sample.
+pub(crate) fn read_indexable_source(mut reader: impl Read) -> io::Result<Option<Vec<u8>>> {
+    let mut prefix = [0; TEXT_SNIFF_BYTES];
+    let mut len = 0;
+    while len < prefix.len() {
+        match reader.read(&mut prefix[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    if !is_probably_text(&prefix[..len]) {
+        return Ok(None);
+    }
+    let mut bytes = prefix[..len].to_vec();
+    if len == TEXT_SNIFF_BYTES {
+        reader.read_to_end(&mut bytes)?;
+    }
+    Ok((!is_minified_blob(&bytes)).then_some(bytes))
+}
+
 pub fn is_indexable_file_reader<R: Read>(_path: &Path, reader: &mut R) -> io::Result<bool> {
     let mut sample = Vec::with_capacity(TEXT_SNIFF_BYTES);
     let mut buf = [0u8; TEXT_SNIFF_BYTES];
@@ -4321,6 +4343,26 @@ pub fn unsupported_dynamic_include() {}
             chunks.iter().any(|c| c.text.contains("#include")),
             "preprocessor directives must remain indexed somewhere"
         );
+    }
+
+    #[test]
+    fn index_source_reader_stops_at_binary_prefix_and_keeps_text_intact() {
+        let mut binary = io::Cursor::new(vec![0; 2 * TEXT_SNIFF_BYTES]);
+        assert!(read_indexable_source(&mut binary).unwrap().is_none());
+        assert_eq!(binary.position(), TEXT_SNIFF_BYTES as u64);
+
+        let tiny_source = b"fn f() {}";
+        let tiny = read_indexable_source(&tiny_source[..]).unwrap().unwrap();
+        assert_eq!(tiny, tiny_source);
+        assert!(tiny.capacity() <= 2 * tiny.len());
+
+        let mut source = b"fn example() {}\n".repeat(TEXT_SNIFF_BYTES / 8);
+        assert_eq!(
+            read_indexable_source(source.as_slice()).unwrap().as_ref(),
+            Some(&source)
+        );
+        source.extend(std::iter::repeat_n(b'x', MAX_SOURCE_LINE_BYTES));
+        assert!(read_indexable_source(source.as_slice()).unwrap().is_none());
     }
 
     #[test]

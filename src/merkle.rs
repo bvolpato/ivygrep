@@ -622,7 +622,7 @@ fn validate_workspace_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn metadata_file_hash(metadata: &fs::Metadata) -> String {
+pub(crate) fn metadata_file_hash(metadata: &fs::Metadata) -> String {
     // The relative path is already the map key and participates in root_hash(),
     // so the per-file value only needs metadata.
     let mut data = [0_u8; 40];

@@ -18,7 +18,7 @@ use crate::text::first_code_line_range;
 
 use crate::chunking::{
     Chunk, ChunkDefinition, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata,
-    is_indexable_file,
+    is_indexable_file, read_indexable_source,
 };
 use crate::embedding::EmbeddingModel;
 use crate::jobs::{self, JobKind, JobUpdate};
@@ -364,7 +364,7 @@ fn spawn_index_batch_producer(
                         };
 
                         let abs_path = root.join(rel_path);
-                        let read = files.read(rel_path);
+                        let read = files.open(rel_path).and_then(read_indexable_source);
                         #[cfg(test)]
                         let read = crate::merkle::test_support::check(
                             crate::merkle::test_support::Stage::Index,
@@ -372,7 +372,11 @@ fn spawn_index_batch_producer(
                         )
                         .and(read);
                         let content_bytes = match read {
-                            Ok(bytes) => bytes,
+                            Ok(Some(bytes)) => bytes,
+                            Ok(None) => {
+                                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                return Ok(empty_incremental_file(rel_path));
+                            }
                             // A file deleted after the scan listed it is an
                             // ordinary deletion. A missing root is not: the
                             // state of its files is unknown.
@@ -391,11 +395,6 @@ fn spawn_index_batch_producer(
                                 )));
                             }
                         };
-                        if !is_indexable_file(rel_path, &content_bytes) {
-                            progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return Ok(empty_incremental_file(rel_path));
-                        }
-
                         let content = String::from_utf8(content_bytes).unwrap_or_else(|error| {
                             String::from_utf8_lossy(&error.into_bytes()).into_owned()
                         });
@@ -802,6 +801,14 @@ fn index_workspace_with_options_and_store_replacement(
     let clean_git_checkout = tracks_reusable_base_state
         .then(|| CleanGitCheckout::capture(&workspace.root))
         .flatten();
+    let indexed_git_state = tracks_reusable_base_state
+        .then(|| fs::read_to_string(indexed_git_state_path(workspace)).ok())
+        .flatten();
+    rebuild_main |= git_state::legacy_converted_sources_need_rebuild(
+        &workspace.root,
+        indexed_git_state.as_deref(),
+        clean_git_checkout.as_ref(),
+    );
     let reusable_index_is_current = clean_git_checkout.as_ref().is_some_and(|checkout| {
         index_health.is_queryable()
             && !rebuild_main
@@ -811,10 +818,7 @@ fn index_workspace_with_options_and_store_replacement(
             // Explicit filesystem events remain authoritative even when Git
             // returned to the same clean state before they were processed.
             && watcher_paths.is_none_or(|paths| paths.is_empty())
-            && fs::read_to_string(indexed_git_state_path(workspace))
-                .ok()
-                .as_deref()
-                == Some(checkout.state())
+            && indexed_git_state.as_deref() == Some(checkout.state())
             // The state must not have changed while it was read.
             && checkout.is_unchanged(&workspace.root)
     });
