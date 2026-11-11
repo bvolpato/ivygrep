@@ -1018,8 +1018,13 @@ impl WatchEventFilter {
             .is_some_and(|metadata| metadata.skip_gitignore);
         self.git_exclude_path = crate::workspace::git_common_dir(&self.workspace.root)
             .map(|common_dir| common_dir.join("info/exclude"));
-        self.ignore_builder = (!self.skip_gitignore)
-            .then(|| crate::walker::source_walker(&self.workspace.root, false));
+        self.ignore_builder = (!self.skip_gitignore).then(|| {
+            crate::walker::source_ignore_builder(
+                &self.workspace.root,
+                false,
+                self.git_exclude_path.as_deref(),
+            )
+        });
     }
 
     fn change_for_event(&mut self, event: &notify::Event) -> WatchChange {
@@ -7607,7 +7612,9 @@ mod tests {
         needle: &str,
         expected: bool,
     ) -> bool {
-        for _ in 0..60 {
+        // Replacing an external Git directory can require a second watcher
+        // reconciliation before the linked worktree publishes the new view.
+        for _ in 0..300 {
             if !control.indexing.load(Ordering::Relaxed)
                 && indexed_literal_visible(workspace, needle) == Some(expected)
             {
@@ -11855,14 +11862,22 @@ mod tests {
         let mut filter = WatchEventFilter::new(&workspace);
         let source = src.join("new.rs");
         std::fs::write(&source, "pub fn watch_nested_marker() {}\n").unwrap();
+        std::fs::write(src.join(".settings.toml"), "enabled = true\n").unwrap();
         let created = EventKind::Create(CreateKind::File);
         let event = notify::Event::new(created)
             .add_path(src.join("build/artifact.txt"))
+            .add_path(src.join(".settings.toml"))
             .add_path(source.clone());
         let WatchChange::Paths(paths) = filter.change_for_event(&event) else {
             panic!("expected the unignored new file");
         };
-        assert_eq!(paths, HashSet::from([PathBuf::from("src/new.rs")]));
+        assert_eq!(
+            paths,
+            HashSet::from([
+                PathBuf::from("src/new.rs"),
+                PathBuf::from("src/.settings.toml")
+            ])
+        );
         index_workspace_paths_for_watcher(
             &workspace,
             model.as_ref(),
