@@ -26,6 +26,7 @@ This release includes all changes prepared for the unpublished v1.3.2 tag.
 ### Fixed
 
 - The release workflow builds and verifies the Linux x86_64 CUDA archive on Ubuntu 24.04, where NVIDIA provides the required CUDA 13.2 packages.
+- The Linux CUDA build now compiles one set of GPU kernels for transformer inference. Static embedding models continue to run on the CPU.
 - Context searches in the Web UI now accept a file or directory inside a registered non-Git workspace. If a checkout changes while a context request waits, the daemon uses the replacement index.
 - `--all` and linked-worktree searches ask before rebuilding an index of the home directory, one of its ancestors, or the filesystem root. They also ask before `--skip-gitignore` expands such an index, even when a daemon runs the search.
 - Daemon searches honor `--hash` even when a neural model is already loaded. They can update hash vectors without starting a neural worker.
