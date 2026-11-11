@@ -1,7 +1,7 @@
 {
   "binary": {
-    "sha256": "3e2d84dfc54472ded36c7252b7eefbf2c1152f9a175b3331371b9ac3b9f4a84c",
-    "version": "ivygrep 1.3.2"
+    "sha256": "4c100e7e7756e86c3c29343860f32b41e8eadbfdc674cb3f5336e7921a24cad5",
+    "version": "ivygrep 1.3.3"
   },
   "fixture": {
     "path": "tests/fixtures/ivygrep_relevance_queries.json",
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "9a8cc279e58048250632dd96c2018f915789bc6e99ae8d5cef7770ea6409187f"
   },
-  "ivygrep_commit": "f78c25f92574cd111b6c9f77f8f136ad141cad7a",
+  "ivygrep_commit": "0a2013126d00275433b5970d19775cd06f3df577",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -26,7 +26,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 5300.084916991182,
+      "elapsed_ms": 40586.098665953614,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -291,7 +291,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 5488.677834044211,
+      "elapsed_ms": 39435.75895903632,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -556,7 +556,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 8030.552875017747,
+      "elapsed_ms": 83891.84212498367,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -575,7 +575,7 @@
       "mode": "neural",
       "neural_queries_executed": 25,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 21,
+      "neural_queries_with_results": 22,
       "no_hit_queries": 0,
       "queries": 25,
       "query_metrics": [
@@ -828,6 +828,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "b74704a4cff451d354d368cf74c4fc2e8cf21f894129f17f18326348584e2e39"
+    "sha256": "12e969fca1bb860ee5de918cf6b2b6a378b486b470fca3711f039960c7e61d4c"
   }
 }

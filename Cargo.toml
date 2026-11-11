@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2024"
 description = "Local semantic search for code, notes, and memories with context packs for coding agents"
 license = "MIT"
@@ -34,7 +34,8 @@ default = ["neural"]
 neural = ["dep:candle_embed", "dep:candle-core", "dep:hf-hub", "dep:tokenizers"]
 accelerate = ["neural"]
 metal = ["neural"]
-cuda = ["neural", "candle-core/cuda", "candle_embed/cuda"]
+# The transformer embedder owns the CUDA device. The static model loads its tensors on the CPU.
+cuda = ["neural", "candle_embed/cuda"]
 
 [dependencies]
 anyhow = "1.0"

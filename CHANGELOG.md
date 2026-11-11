@@ -4,7 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [1.3.2] - 2026-11-10
+## [1.3.3] - 2026-11-11
+
+This release includes all changes prepared for the unpublished v1.3.2 tag.
 
 ### Security
 
@@ -14,15 +16,17 @@ All notable changes to ivygrep are documented in this file.
 
 ### Changed
 
-- Clean Git index rechecks defer tracked-file membership allocation until an index needs certification. Source and ignore validation remain active. See the [time, CPU, and memory measurements](https://github.com/bvolpato/ivygrep/blob/v1.3.2/docs/benchmarks/clean-git-reuse.md).
-- Context packs reuse successful indexed-file lookups during transient graph expansion. Reuse checks source presence, SQLite changes, and store identity. See the [performance measurements and memory tradeoffs](https://github.com/bvolpato/ivygrep/blob/v1.3.2/docs/benchmarks/graph-hydration.md).
-- Context packs score each representative chunk once and share unchanged source parses during relationship lookup. Every reuse still requires a fresh contained file read. See the [before/after measurements](https://github.com/bvolpato/ivygrep/blob/v1.3.2/docs/benchmarks/hotpaths.md).
+- Clean Git index rechecks defer tracked-file membership allocation until an index needs certification. Source and ignore validation remain active. See the [time, CPU, and memory measurements](https://github.com/bvolpato/ivygrep/blob/v1.3.3/docs/benchmarks/clean-git-reuse.md).
+- Context packs reuse successful indexed-file lookups during transient graph expansion. Reuse checks source presence, SQLite changes, and store identity. See the [performance measurements and memory tradeoffs](https://github.com/bvolpato/ivygrep/blob/v1.3.3/docs/benchmarks/graph-hydration.md).
+- Context packs score each representative chunk once and share unchanged source parses during relationship lookup. Every reuse still requires a fresh contained file read. See the [before/after measurements](https://github.com/bvolpato/ivygrep/blob/v1.3.3/docs/benchmarks/hotpaths.md).
 - Regex searches reuse bounded index-publication metadata and use hash lookups for saved paths. They still discover new files and apply current ignore rules on every request.
 - Dependabot uses seven-day cooldowns, and configured npm and uv resolutions reject newly published package releases until they are seven days old. pnpm 11 enforces the cutoff without falling back to a too-new version.
 - Refresh Rust, frontend, and benchmark-tool dependencies and pinned validation tools. pnpm 11.28.9 fixes lockfile updates that failed with `ERR_PNPM_MISSING_TIME` while the release-age guard was enabled.
 
 ### Fixed
 
+- The release workflow builds and verifies the Linux x86_64 CUDA archive on Ubuntu 24.04, where NVIDIA provides the required CUDA 13.2 packages.
+- The Linux CUDA build now compiles one set of GPU kernels for transformer inference. Static embedding models continue to run on the CPU.
 - Context searches in the Web UI now accept a file or directory inside a registered non-Git workspace. If a checkout changes while a context request waits, the daemon uses the replacement index.
 - `--all` and linked-worktree searches ask before rebuilding an index of the home directory, one of its ancestors, or the filesystem root. They also ask before `--skip-gitignore` expands such an index, even when a daemon runs the search.
 - Daemon searches honor `--hash` even when a neural model is already loaded. They can update hash vectors without starting a neural worker.
@@ -32,6 +36,10 @@ All notable changes to ivygrep are documented in this file.
 
 - Sustained daemon mutation checks verify cached and uncached searches, SQLite contents, and Merkle snapshots after updates, deletions, restores, and restarts. A live-file filter can no longer hide stale persistent entries from the soak.
 - The daemon recovery test reads the active watcher job PID instead of racing the legacy PID file's publication.
+
+## [1.3.2] - 2026-11-10
+
+The [v1.3.2 release workflow](https://github.com/bvolpato/ivygrep/actions/runs/42890069763) stopped before publication because the Linux runner could not install CUDA 13.2. See v1.3.3 for the release notes.
 
 ## [1.3.1] - 2026-10-28
 
