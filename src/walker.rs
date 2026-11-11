@@ -13,6 +13,15 @@ use ignore::WalkBuilder;
 /// - Does not require a git repository
 /// - Does not follow symlinks
 pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
+    source_walker_scoped(root, skip_gitignore, None)
+}
+
+pub(crate) fn source_walker_scoped(
+    root: &Path,
+    skip_gitignore: bool,
+    scope: Option<&Path>,
+) -> WalkBuilder {
+    let scope = scope.map(|path| root.join(path));
     let owned_root = owned_storage_root(root);
     let workspace_root = root.to_path_buf();
     let mut walker = WalkBuilder::new(root);
@@ -25,7 +34,8 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     walker.follow_links(false);
     let nested_checkouts = crate::workspace::NestedCheckouts::new(root);
     walker.filter_entry(move |entry| {
-        entry.file_name() != ".git"
+        scope.as_ref().is_none_or(|scope| scope.starts_with(entry.path()) || entry.path().starts_with(scope))
+            && entry.file_name() != ".git"
             && !is_owned_storage_path(&workspace_root, entry.path(), owned_root.as_deref())
             // A nested worktree or clone is a workspace of its own.
             && !(entry.depth() > 0
@@ -48,6 +58,13 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     walker
 }
 
+pub(crate) fn source_ignore_matcher(walker: &WalkBuilder) -> ignore::IncrementalIgnore {
+    walker
+        .build_matchers()
+        .pop()
+        .expect("source walker has exactly one root")
+}
+
 /// Request-local ignore rules for source paths, including deleted Git files.
 pub(crate) struct SourcePathMatcher {
     root: PathBuf,
@@ -63,10 +80,7 @@ impl SourcePathMatcher {
             root: root.to_path_buf(),
             owned_root: owned_storage_root(root),
             nested_checkouts: crate::workspace::NestedCheckouts::new(root),
-            ignore: source_walker(root, skip_gitignore)
-                .build_matchers()
-                .pop()
-                .expect("source walker has exactly one root"),
+            ignore: source_ignore_matcher(&source_walker(root, skip_gitignore)),
             error: None,
         }
     }

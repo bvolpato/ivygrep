@@ -139,6 +139,7 @@ fn cli_searches_a_pasted_prompt_with_operator_words_and_warns() {
     let prompt = "Why does this query return records that are NOT active?\n\nSELECT * FROM records WHERE ready = 1 AND";
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .args(["--json", "--hash", "--no-watch", prompt])
+        .env("RUST_LOG", "ivygrep=trace")
         .arg(&root)
         .env("IVYGREP_HOME", &home)
         .env("IVYGREP_NO_AUTOSPAWN", "1")

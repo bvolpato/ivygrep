@@ -336,14 +336,46 @@ fn literal_file_limit_ranking_and_unicode_match_locally_and_through_daemon() {
 }
 
 #[test]
-fn literal_all_indices_deduplicates_overlapping_workspaces_before_limiting_files() {
+fn lexical_filename_output_preserves_the_explicit_retrieval_limit() {
+    let tmp = temporary_directory();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(
+        root.join("dispatcher.rs"),
+        "pub fn dispatch_timer() { /* schedule a timer dispatch event */ }\n",
+    )
+    .unwrap();
+    let helpers = (0..32)
+        .map(|i| {
+            format!("pub fn process_{i}() {{\n    // timer dispatch\n    let timer = {i};\n}}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    std::fs::write(root.join("helpers.rs"), helpers).unwrap();
+    run(
+        &home,
+        &root,
+        &["--add", ".", "--hash", "--no-watch", "--json"],
+    );
+
+    let mut args = vec!["--lexical-only", "--no-watch", "--json", "-n", "1", "timer"];
+    let ranked = result_paths(&run(&home, &root, &args));
+    assert_eq!(ranked.len(), 1);
+    args.push("--file-name-only");
+    let paths: Vec<PathBuf> = serde_json::from_value(run(&home, &root, &args)).unwrap();
+    assert_eq!(paths, ranked);
+}
+
+#[test]
+fn filename_searches_deduplicate_overlapping_workspaces_before_limiting_files() {
     let temporary = temporary_directory();
     let home = temporary.path().join("home");
     let root = temporary.path().join("repo");
     let nested = root.join("nested");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(nested.join("a.txt"), "needle\n".repeat(3)).unwrap();
-    std::fs::write(root.join("b.txt"), "needle\n".repeat(2)).unwrap();
+    std::fs::write(root.join("b.txt"), "needle\n".repeat(4)).unwrap();
     for workspace in [&root, &nested] {
         let output = command(&home, workspace)
             .args(["--add", ".", "--hash", "--no-watch"])
@@ -352,8 +384,8 @@ fn literal_all_indices_deduplicates_overlapping_workspaces_before_limiting_files
         assert!(output.status.success(), "{output:?}");
     }
     let expected = [
-        nested.canonicalize().unwrap().join("a.txt"),
         root.canonicalize().unwrap().join("b.txt"),
+        nested.canonicalize().unwrap().join("a.txt"),
     ];
     let check = || {
         let files = run(
@@ -370,23 +402,25 @@ fn literal_all_indices_deduplicates_overlapping_workspaces_before_limiting_files
             ],
         );
         assert_eq!(result_paths(&files), expected);
-        assert_eq!(files[0]["hit_count"], 3);
-        let names: Vec<PathBuf> = serde_json::from_value(run(
-            &home,
-            &root,
-            &[
-                "--literal",
-                "--no-watch",
-                "--all-indices",
-                "--file-name-only",
-                "--json",
-                "-n",
-                "2",
-                "needle",
-            ],
-        ))
-        .unwrap();
-        assert_eq!(names, expected);
+        assert_eq!(files[1]["hit_count"], 3);
+        for mode in ["--literal", "--regex"] {
+            let names: Vec<PathBuf> = serde_json::from_value(run(
+                &home,
+                &root,
+                &[
+                    mode,
+                    "--no-watch",
+                    "--all-indices",
+                    "--file-name-only",
+                    "--json",
+                    "-n",
+                    "2",
+                    "needle",
+                ],
+            ))
+            .unwrap();
+            assert_eq!(names, expected, "{mode}");
+        }
     };
     check();
     let _daemon = start_daemon(&home, &root);

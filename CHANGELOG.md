@@ -4,6 +4,18 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- The watcher follows nested ignore overrides when files are created or removed. An explicit reindex also detects working-file edits that Git hides through content conversion.
+- MCP literal search ranks files by match count before applying the file limit. An explicit filename limit bounds ranked CLI retrieval, and trace diagnostics go to stderr so JSON output stays parseable.
+- Regex search checks edited files before the next reindex. A single-file search scans only that file, and filename-only results count matches without building previews.
+- Context packs keep rendered evidence within the token budget when a stack trace contains long paths. Bare version numbers in a task no longer trigger a workspace-wide filename search.
+
+### Performance
+
+- Indexing can reject a binary file after reading its first 8 KiB. Idle watchers write their heartbeat less frequently, and the bundled Web UI requests one copy of each search hit.
+- The million-scale latency guard compares matching queries and trials. Public retrieval reports mark the support-file metric unavailable for datasets with generated filenames. Prose-only changes still run retrieval relevance checks and skip generated-data performance benchmarks.
+
 ## [1.3.3] - 2026-11-11
 
 This release includes all changes prepared for the unpublished v1.3.2 tag.

@@ -1,14 +1,13 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-// Lossy decoding keeps matches on lines with invalid UTF-8; UTF8 aborts the file.
-use grep_searcher::sinks::Lossy;
+use grep_searcher::sinks::Bytes;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder};
 use rayon::prelude::*;
 use regex_syntax::hir::{Hir, HirKind};
@@ -21,7 +20,7 @@ use tantivy::schema::Value;
 use crate::indexer::{open_sqlite_readonly, open_tantivy_index};
 use crate::merkle::MerkleSnapshot;
 use crate::path_glob::PathGlobMatcher;
-use crate::protocol::SearchHit;
+use crate::protocol::{FileSearchResult, SearchHit};
 use crate::search::SearchOptions;
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 use crate::workspace_file::RootHandle;
@@ -59,31 +58,37 @@ struct PublicationStamp {
 /// Snapshot paths without chunks. `None` means there are too many to enumerate.
 type Coverage = Option<Arc<Vec<PathBuf>>>;
 
-struct CachedCoverage {
-    unindexed: Coverage,
-    // Regex needs snapshot membership, not saved hashes.
-    snapshot_paths: HashSet<String>,
+enum CachedCoverage {
+    Literal(Coverage),
+    // Only a chunk-backed path with unchanged metadata can rely on indexed trigrams.
+    Regex(HashMap<String, String>),
 }
 
 impl CachedCoverage {
     fn retained_bytes(&self, key: &CoverageKey) -> usize {
-        let mut bytes = std::mem::size_of::<(CoverageKey, Arc<Self>, usize)>()
+        let overhead = std::mem::size_of::<(CoverageKey, Arc<Self>, usize)>()
             + std::mem::size_of::<Self>()
-            // Cache links and the entry Arc's allocation header.
             + 4 * std::mem::size_of::<usize>()
             + key.workspace_id.capacity()
-            + key.index_dir.capacity()
-            // Reserve bucket slack and control bytes without assuming a load factor.
-            + 2 * self.snapshot_paths.capacity() * (std::mem::size_of::<String>() + 1)
-            + 16
-            + self.snapshot_paths.iter().map(String::capacity).sum::<usize>();
-        if let Some(paths) = &self.unindexed {
-            bytes += 2 * std::mem::size_of::<usize>()
-                + std::mem::size_of::<Vec<PathBuf>>()
-                + paths.capacity() * std::mem::size_of::<PathBuf>()
-                + paths.iter().map(PathBuf::capacity).sum::<usize>();
-        }
-        bytes
+            + key.index_dir.capacity();
+        overhead
+            + match self {
+                Self::Regex(hashes) => {
+                    2 * hashes.capacity() * (std::mem::size_of::<(String, String)>() + 1)
+                        + 16
+                        + hashes
+                            .iter()
+                            .map(|(path, hash)| path.capacity() + hash.capacity())
+                            .sum::<usize>()
+                }
+                Self::Literal(Some(paths)) => {
+                    2 * std::mem::size_of::<usize>()
+                        + std::mem::size_of::<Vec<PathBuf>>()
+                        + paths.capacity() * std::mem::size_of::<PathBuf>()
+                        + paths.iter().map(PathBuf::capacity).sum::<usize>()
+                }
+                Self::Literal(None) => 0,
+            }
     }
 }
 
@@ -172,14 +177,7 @@ pub fn regex_search_with_options(
         );
         regex_search_parallel(workspace, pattern, &paths, max_hits, options)
     } else {
-        regex_search_walk(
-            workspace,
-            pattern,
-            max_hits,
-            options.scope_filter.as_ref(),
-            &path_matcher,
-            options,
-        )
+        regex_search_walk(workspace, pattern, max_hits, &path_matcher, options)
     }?;
     if options.is_cancelled() {
         return Ok(Vec::new());
@@ -189,6 +187,82 @@ pub fn regex_search_with_options(
         return Ok(Vec::new());
     }
     Ok(hits)
+}
+
+/// Rank files by matching line count without retaining previews or expanding context.
+pub fn regex_file_name_search_with_options(
+    workspace: &Workspace,
+    pattern: &str,
+    options: &SearchOptions,
+) -> Result<Vec<FileSearchResult>> {
+    if options.is_cancelled() || options.bounded_limit() == Some(0) {
+        return Ok(Vec::new());
+    }
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let matcher = RegexMatcherBuilder::new()
+        .case_insensitive(true)
+        .build(pattern)?;
+    let files = RootHandle::new(&workspace.root);
+    let mut groups = if let Some(paths) = index_prefilter_files(
+        workspace,
+        pattern,
+        options.scope_filter.as_ref(),
+        &path_matcher,
+        options,
+    ) {
+        paths
+            .par_iter()
+            .filter_map(|path| {
+                scan_regex_file(
+                    &files,
+                    path,
+                    &matcher,
+                    &mut text_searcher(),
+                    options,
+                    RegexLines::Count,
+                )
+                .ok()
+                .flatten()
+            })
+            .collect()
+    } else {
+        let mut groups = Vec::new();
+        let mut searcher = text_searcher();
+        walk_regex_paths(
+            workspace,
+            &path_matcher,
+            options,
+            false,
+            |rel, type_filter| {
+                if let Some(group) = scan_regex_file(
+                    &files,
+                    rel,
+                    &matcher,
+                    &mut searcher,
+                    options,
+                    RegexLines::Count,
+                )? && (type_filter != PathTypeFilterMatch::ValidateText
+                    || unknown_file_is_indexable_text(&files, rel))
+                {
+                    groups.push(group);
+                }
+                Ok(true)
+            },
+        )?;
+        groups
+    };
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
+    groups.sort_by(|a, b| {
+        b.hit_count
+            .cmp(&a.hit_count)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
+    if let Some(limit) = options.bounded_limit() {
+        groups.truncate(limit);
+    }
+    Ok(groups)
 }
 
 fn required_literal_runs(pattern: &str) -> Option<Vec<String>> {
@@ -242,7 +316,11 @@ fn index_prefilter_files(
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
+    if scope_filter.is_some_and(|scope| scope.is_file) {
+        return None;
+    }
     let required_runs = required_literal_runs(pattern)?;
+    let publication = publication_stamp(workspace)?;
     let (use_overlay, shadowed_paths) = overlay_shadowed_paths(workspace)?;
     let tiers = if use_overlay {
         let base = workspace.base_index_dir.as_ref()?;
@@ -301,16 +379,13 @@ fn index_prefilter_files(
         }
     }
 
-    candidate_files.extend(unindexed_matching_paths(
+    live_regex_candidates(
         workspace,
-        scope_filter,
+        candidate_files,
+        publication,
         path_matcher,
         options,
-    )?);
-
-    let mut paths: Vec<PathBuf> = candidate_files.into_iter().collect();
-    paths.sort();
-    Some(paths)
+    )
 }
 
 /// Overlay chunks and tombstones hide the same base paths from index scans.
@@ -337,39 +412,60 @@ fn overlay_shadowed_paths(workspace: &Workspace) -> Option<(bool, HashSet<String
     Some((use_overlay, shadowed_paths))
 }
 
-fn unindexed_matching_paths(
+fn live_regex_candidates(
     workspace: &Workspace,
-    scope_filter: Option<&WorkspaceScope>,
+    indexed_candidates: HashSet<PathBuf>,
+    publication: PublicationStamp,
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
-    let publication = publication_stamp(workspace)?;
     let coverage = cached_coverage(
         workspace,
         CoverageConsumer::Regex,
         options,
         publication.clone(),
     )?;
-    let recorded = coverage.unindexed.as_ref()?;
-    // A new file over the indexing limit does not change the publication.
-    let unrecorded =
-        unrecorded_regex_paths(workspace, &coverage.snapshot_paths, recorded.len(), options)?;
-    if publication_stamp(workspace)? != publication {
+    let CachedCoverage::Regex(hashes) = coverage.as_ref() else {
         return None;
-    }
+    };
     let files = RootHandle::new(&workspace.root);
     let mut paths = Vec::new();
-    for rel in recorded.iter().chain(&unrecorded) {
-        if options.is_cancelled() {
-            return Some(Vec::new());
-        }
-        if scope_filter.is_none_or(|scope| scope.matches(rel))
-            && path_matcher.matches(rel)
-            && matches_live_file_type(&files, rel, options.type_filter.as_deref())
-        {
-            paths.push(rel.clone());
-        }
+    let mut changed = 0;
+    walk_regex_paths(
+        workspace,
+        path_matcher,
+        options,
+        false,
+        |rel, type_match| {
+            if !indexed_candidates.contains(rel) {
+                #[cfg(unix)]
+                let normalized = rel.to_string_lossy();
+                #[cfg(not(unix))]
+                let normalized: std::borrow::Cow<'_, str> =
+                    std::borrow::Cow::Owned(index_path_string(rel));
+                if hashes.get(normalized.as_ref()).is_some_and(|hash| {
+                    MerkleSnapshot::path_matches_metadata_snapshot(&workspace.root.join(rel), hash)
+                }) {
+                    return Ok(true);
+                }
+                changed += 1;
+                if changed > MAX_UNINDEXED_FILES {
+                    return Ok(false);
+                }
+            }
+            if type_match != PathTypeFilterMatch::ValidateText
+                || unknown_file_is_indexable_text(&files, rel)
+            {
+                paths.push(rel.to_owned());
+            }
+            Ok(true)
+        },
+    )
+    .ok()?;
+    if changed > MAX_UNINDEXED_FILES || publication_stamp(workspace)? != publication {
+        return None;
     }
+    paths.sort();
     Some(paths)
 }
 
@@ -404,7 +500,10 @@ pub(crate) fn unindexed_literal_candidates(
         options,
         publication_stamp(workspace)?,
     )
-    .and_then(|coverage| coverage.unindexed.clone())
+    .and_then(|coverage| match coverage.as_ref() {
+        CachedCoverage::Literal(paths) => paths.clone(),
+        CachedCoverage::Regex(_) => None,
+    })
 }
 
 fn cached_coverage(
@@ -435,46 +534,37 @@ fn cached_coverage(
     if publication_stamp(workspace)? != key.publication {
         return None;
     }
+    let visible = |hash: &str| options.skip_gitignore || !hash.ends_with("-1");
+    if consumer == CoverageConsumer::Regex {
+        let hashes = snapshot
+            .files
+            .into_iter()
+            .filter(|(path, hash)| covered.contains(path) && visible(hash))
+            .collect();
+        return Some(remember_coverage(key, CachedCoverage::Regex(hashes)));
+    }
     let mut recorded = Vec::new();
     for (path, hash) in &snapshot.files {
-        if covered.contains(path) || (!options.skip_gitignore && hash.ends_with("-1")) {
+        if covered.contains(path) || !visible(hash) {
             continue;
         }
         recorded.push(PathBuf::from(path));
         if recorded.len() > MAX_UNINDEXED_FILES {
-            return Some(remember_coverage(
-                key,
-                CachedCoverage {
-                    unindexed: None,
-                    snapshot_paths: HashSet::new(),
-                },
-            ));
+            return Some(remember_coverage(key, CachedCoverage::Literal(None)));
         }
     }
-    if consumer == CoverageConsumer::Literal {
-        // Empty files and files with a NUL in the sniffed prefix cannot
-        // produce a literal hit. Drop them once per publication instead of
-        // reading every binary asset on each query.
-        let files = RootHandle::new(&workspace.root);
-        recorded = recorded
-            .into_par_iter()
-            .filter(|path| !options.is_cancelled() && may_contain_text(&files, path))
-            .collect();
-    }
+    // Empty files and files with a NUL in the sniffed prefix cannot produce a literal hit.
+    let files = RootHandle::new(&workspace.root);
+    recorded = recorded
+        .into_par_iter()
+        .filter(|path| !options.is_cancelled() && may_contain_text(&files, path))
+        .collect();
     if options.is_cancelled() {
         return None;
     }
-    let snapshot_paths = if consumer == CoverageConsumer::Regex {
-        snapshot.files.into_keys().collect()
-    } else {
-        HashSet::new()
-    };
     Some(remember_coverage(
         key,
-        CachedCoverage {
-            unindexed: Some(Arc::new(recorded)),
-            snapshot_paths,
-        },
+        CachedCoverage::Literal(Some(Arc::new(recorded))),
     ))
 }
 
@@ -554,37 +644,52 @@ fn may_contain_text(files: &RootHandle, path: &std::path::Path) -> bool {
     }
 }
 
-/// Walk with the current ignore rules to find files missing from the snapshot.
-fn unrecorded_regex_paths(
+fn walk_regex_paths(
     workspace: &Workspace,
-    snapshot_paths: &HashSet<String>,
-    recorded: usize,
+    path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
-) -> Option<Vec<PathBuf>> {
-    let mut unrecorded = Vec::new();
-    for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
+    path_order: bool,
+    mut visit: impl FnMut(&Path, PathTypeFilterMatch) -> Result<bool>,
+) -> Result<()> {
+    let scope = options.scope_filter.as_ref();
+    let mut visit_path = |rel: &Path| {
+        let filter = type_filter_match_for_path(rel, options.type_filter.as_deref());
+        if filter == PathTypeFilterMatch::Reject || !path_matcher.matches(rel) {
+            return Ok(true);
+        }
+        visit(rel, filter)
+    };
+    if let Some(scope) = scope.filter(|s| s.is_file) {
+        if !options.is_cancelled()
+            && crate::walker::SourcePathMatcher::new(&workspace.root, options.skip_gitignore)
+                .allows(&scope.rel_path)?
+        {
+            visit_path(&scope.rel_path)?;
+        }
+        return Ok(());
+    }
+
+    let mut walk = crate::walker::source_walker_scoped(
+        &workspace.root,
+        options.skip_gitignore,
+        scope.map(|s| s.rel_path.as_path()),
+    );
+    if path_order {
+        walk.sort_by_file_name(|left, right| left.cmp(right));
+    }
+    for entry in walk.build() {
         if options.is_cancelled() {
-            return None;
+            break;
         }
-        let entry = entry.ok()?;
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let relative = entry.path().strip_prefix(&workspace.root).ok()?;
-        #[cfg(unix)]
-        let normalized = relative.to_string_lossy();
-        #[cfg(not(unix))]
-        let normalized: std::borrow::Cow<'_, str> =
-            std::borrow::Cow::Owned(index_path_string(relative));
-        if snapshot_paths.contains::<str>(normalized.as_ref()) {
-            continue;
-        }
-        unrecorded.push(relative.to_path_buf());
-        if recorded + unrecorded.len() > MAX_UNINDEXED_FILES {
-            return None;
+        let entry = entry?;
+        if entry.file_type().is_some_and(|kind| kind.is_file())
+            && let Ok(rel) = entry.path().strip_prefix(&workspace.root)
+            && !visit_path(rel)?
+        {
+            break;
         }
     }
-    Some(unrecorded)
+    Ok(())
 }
 
 fn constrain_query_to_scope(
@@ -637,6 +742,66 @@ fn regex_preview_line(matcher: &RegexMatcher, line: &str) -> String {
     crate::search::preview_line_window(trimmed, found).into_owned()
 }
 
+#[derive(Clone, Copy)]
+enum RegexLines {
+    Count,
+    Hits(usize),
+}
+
+fn scan_regex_file(
+    files: &RootHandle,
+    path: &Path,
+    matcher: &RegexMatcher,
+    searcher: &mut Searcher,
+    options: &SearchOptions,
+    lines: RegexLines,
+) -> Result<Option<FileSearchResult>> {
+    if options.is_cancelled() {
+        return Ok(None);
+    }
+    let Ok(file) = files.open(path) else {
+        return Ok(None);
+    };
+    let mut hits = Vec::new();
+    let mut hit_count = 0;
+    let mut total_score = 0.0;
+    searcher.search_file(
+        matcher,
+        &file,
+        Bytes(|line_num, line| {
+            if options.is_cancelled() {
+                return Ok(false);
+            }
+            hit_count += 1;
+            total_score += 1.0;
+            if let RegexLines::Hits(limit) = lines {
+                let line_num = usize::try_from(line_num).unwrap_or(usize::MAX);
+                hits.push(SearchHit {
+                    file_path: path.to_owned(),
+                    start_line: line_num,
+                    end_line: line_num,
+                    preview: regex_preview_line(matcher, &String::from_utf8_lossy(line)),
+                    reason: "regex line match".to_string(),
+                    score: 1.0,
+                    sources: vec!["regex".to_string()],
+                    neural_requested: false,
+                    neural_executed: false,
+                });
+                return Ok(hit_count < limit);
+            }
+            Ok(true)
+        }),
+    )?;
+    Ok((hit_count > 0).then(|| FileSearchResult {
+        file_path: path.to_owned(),
+        total_score,
+        hit_count,
+        more_hits_in_file: hit_count - hits.len(),
+        hit_count_is_lower_bound: false,
+        hits,
+    }))
+}
+
 /// Parallel regex search over a known set of file paths.
 fn regex_search_parallel(
     workspace: &Workspace,
@@ -661,37 +826,18 @@ fn regex_search_parallel(
     // The first read walks the root. Every other candidate file reuses that walk.
     let files = RootHandle::new(&workspace.root);
     let search_file = |rel_path: &PathBuf| {
-        if options.is_cancelled() {
-            return Vec::new();
-        }
-        let Ok(file) = files.open(rel_path) else {
-            return Vec::new();
-        };
-        let mut searcher = text_searcher();
-        let mut local_hits = Vec::new();
-        let _ = searcher.search_file(
+        scan_regex_file(
+            &files,
+            rel_path,
             &matcher,
-            &file,
-            Lossy(|line_num, line| {
-                if options.is_cancelled() {
-                    return Ok(false);
-                }
-                let line_num = usize::try_from(line_num).unwrap_or(usize::MAX);
-                local_hits.push(SearchHit {
-                    file_path: rel_path.clone(),
-                    start_line: line_num,
-                    end_line: line_num,
-                    preview: regex_preview_line(&matcher, line),
-                    reason: "regex line match".to_string(),
-                    score: 1.0,
-                    sources: vec!["regex".to_string()],
-                    neural_requested: false,
-                    neural_executed: false,
-                });
-                Ok(local_hits.len() < max_hits && !options.is_cancelled())
-            }),
-        );
-        local_hits
+            &mut text_searcher(),
+            options,
+            RegexLines::Hits(max_hits),
+        )
+        .ok()
+        .flatten()
+        .map(|group| group.hits)
+        .unwrap_or_default()
     };
 
     if max_hits == usize::MAX {
@@ -735,12 +881,11 @@ fn regex_search_parallel(
     Ok(hits)
 }
 
-/// Fallback: sequential filesystem walk (for workspaces without an index).
+/// Visit files in path order so a bounded search can stop after the last requested line.
 fn regex_search_walk(
     workspace: &Workspace,
     pattern: &str,
     max_hits: usize,
-    scope_filter: Option<&WorkspaceScope>,
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
@@ -749,89 +894,29 @@ fn regex_search_walk(
         .build(pattern)?;
     let mut searcher = text_searcher();
     let files = RootHandle::new(&workspace.root);
-
     let mut hits = Vec::new();
-
-    let mut walk = crate::walker::source_walker(&workspace.root, options.skip_gitignore);
-    // Sorted traversal makes a limited result the first matches in path order.
-    walk.sort_by_file_name(|left, right| left.cmp(right));
-
-    'walk: for entry in walk.build() {
-        if options.is_cancelled() {
-            return Ok(Vec::new());
-        }
-        let entry = entry?;
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
-
-        let full_path = entry.path().to_path_buf();
-        let rel_path = match full_path.strip_prefix(&workspace.root) {
-            Ok(rel) => rel.to_path_buf(),
-            Err(_) => full_path.clone(),
-        };
-        if scope_filter.is_some_and(|scope| !scope.matches(&rel_path)) {
-            continue;
-        }
-        if !path_matcher.matches(&rel_path) {
-            continue;
-        }
-        let type_filter_match =
-            type_filter_match_for_path(&rel_path, options.type_filter.as_deref());
-        if type_filter_match == PathTypeFilterMatch::Reject {
-            continue;
-        }
-
-        let remaining = max_hits.saturating_sub(hits.len());
-        if remaining == 0 {
-            break;
-        }
-        let mut local_hits = Vec::new();
-        let Ok(file) = files.open(&rel_path) else {
-            continue;
-        };
-        searcher.search_file(
-            &matcher,
-            &file,
-            Lossy(|line_num, line| {
-                if options.is_cancelled() {
-                    return Ok(false);
-                }
-                let line_num = usize::try_from(line_num).unwrap_or(usize::MAX);
-                local_hits.push(SearchHit {
-                    file_path: rel_path.clone(),
-                    start_line: line_num,
-                    end_line: line_num,
-                    preview: regex_preview_line(&matcher, line),
-                    reason: "regex line match".to_string(),
-                    score: 1.0,
-                    sources: vec!["regex".to_string()],
-                    neural_requested: false,
-                    neural_executed: false,
-                });
-                Ok(local_hits.len() < remaining && !options.is_cancelled())
-            }),
-        )?;
-
-        if options.is_cancelled() {
-            return Ok(Vec::new());
-        }
-
-        if type_filter_match == PathTypeFilterMatch::ValidateText
-            && !local_hits.is_empty()
-            && !unknown_file_is_indexable_text(&files, &rel_path)
-        {
-            continue;
-        }
-
-        for hit in local_hits {
-            hits.push(hit);
-            if hits.len() >= max_hits {
-                break 'walk;
+    walk_regex_paths(
+        workspace,
+        path_matcher,
+        options,
+        true,
+        |rel, type_filter| {
+            let remaining = max_hits - hits.len();
+            if let Some(group) = scan_regex_file(
+                &files,
+                rel,
+                &matcher,
+                &mut searcher,
+                options,
+                RegexLines::Hits(remaining),
+            )? && (type_filter != PathTypeFilterMatch::ValidateText
+                || unknown_file_is_indexable_text(&files, rel))
+            {
+                hits.extend(group.hits);
             }
-        }
-    }
-
+            Ok(hits.len() < max_hits)
+        },
+    )?;
     Ok(hits)
 }
 
@@ -1627,6 +1712,87 @@ mod tests {
         // New ignore rules take effect without waiting for another publication.
         std::fs::write(root.path().join(".gitignore"), "created.rs\n").unwrap();
         assert_eq!(regex_paths(), HashSet::from([PathBuf::from("indexed.rs")]));
+    }
+
+    #[test]
+    #[serial]
+    fn regex_uses_live_contents_and_ignore_rules_after_indexing() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let changed = root.path().join("changed.rs");
+        std::fs::write(&changed, "fn old_value() {}\n").unwrap();
+        std::fs::write(root.path().join("ignored.rs"), "fn edited_marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        index_workspace(&workspace, &HashEmbeddingModel::new(EMBEDDING_DIMENSIONS)).unwrap();
+
+        let paths = |pattern| {
+            regex_search_with_options(&workspace, pattern, &SearchOptions::default())
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.file_path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths("edited_marker"), [PathBuf::from("ignored.rs")]);
+        std::fs::write(&changed, "fn edited_marker() {}\n").unwrap();
+        std::fs::write(root.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        assert_eq!(paths("edited_marker"), [PathBuf::from("changed.rs")]);
+        assert_eq!(paths("(?i:edited_marker)"), paths("edited_marker"));
+    }
+
+    #[test]
+    #[serial]
+    fn regex_file_names_count_every_matching_line_before_limiting_files() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(root.path().join("a.txt"), "marker\n").unwrap();
+        std::fs::write(root.path().join("b.txt"), "marker\nmarker marker\n").unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let options = SearchOptions {
+            limit: Some(1),
+            context: 3,
+            ..SearchOptions::default()
+        };
+        for indexed in [false, true] {
+            if indexed {
+                index_workspace(&workspace, &HashEmbeddingModel::new(EMBEDDING_DIMENSIONS))
+                    .unwrap();
+            }
+            let result =
+                regex_file_name_search_with_options(&workspace, "marker", &options).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].file_path, PathBuf::from("b.txt"));
+            assert_eq!(result[0].hit_count, 2);
+            assert_eq!(result[0].total_score, 2.0);
+            assert!(result[0].hits.is_empty());
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn direct_regex_file_scope_respects_nested_ignore_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join(".gitignore"), "*.rs\n").unwrap();
+        std::fs::write(root.path().join("src/.gitignore"), "!kept.rs\n").unwrap();
+        for name in ["kept.rs", "hidden.rs"] {
+            std::fs::write(root.path().join("src").join(name), "fn marker() {}\n").unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        for (name, count) in [("kept.rs", 1), ("hidden.rs", 0)] {
+            let options = SearchOptions {
+                scope_filter: Some(WorkspaceScope {
+                    rel_path: PathBuf::from("src").join(name),
+                    is_file: true,
+                }),
+                ..SearchOptions::default()
+            };
+            let hits = regex_search_with_options(&workspace, "marker", &options).unwrap();
+            assert_eq!(hits.len(), count);
+        }
     }
 
     #[test]

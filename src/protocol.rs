@@ -16,10 +16,11 @@ fn is_zero(value: &usize) -> bool {
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 11;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 12;
 /// Older clients can omit the literal output mode and retain hit limits.
 /// This lets long-lived MCP sessions keep using a newer daemon.
 pub const MIN_DAEMON_PROTOCOL_VERSION: u32 = 8;
+pub(crate) const MAX_HITS_PER_FILE: usize = 100;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +29,10 @@ pub enum LiteralSearchOutput {
     Hits,
     Files,
     FileNames,
+    FilesWithPreviews {
+        file_limit: usize,
+        hits_per_file: usize,
+    },
 }
 
 impl LiteralSearchOutput {
@@ -107,6 +112,8 @@ pub enum DaemonRequest {
         path: Option<PathBuf>,
         pattern: String,
         limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        file_name_only: bool,
         #[serde(default)]
         context: usize,
         #[serde(default)]
@@ -239,6 +246,7 @@ pub enum DaemonResponse {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         warnings: Vec<String>,
     },
+    /// File-ranked results. The wire name also supports older literal-search clients.
     LiteralFiles {
         files: Vec<FileSearchResult>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -432,6 +440,7 @@ mod tests {
         let DaemonRequest::RegexSearch {
             context,
             type_filter,
+            file_name_only,
             ..
         } = request
         else {
@@ -439,6 +448,7 @@ mod tests {
         };
         assert_eq!(context, 0);
         assert!(type_filter.is_none());
+        assert!(!file_name_only);
     }
 
     fn hit(file: &str, score: f32, line: usize) -> SearchHit {
