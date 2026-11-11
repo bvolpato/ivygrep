@@ -62,7 +62,8 @@ jobs:
             use_cross: true
 
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            # NVIDIA publishes the pinned CUDA 13.2 packages for Ubuntu 24.04.
+            runner: ubuntu-24.04
             archive_name: linux-x86_64-cuda
             archive: tar.gz
             binary_name: ig
@@ -304,7 +305,7 @@ jobs:
             archive_name: linux-x86_64-musl
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             archive_name: linux-x86_64-cuda
             archive: tar.gz
             cuda: true
