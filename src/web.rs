@@ -679,6 +679,7 @@ fn build_search_request_for_path(
             path,
             pattern: query,
             limit,
+            file_name_only: false,
             context,
             type_filter,
             include_globs,
@@ -716,14 +717,24 @@ async fn execute_search(
     }
 }
 
-fn search_value(hits: &[SearchHit], warnings: &[String], started: Instant) -> Value {
-    let groups = group_hits_by_file(hits, None);
-    json!({
+fn search_value(hits: &[SearchHit], warnings: &[String], started: Instant, flat: bool) -> Value {
+    let mut value = json!({
         "hits": hits,
-        "groups": groups,
         "warnings": warnings,
         "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0
-    })
+    });
+    if !flat {
+        value["groups"] = json!(group_hits_by_file(hits, None));
+    }
+    value
+}
+
+fn search_error(message: String, flat: bool) -> Value {
+    let mut value = json!({"error": message, "hits": []});
+    if !flat {
+        value["groups"] = json!([]);
+    }
+    value
 }
 
 pub(crate) async fn run_search(state: DaemonState, params: &HashMap<String, Vec<String>>) -> Value {
@@ -737,13 +748,14 @@ pub(crate) async fn run_search(state: DaemonState, params: &HashMap<String, Vec<
             Err(error) => json!({"error": error.to_string()}),
         };
     }
+    let flat = parse_bool_param(params, "flat");
     let request = match build_search_request(params) {
         Ok(request) => request,
-        Err(err) => return json!({"error": err.to_string(), "hits": [], "groups": []}),
+        Err(err) => return search_error(err.to_string(), flat),
     };
     match execute_search(state, request).await {
-        Ok((hits, warnings)) => search_value(&hits, &warnings, started),
-        Err(message) => json!({"error": message, "hits": [], "groups": []}),
+        Ok((hits, warnings)) => search_value(&hits, &warnings, started, flat),
+        Err(message) => search_error(message, flat),
     }
 }
 
@@ -881,13 +893,9 @@ async fn write_all_workspace_search_stream(
     state: DaemonState,
     params: &HashMap<String, Vec<String>>,
 ) -> Result<()> {
+    let flat = parse_bool_param(params, "flat");
     if let Err(err) = build_search_request(params) {
-        write_sse(
-            stream,
-            "results",
-            &json!({"error": err.to_string(), "hits": [], "groups": []}),
-        )
-        .await?;
+        write_sse(stream, "results", &search_error(err.to_string(), flat)).await?;
         return write_sse(stream, "done", &json!({"ok": false})).await;
     }
 
@@ -902,7 +910,7 @@ async fn write_all_workspace_search_stream(
     )
     .await?;
     if total == 0 {
-        write_sse(stream, "results", &search_value(&[], &[], started)).await?;
+        write_sse(stream, "results", &search_value(&[], &[], started, flat)).await?;
         return write_sse(
             stream,
             "done",
@@ -973,7 +981,7 @@ async fn write_all_workspace_search_stream(
         if all_hits.len() > limit {
             all_hits.truncate(limit);
         }
-        let mut value = search_value(&all_hits, &warnings, started);
+        let mut value = search_value(&all_hits, &warnings, started, flat);
         if let Some(object) = value.as_object_mut() {
             object.insert("finished".to_string(), json!(finished));
             object.insert("total".to_string(), json!(total));
@@ -1327,6 +1335,7 @@ mod tests {
             &[],
             &["search failed for /tmp/stale".to_string()],
             Instant::now(),
+            false,
         );
         assert_eq!(value["warnings"], json!(["search failed for /tmp/stale"]));
     }
