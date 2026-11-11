@@ -79,6 +79,64 @@ def bootstrap_median_ratio(
     }
 
 
+def query_p95_ratio(baseline_runs: list[dict], current_runs: list[dict], path: str) -> dict:
+    runs = baseline_runs + current_runs
+    if any(not run.get("trial_id") for run in runs):
+        # Historical and standalone runs have no shared trial identity.
+        def latencies(side):
+            return [ms for run in side for ms in run["queries"][path]["latency_samples_ms"]]
+
+        return {
+            **bootstrap_p95_ratio(latencies(baseline_runs), latencies(current_runs)),
+            "resampling": "independent",
+        }
+
+    def trials_by_id(side):
+        trials = {}
+        for run in side:
+            trial_id = run["trial_id"]
+            query = run["queries"][path]
+            ids = query.get("latency_sample_ids", [])
+            values = query["latency_samples_ms"]
+            if trial_id in trials:
+                raise ValueError(f"duplicate trial ID {trial_id}")
+            if not ids or len(ids) != len(values) or len(set(ids)) != len(ids):
+                raise ValueError(f"missing or duplicate sample IDs in {path} trial {trial_id}")
+            trials[trial_id] = dict(zip(ids, values))
+        return trials
+
+    baseline = trials_by_id(baseline_runs)
+    current = trials_by_id(current_runs)
+    if baseline.keys() != current.keys():
+        raise ValueError(f"paired {path} artifacts have different trial IDs")
+    ids = sorted(next(iter(baseline.values())))
+    expected_ids = set(ids)
+    trials = []
+    for trial_id in sorted(baseline):
+        before, after = baseline[trial_id], current[trial_id]
+        if before.keys() != expected_ids or after.keys() != expected_ids:
+            raise ValueError(f"paired {path} artifacts have different sample IDs in trial {trial_id}")
+        trials.append([(before[key], after[key]) for key in ids])
+
+    # Each replicate draws trials and query cases. The same case draw applies
+    # to every selected trial, and both revisions use exactly the same pairs.
+    rng = random.Random(20260615)
+    ratios = []
+    for _ in range(5_000):
+        selected_trials = rng.choices(trials, k=len(trials))
+        selected_cases = rng.choices(range(len(ids)), k=len(ids))
+        before, after = zip(*(trial[i] for trial in selected_trials for i in selected_cases))
+        ratios.append(percentile(after, 0.95) / percentile(before, 0.95))
+    before, after = zip(*(pair for trial in trials for pair in trial))
+    return {
+        "observed": percentile(after, 0.95) / percentile(before, 0.95),
+        "ci95_lower": percentile(ratios, 0.025),
+        "ci95_upper": percentile(ratios, 0.975),
+        "bootstrap_repetitions": len(ratios),
+        "resampling": "paired_trials_and_queries",
+    }
+
+
 def load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -106,18 +164,7 @@ def compare_runs(
     for path in comparable_query_paths:
         baseline_queries = [run["queries"][path] for run in baseline_runs]
         current_queries = [run["queries"][path] for run in current_runs]
-        latency = bootstrap_p95_ratio(
-            [
-                sample
-                for query in baseline_queries
-                for sample in query["latency_samples_ms"]
-            ],
-            [
-                sample
-                for query in current_queries
-                for sample in query["latency_samples_ms"]
-            ],
-        )
+        latency = query_p95_ratio(baseline_runs, current_runs, path)
         latency["significant_regression"] = (
             latency["ci95_lower"] > significant_regression_ratio
         )

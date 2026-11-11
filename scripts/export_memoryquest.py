@@ -247,6 +247,7 @@ def export_dataset(
         }
         provenance = {
             "schema_version": 1,
+            "source_file_paths": False,
             "dataset": "MemoryQuest",
             "dataset_description": (
                 "Synthetic multi-session personal-assistant conversations"

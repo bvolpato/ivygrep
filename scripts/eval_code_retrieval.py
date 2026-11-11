@@ -271,13 +271,21 @@ def binary_identity(binary: Path) -> dict:
     }
 
 
-def materialize_corpus(dataset: Path, repo: Path) -> dict[str, str]:
+def materialize_corpus(
+    dataset: Path, repo: Path, provenance: dict | None
+) -> tuple[dict[str, str], bool]:
     repo.mkdir(parents=True, exist_ok=True)
     (repo / ".git").mkdir(exist_ok=True)
     path_to_id: dict[str, str] = {}
+    has_source_paths = not contracts.generated_document_paths(provenance)
     for position, document in enumerate(load_jsonl(dataset / "corpus.jsonl")):
         doc_id = str(document["_id"])
-        relative = document_relative_path(document, position)
+        relative, has_source_path = document_relative_path(document, position)
+        if has_source_paths:
+            source = (document.get("metadata") or {}).get("source") or ""
+            has_source_paths = has_source_path and not contracts.generated_document_paths(
+                provenance, source
+            )
         relative_path = Path(relative)
         target = repo / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -285,23 +293,21 @@ def materialize_corpus(dataset: Path, repo: Path) -> dict[str, str]:
         text = document.get("text") or ""
         target.write_text(f"{title}\n{text}".lstrip(), encoding="utf-8")
         path_to_id[relative] = doc_id
-    return path_to_id
+    return path_to_id, has_source_paths
 
 
-def document_relative_path(document: dict, position: int) -> str:
-    doc_id = str(document["_id"])
-    relative = (document.get("metadata") or {}).get(
-        "path"
-    ) or f"documents/{position:06d}-{doc_id}.txt"
-    path = Path(str(relative))
-    if path.is_absolute() or ".." in path.parts:
-        path = Path("documents") / f"{position:06d}-{doc_id}.txt"
-    return path.as_posix()
+def document_relative_path(document: dict, position: int) -> tuple[str, bool]:
+    relative = (document.get("metadata") or {}).get("path")
+    if relative:
+        path = Path(str(relative))
+        if not path.is_absolute() and ".." not in path.parts:
+            return path.as_posix(), True
+    return f"documents/{position:06d}-{document['_id']}.txt", False
 
 
 def corpus_path_map(dataset: Path) -> dict[str, str]:
     return {
-        document_relative_path(document, position): str(document["_id"])
+        document_relative_path(document, position)[0]: str(document["_id"])
         for position, document in enumerate(load_jsonl(dataset / "corpus.jsonl"))
     }
 
@@ -725,8 +731,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         temp_path = Path(temp)
         repo = temp_path / "repo"
         home = temp_path / "home"
-        path_to_id = materialize_corpus(dataset, repo)
-        id_to_path = {document_id: path for path, document_id in path_to_id.items()}
+        path_to_id, has_source_paths = materialize_corpus(dataset, repo, provenance)
         queries = selected_queries(
             load_jsonl(dataset / "queries.jsonl"),
             args.query_id,
@@ -1004,18 +1009,13 @@ def evaluate(args: argparse.Namespace) -> dict:
                 query_score = score_query(ranked, qrels.get(query_id, {}))
                 if not ranked:
                     no_hit_queries += 1
-                eligible_for_support_spam = not query_targets_support(text)
                 query_support_hits = None
-                if eligible_for_support_spam:
-                    top_paths = [
-                        id_to_path[document_id]
-                        for document_id in ranked[:10]
-                        if document_id in id_to_path
-                    ]
+                if has_source_paths and not query_targets_support(text):
+                    top_hits = ranked_hits[:10]
                     query_support_hits = sum(
-                        is_support_path(path) for path in top_paths
+                        is_support_path(hit["file_path"]) for hit in top_hits
                     )
-                    support_file_candidates += len(top_paths)
+                    support_file_candidates += len(top_hits)
                     support_file_hits += query_support_hits
                 scores.append(query_score)
                 warm_latencies.append(warm_ms)
@@ -1130,9 +1130,9 @@ def evaluate(args: argparse.Namespace) -> dict:
                 },
                 "no_hit_rate": no_hit_queries / len(queries) if queries else 0.0,
                 "support_file_spam_rate_at_10": (
-                    support_file_hits / support_file_candidates
-                    if support_file_candidates
-                    else 0.0
+                    support_file_hits / max(1, support_file_candidates)
+                    if has_source_paths
+                    else None
                 ),
                 **aggregate(scores),
                 "details": details,

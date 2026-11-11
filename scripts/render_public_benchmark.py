@@ -9,7 +9,11 @@ import json
 from pathlib import Path
 import re
 
-from public_retrieval_contracts import executed_fit_model_verified, verified_fit_disjoint
+from public_retrieval_contracts import (
+    executed_fit_model_verified,
+    generated_document_paths,
+    verified_fit_disjoint,
+)
 
 
 def metric(matrix: dict, mode: str, name: str) -> float:
@@ -181,6 +185,16 @@ def dataset_scope_note(matrix: dict) -> str:
     ]
     if sampled:
         notes.append("Deterministic samples: " + ", ".join(sampled) + ".")
+    if any(
+        result.get("support_file_spam_rate_at_10", 0) is None
+        or generated_document_paths(result.get("dataset_provenance"))
+        for result in matrix.get("results", [])
+    ):
+        notes.append(
+            "The aggregate support-file spam rate is unavailable because some "
+            "corpus filenames are generated. They do not identify tests, "
+            "examples, or documentation."
+        )
     if undeclared:
         notes.append(
             "Dataset cards do not declare licenses for: "

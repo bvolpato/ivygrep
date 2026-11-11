@@ -346,6 +346,25 @@ def safe_environment(
     return {"settings": values, "setting_value_sha256": digests}
 
 
+def generated_document_paths(provenance: dict | None, document_source: str = "") -> bool:
+    provenance = provenance or {}
+    if "source_file_paths" in provenance:
+        return provenance["source_file_paths"] is False
+    # These exporters also generated filenames before they recorded the flag.
+    repository = (
+        (provenance.get("query_corpus") or {}).get("repository") or document_source
+    )
+    return (
+        (
+            isinstance(repository, str)
+            and repository.startswith("CoIR-Retrieval/")
+            and repository.endswith("-queries-corpus")
+        )
+        or repository == "hq-bench/coreb"
+        or provenance.get("dataset") in {"hq-bench/coreb", "MemoryQuest"}
+    )
+
+
 def dataset_fingerprint(dataset: Path) -> dict:
     actual = {
         name: sha256_file(dataset / name)

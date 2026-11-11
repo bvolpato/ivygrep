@@ -141,6 +141,7 @@ jobs:
                 --files "$FILES" \
                 --query-samples 100 \
                 --source-commit "$BASE_SHA" \
+                --trial-id "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/initial/$run" \
                 --output "benchmark-results/baseline-$run.json"
               rm -rf "$RUNNER_TEMP/base-home-$run"
             }
@@ -152,6 +153,7 @@ jobs:
                 --files "$FILES" \
                 --query-samples 100 \
                 --source-commit "$GITHUB_SHA" \
+                --trial-id "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/initial/$run" \
                 --output "benchmark-results/current-$run.json"
               rm -rf "$RUNNER_TEMP/head-home-$run"
             }
@@ -205,6 +207,7 @@ jobs:
                 --files "$FILES" \
                 --query-samples 100 \
                 --source-commit "$BASE_SHA" \
+                --trial-id "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/confirmation/$run" \
                 --output "benchmark-results/baseline-confirmation-$run.json"
               rm -rf "$RUNNER_TEMP/base-confirmation-home-$run"
             }
@@ -216,6 +219,7 @@ jobs:
                 --files "$FILES" \
                 --query-samples 100 \
                 --source-commit "$GITHUB_SHA" \
+                --trial-id "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/confirmation/$run" \
                 --output "benchmark-results/current-confirmation-$run.json"
               rm -rf "$RUNNER_TEMP/head-confirmation-home-$run"
             }

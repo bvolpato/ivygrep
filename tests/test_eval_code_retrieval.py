@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from unittest import mock
 from pathlib import Path
 import sys
@@ -80,9 +81,43 @@ class RetrievalMetricsTest(unittest.TestCase):
                 '{"_id":"unsafe","text":"body","metadata":{"path":"../escape.rs"}}\n',
                 encoding="utf-8",
             )
-            mapping = eval_code_retrieval.materialize_corpus(dataset, repo)
+            mapping, source_paths = eval_code_retrieval.materialize_corpus(
+                dataset, repo, None
+            )
             self.assertEqual(mapping, {"documents/000000-unsafe.txt": "unsafe"})
+            self.assertFalse(source_paths)
             self.assertFalse((root / "escape.rs").exists())
+
+    def test_support_file_metric_requires_source_paths(self):
+        legacy = {
+            "task": "cosqa",
+            "query_corpus": {"repository": "CoIR-Retrieval/cosqa-queries-corpus"},
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for provenance, path, expected in (
+                (legacy, "documents/000000000.py", False),
+                ({"source_file_paths": False}, "documents/000000000.py", False),
+                ({}, "tests/test_eval.py", True),
+                ({}, "documents/000000000.py", True),
+                ({}, None, False),
+            ):
+                with self.subTest(provenance=provenance, path=path):
+                    doc = {"_id": "1", "metadata": {"path": path}}
+                    (root / "corpus.jsonl").write_text(json.dumps(doc) + "\n")
+                    _, source_paths = eval_code_retrieval.materialize_corpus(
+                        root, root / "repo", provenance
+                    )
+                    self.assertEqual(source_paths, expected)
+            doc["metadata"] = {
+                "path": "documents/000000000.py",
+                "source": legacy["query_corpus"]["repository"],
+            }
+            (root / "corpus.jsonl").write_text(json.dumps(doc) + "\n")
+            _, source_paths = eval_code_retrieval.materialize_corpus(
+                root, root / "repo", None
+            )
+            self.assertFalse(source_paths)
 
     def test_query_modes_are_explicit(self):
         self.assertEqual(eval_code_retrieval.query_args("lexical"), ["--lexical-only"])

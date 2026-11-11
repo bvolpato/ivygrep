@@ -899,6 +899,11 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn("sota-challenge", html)
         self.assertIn("query char limit", html)
 
+        matrix["results"] = [{"support_file_spam_rate_at_10": None}]
+        note = "support-file spam rate is unavailable"
+        self.assertIn(note, renderer.markdown(matrix))
+        self.assertIn(note, renderer.html(matrix))
+
         matrix["scope_notes"] = ["Calibration used <development samples>."]
         self.assertIn(matrix["scope_notes"][0], renderer.markdown(matrix))
         annotated_html = renderer.html(matrix)
@@ -1011,6 +1016,7 @@ class PublicBenchmarkTest(unittest.TestCase):
     def test_matrix_uses_global_query_latency_percentiles(self):
         def result(dataset: str, queries: int, latency: float) -> dict:
             metrics = {name: 0.5 for name in matrix_runner.QUALITY_METRICS}
+            metrics.update(dict.fromkeys(matrix_runner.LATENCY_METRICS, latency))
             metrics.update(
                 {
                     "dataset": dataset,
@@ -1035,14 +1041,18 @@ class PublicBenchmarkTest(unittest.TestCase):
             )
             return metrics
 
-        summary = matrix_runner.aggregate_runs(
-            [result("small", 1, 100.0), result("large", 19, 1.0)],
-            ["hash"],
-            1,
-        )
+        entries = [result("small", 1, 100.0), result("large", 19, 1.0)]
+        metric = "support_file_spam_rate_at_10"
+        entries[0][metric] = None
+        summary = matrix_runner.aggregate_runs(entries, ["hash"], 1)
         run = summary["hash"]["runs"][0]
         self.assertEqual(run["cold_latency_p95_ms"], 1.0)
         self.assertEqual(run["warm_latency_p95_ms"], 1.0)
+        self.assertIsNone(run[metric])
+        self.assertIsNone(summary["hash"]["metrics"][metric])
+        tasks = matrix_runner.summarize_tasks(entries)
+        self.assertIsNone(tasks["small"]["hash"][metric])
+        self.assertEqual(tasks["large"]["hash"][metric]["mean"], 0.5)
 
     def test_publication_result_omits_per_query_details(self):
         result = {

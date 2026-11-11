@@ -562,7 +562,13 @@ def summarize_queries(records: list[dict]) -> dict:
         record["expected_path"] in record["paths"] for record in records
     )
     reciprocal_ranks = []
+    occurrences = {}
+    sample_ids = []
     for record in records:
+        query = record["query"]
+        occurrence = occurrences.get(query, 0)
+        sample_ids.append(f"{query}#{occurrence}")
+        occurrences[query] = occurrence + 1
         try:
             rank = record["paths"].index(record["expected_path"]) + 1
         except ValueError:
@@ -575,6 +581,7 @@ def summarize_queries(records: list[dict]) -> dict:
         "minimum_ms": min(values),
         "maximum_ms": max(values),
         "latency_samples_ms": values,
+        "latency_sample_ids": sample_ids,
         "mean_hits": statistics.mean(record["hit_count"] for record in records),
         "expected_recall_at_20": expected_found / len(records),
         "expected_mrr_at_20": statistics.mean(reciprocal_ranks),
@@ -696,6 +703,7 @@ def query_suite(
         query, expected_path = case
         return {
             **client.query(query, type_filter),
+            "query": query,
             "expected_path": expected_path,
         }
 
@@ -708,6 +716,7 @@ def query_suite(
                 {**env, "IVYGREP_NO_AUTOSPAWN": "1"},
                 force_neural=force_neural,
             ),
+            "query": query,
             "expected_path": expected_path,
         }
         for query, expected_path in distinct_cases[: min(10, samples)]
@@ -722,6 +731,7 @@ def query_suite(
         cli_warm = [
             {
                 **run_query(binary, corpus, query, env, force_neural=force_neural),
+                "query": query,
                 "expected_path": expected_path,
             }
             for query, expected_path in cli_warm_cases
@@ -738,6 +748,7 @@ def query_suite(
                     query,
                     force_neural=force_neural,
                 ),
+                "query": query,
                 "expected_path": expected_path,
             }
 
@@ -786,6 +797,7 @@ def main() -> int:
     parser.add_argument("--files", type=int, default=DEFAULT_FILES)
     parser.add_argument("--chunks-per-file", type=int, default=DEFAULT_CHUNKS_PER_FILE)
     parser.add_argument("--query-samples", type=int, default=100)
+    parser.add_argument("--trial-id", help="shared ID of the baseline and current runs in a paired trial")
     parser.add_argument("--reuse-index", action="store_true")
     parser.add_argument(
         "--enhance-hash",
@@ -888,6 +900,7 @@ def main() -> int:
     report = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "trial_id": args.trial_id,
         "ivygrep_commit": args.source_commit or git_revision(root),
         "harness_sha256": {
             path.name: sha256_file(path)

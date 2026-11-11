@@ -1,5 +1,7 @@
+import os
 import re
 import subprocess
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -57,6 +59,55 @@ def run_scripts(workflow: str) -> dict[str, str]:
 
 
 class WorkflowHardeningTest(unittest.TestCase):
+    def test_prose_runs_relevance_and_benchmark_fixtures_run_performance(self) -> None:
+        script = run_scripts(workflow_text("benchmarks.yml"))["Classify benchmark-relevant changes"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(
+                    [
+                        "git",
+                        "-c", "user.name=Test",
+                        "-c", "user.email=test@example.com",
+                        "-c", "commit.gpgSign=false",
+                        *args,
+                    ],
+                    cwd=root,
+                    text=True,
+                ).strip()
+
+            git("init", "-q")
+            git("commit", "-q", "--allow-empty", "-m", "base")
+            cases = [
+                ((), "false", "false"),
+                (("README.md", "benchmarks/public/README.md"), "true", "false"),
+                (("docs/guide.md", "src/lib.rs"), "true", "true"),
+                (("tests/fixtures/input.md",), "true", "true"),
+            ]
+            for paths, relevance, performance in cases:
+                with self.subTest(paths=paths):
+                    base = git("rev-parse", "HEAD")
+                    for path in paths:
+                        file = root / path
+                        file.parent.mkdir(parents=True, exist_ok=True)
+                        file.write_text("input\n", encoding="utf-8")
+                    if paths:
+                        git("add", "--", *paths)
+                        git("commit", "-q", "-m", "change inputs")
+                    output = root / "outputs"
+                    output.write_text("", encoding="utf-8")
+                    subprocess.run(
+                        ["bash", "-eu", "-c", script],
+                        cwd=root,
+                        check=True,
+                        env={**os.environ, "BENCHMARK_BASE_REF": base, "GITHUB_OUTPUT": str(output)},
+                    )
+                    self.assertEqual(
+                        output.read_text().splitlines(),
+                        [f"relevance={relevance}", f"performance={performance}"],
+                    )
+
     def test_dashboard_validation_fetches_publication_history(self) -> None:
         for workflow_name, job_name in (
             ("ci.yml", "check"),

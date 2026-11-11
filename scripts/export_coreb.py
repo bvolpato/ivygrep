@@ -175,6 +175,7 @@ def export_task(
     )
     provenance = {
         "schema_version": 1,
+        "source_file_paths": False,
         "dataset": DATASET,
         "split": split,
         "task": task,
