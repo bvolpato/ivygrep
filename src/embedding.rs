@@ -1069,8 +1069,7 @@ fn preferred_neural_backend() -> NeuralBackend {
         return NeuralBackend::Metal;
     }
 
-    #[cfg(feature = "cuda")]
-    if candle_core::utils::cuda_is_available() {
+    if cfg!(feature = "cuda") {
         return NeuralBackend::Cuda;
     }
 
@@ -1844,6 +1843,8 @@ mod tests {
     fn foreground_backend_uses_preferred_backend_with_cpu_opt_out() {
         unsafe { std::env::remove_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR") };
         let preferred = preferred_neural_backend();
+        #[cfg(all(feature = "cuda", not(all(feature = "metal", target_os = "macos"))))]
+        assert_eq!(preferred, NeuralBackend::Cuda);
         assert_eq!(preferred_neural_backend_for(false), preferred);
         assert_eq!(preferred_neural_backend_for(true), preferred);
 

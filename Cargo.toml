@@ -34,7 +34,8 @@ default = ["neural"]
 neural = ["dep:candle_embed", "dep:candle-core", "dep:hf-hub", "dep:tokenizers"]
 accelerate = ["neural"]
 metal = ["neural"]
-cuda = ["neural", "candle-core/cuda", "candle_embed/cuda"]
+# The transformer embedder owns the CUDA device. The static model loads its tensors on the CPU.
+cuda = ["neural", "candle_embed/cuda"]
 
 [dependencies]
 anyhow = "1.0"
