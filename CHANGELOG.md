@@ -4,6 +4,8 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-11-12
+
 ### Fixed
 
 - The watcher follows nested ignore overrides when files are created or removed. An explicit reindex also detects working-file edits that Git hides through content conversion.
