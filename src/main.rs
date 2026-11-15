@@ -29,6 +29,8 @@ fn serves_mcp(args: impl Iterator<Item = String>) -> bool {
 }
 
 fn main() -> Result<()> {
+    #[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+    ivygrep::allocator::register_jemalloc();
     reset_sigpipe();
     // The MCP server is blocking stdio code, and each of its daemon requests
     // runs on a short-lived runtime of its own. A worker pool would only add

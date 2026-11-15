@@ -8,12 +8,23 @@
 
 use serde::Serialize;
 
+#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+static JEMALLOC_IS_GLOBAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record the allocator selected by the binary before it starts serving requests.
+/// Library callers retain the system allocator report unless they register their
+/// own `#[global_allocator]` jemalloc here.
+#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+pub fn register_jemalloc() {
+    JEMALLOC_IS_GLOBAL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AllocatorReport {
     /// `jemalloc` or `system`.
     pub name: String,
-    /// Page size that jemalloc was built for, in bytes. `None` for the system
-    /// allocator.
+    /// Page size that jemalloc was built for, in bytes, when available.
     pub page_size: Option<u64>,
 }
 
@@ -28,10 +39,10 @@ impl AllocatorReport {
 
 pub fn inspect() -> AllocatorReport {
     #[cfg(all(target_env = "musl", target_pointer_width = "64"))]
-    if let Some(page_size) = jemalloc::page_size_if_global() {
+    if JEMALLOC_IS_GLOBAL.load(std::sync::atomic::Ordering::Relaxed) {
         return AllocatorReport {
             name: "jemalloc".to_string(),
-            page_size: Some(page_size),
+            page_size: jemalloc::page_size(),
         };
     }
     AllocatorReport {
@@ -42,46 +53,36 @@ pub fn inspect() -> AllocatorReport {
 
 #[cfg(all(target_env = "musl", target_pointer_width = "64"))]
 mod jemalloc {
-    use std::ffi::{CStr, c_uint, c_void};
+    use std::ffi::c_void;
 
-    /// jemalloc's page size, when jemalloc is this process's global allocator.
-    /// jemalloc is linked into every musl artifact of this crate, but only a
-    /// binary that declares it as `#[global_allocator]` allocates through it.
-    /// So the probe asks jemalloc whether it owns a fresh Rust allocation:
-    /// `arenas.lookup` fails for memory that came from another allocator.
-    pub(super) fn page_size_if_global() -> Option<u64> {
-        let probe = std::hint::black_box(Box::new(0u64));
-        let address: *const c_void = std::ptr::from_ref::<u64>(&probe).cast();
-        read::<c_uint>(c"arenas.lookup", Some(address))?;
-        read::<usize>(c"arenas.page", None).map(|page_size| page_size as u64)
-    }
-
-    /// Read one `mallctl` value, passing `input` as the new value when the
-    /// name takes one.
-    fn read<T: Copy + Default>(name: &CStr, input: Option<*const c_void>) -> Option<T> {
-        let mut value = T::default();
-        let mut value_len = std::mem::size_of::<T>();
-        let mut input = input;
-        let (new_value, new_len) = match input.as_mut() {
-            Some(address) => (
-                std::ptr::from_mut(address).cast::<c_void>(),
-                std::mem::size_of::<*const c_void>(),
-            ),
-            None => (std::ptr::null_mut(), 0),
-        };
-        // SAFETY: `name` is NUL-terminated, `value` and `value_len` describe
-        // one writable `T`, and `new_value` is null or points at one pointer
-        // that lives across the call. jemalloc only looks the address up in
-        // its extent map; it never dereferences it.
+    pub(super) fn page_size() -> Option<u64> {
+        let mut value = 0usize;
+        let mut value_len = std::mem::size_of::<usize>();
+        // SAFETY: `arenas.page` reads a size_t into the valid output buffer.
+        // The name is NUL-terminated and no input value is supplied.
         let status = unsafe {
             tikv_jemalloc_sys::mallctl(
-                name.as_ptr(),
+                c"arenas.page".as_ptr(),
                 std::ptr::from_mut(&mut value).cast::<c_void>(),
                 &mut value_len,
-                new_value,
-                new_len,
+                std::ptr::null_mut(),
+                0,
             )
         };
-        (status == 0 && value_len == std::mem::size_of::<T>()).then_some(value)
+        (status == 0 && value_len == std::mem::size_of::<usize>()).then_some(value as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn library_reports_system_allocator_without_registration() {
+        assert_eq!(
+            super::inspect(),
+            super::AllocatorReport {
+                name: "system".to_string(),
+                page_size: None,
+            }
+        );
     }
 }
