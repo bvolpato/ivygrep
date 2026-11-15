@@ -6,7 +6,7 @@
       "kind": "quality",
       "label": "Current self-repository retrieval screen",
       "path": "docs/benchmarks/current-head-relevance.json",
-      "publication_commit": "fceb1bccb7ac3a3e028bb01e7de5a493ce85b392"
+      "publication_commit": "a508e25e01f657ee2579f3360acdcef9eaae839c"
     },
     {
       "id": "public-retrieval-baseline",
@@ -69,7 +69,7 @@
       "kind": "portability",
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
-      "publication_commit": "f898466fe9205680a4fa5d1ea765f53003ba80b2"
+      "publication_commit": "be5dce398709498b2aa1e1dda63bea0a02652250"
     }
   ],
   "release_history": "docs/benchmarks/release-artifact-history.json",
