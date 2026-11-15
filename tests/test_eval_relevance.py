@@ -18,6 +18,87 @@ SPEC.loader.exec_module(eval_relevance)
 
 
 class RelevanceEvaluationTest(unittest.TestCase):
+    def test_worktree_measurement_enhances_base_before_overlay(self):
+        case = eval_relevance.QueryCase("base", "find network handling", [
+            eval_relevance.Judgment("src/network.rs", 3),
+        ])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "ig"
+            binary.touch()
+            base = root / "base"
+            overlay = root / "overlay"
+            for mode, enhancement, overlay_chunks in (
+                ("--neural", "--enhance-internal", 1),
+                ("--neural", "--enhance-internal", 0),
+                ("--enhance-hash", "--enhance-hash-internal", 1),
+            ):
+                with self.subTest(mode=mode, overlay_chunks=overlay_chunks):
+                    enhanced = []
+
+                    def query_output(command, **kwargs):
+                        if "--status" in command:
+                            return json.dumps([
+                                {"root": str(overlay), "base_repo_root": str(base),
+                                 "chunk_count": overlay_chunks,
+                                 "has_neural_vectors": overlay_chunks > 0 and overlay in enhanced},
+                                {"root": str(base), "base_repo_root": None,
+                                 "chunk_count": 1, "has_neural_vectors": base in enhanced},
+                            ])
+                        if enhancement in command:
+                            enhanced.append(Path(command[-1]))
+                            return "[]"
+                        if "--add" in command:
+                            return "[]"
+                        path = "src/network.rs" if enhanced == [base, overlay] else "wrong.rs"
+                        return json.dumps([{
+                            "file_path": path,
+                            "hits": [{"sources": ["neural"], "neural_executed": True}],
+                        }])
+
+                    arguments = [
+                        "eval_relevance", "--repo", str(overlay), "--binary", str(binary),
+                        "--skip-build", mode, "--json", "--no-audit-recall",
+                    ]
+                    output = io.StringIO()
+                    with mock.patch.object(sys, "argv", arguments), \
+                         mock.patch.object(eval_relevance, "load_cases", return_value=[case]), \
+                         mock.patch.object(eval_relevance, "run", side_effect=query_output), \
+                         contextlib.redirect_stdout(output):
+                        self.assertEqual(eval_relevance.main(), 0)
+                    self.assertEqual(json.loads(output.getvalue())["mean_mrr"], 1.0)
+                    self.assertEqual(enhanced, [base, overlay])
+
+    def test_neural_measurement_rejects_missing_vectors_in_either_worktree_layer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "ig"
+            binary.touch()
+            base = root / "base"
+            overlay = root / "overlay"
+            for missing in (base, overlay):
+                with self.subTest(missing=missing.name):
+                    def query_output(command, **kwargs):
+                        if "--status" in command:
+                            return json.dumps([
+                                {"root": str(overlay), "base_repo_root": str(base),
+                                 "chunk_count": 1, "has_neural_vectors": missing != overlay},
+                                {"root": str(base), "base_repo_root": None,
+                                 "chunk_count": 1, "has_neural_vectors": missing != base},
+                            ])
+                        return "[]"
+
+                    arguments = [
+                        "eval_relevance", "--repo", str(overlay), "--binary", str(binary),
+                        "--skip-build", "--neural", "--json", "--no-audit-recall",
+                    ]
+                    with mock.patch.object(sys, "argv", arguments), \
+                         mock.patch.object(eval_relevance, "load_cases", return_value=[]), \
+                         mock.patch.object(eval_relevance, "run", side_effect=query_output), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        with self.assertRaisesRegex(SystemExit, f"no neural vectors.*{missing}"):
+                            eval_relevance.main()
+
     def test_candidate_audit_finds_deep_results_without_changing_final_ranks(self):
         case = eval_relevance.QueryCase("coverage", "find network handling", [
             eval_relevance.Judgment("src/network.rs", 3),
@@ -26,7 +107,9 @@ class RelevanceEvaluationTest(unittest.TestCase):
 
         def query_output(command, **kwargs):
             if "--status" in command:
-                return '[{"has_neural_vectors": true}]'
+                return json.dumps([{
+                    "root": temporary, "chunk_count": 1, "has_neural_vectors": True,
+                }])
             if "--add" in command or "--enhance-internal" in command:
                 return "[]"
             paths = ["src/network.rs"]

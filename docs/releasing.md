@@ -78,3 +78,7 @@ CUDA compilation or CPU fallback is not GPU execution evidence. Do not advertise
 CUDA execution without a result from a CUDA device or runner. The strict Metal
 job must name the actual Metal backend. QEMU/musl, native Windows, and native
 ARM checks should refer to the final source, not an earlier release binary.
+
+The [v1.3.4 CUDA device report](benchmarks/cuda-validation.md) records strict
+enhancement and retrieval on an RTX 5070 Ti using the verified published archive.
+Repeat this validation for a new archive before claiming device execution for it.

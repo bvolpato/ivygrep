@@ -81,6 +81,21 @@ def run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> str:
     return result.stdout
 
 
+def indexed_workspace_layers(status: str, repo: Path) -> list[dict[str, Any]]:
+    workspaces = {Path(ws["root"]).resolve(): ws for ws in json.loads(status)}
+    matching = [root for root in workspaces if repo.is_relative_to(root)]
+    if not matching:
+        raise SystemExit(f"status has no indexed workspace for {repo}")
+    selected = workspaces[max(matching, key=lambda root: len(root.parts))]
+    layers = [selected]
+    if base_root := selected.get("base_repo_root"):
+        base = workspaces.get(Path(base_root).resolve())
+        if base is None:
+            raise SystemExit(f"status has no indexed worktree base at {base_root}")
+        layers.insert(0, base)
+    return layers
+
+
 def load_cases(path: Path) -> list[QueryCase]:
     raw = json.loads(path.read_text())
     cases = []
@@ -322,35 +337,33 @@ def main() -> int:
             env=env,
         )
 
-        if args.enhance_hash:
-            run(
-                [str(binary), "--enhance-hash-internal", str(repo)],
-                cwd=REPO_ROOT,
-                env=env,
+        if args.enhance_hash or args.neural:
+            layers = indexed_workspace_layers(
+                run([str(binary), "--status", "--json"], cwd=REPO_ROOT, env=env),
+                repo,
             )
-        elif args.neural:
-            # Build neural vectors up front (foreground, no daemon) so the query
-            # path actually exercises them. Without this the queries run before
-            # background enhancement exists, silently measuring the hash
-            # fallback instead of the neural relevance we intend to gate on.
-            run(
-                [str(binary), "--enhance-internal", str(repo)],
-                cwd=REPO_ROOT,
-                env=env,
+            enhancement = "--enhance-internal" if args.neural else "--enhance-hash-internal"
+            # A worktree stores only changed chunks. Its inherited chunks need
+            # vectors in the base before the overlay is ready for measurement.
+            for workspace in layers:
+                run(
+                    [str(binary), enhancement, workspace["root"]],
+                    cwd=REPO_ROOT,
+                    env=env,
+                )
+        if args.neural:
+            layers = indexed_workspace_layers(
+                run([str(binary), "--status", "--json"], cwd=REPO_ROOT, env=env),
+                repo,
             )
-            # Confirm neural vectors actually exist so a future fallback cannot
-            # be reported as neural relevance. Fail loudly.
-            status = run(
-                [str(binary), "--status", "--json"], cwd=REPO_ROOT, env=env
-            )
-            try:
-                workspaces = json.loads(status)
-            except json.JSONDecodeError:
-                workspaces = []
-            if not any(ws.get("has_neural_vectors") for ws in workspaces):
+            missing = [
+                workspace["root"] for workspace in layers
+                if workspace["chunk_count"] > 0 and not workspace.get("has_neural_vectors")
+            ]
+            if missing or not any(ws.get("has_neural_vectors") for ws in layers):
                 raise SystemExit(
                     "--neural requested but no neural vectors were built for "
-                    f"{repo} (neural model unavailable?). Refusing to report the "
+                    f"{', '.join(missing) or str(repo)} (neural model unavailable?). Refusing to report the "
                     "hash fallback as 'neural'."
                 )
 

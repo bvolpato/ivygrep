@@ -4,6 +4,24 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-11-15
+
+### Fixed
+
+- Relevance benchmarks enhance both the shared base and overlay when run from a Git worktree. Neural validation rejects a nonempty layer without neural vectors instead of accepting a partially enhanced workspace.
+
+### Security
+
+- Publish [GHSA-mj3g-6xpm-xqcr](https://github.com/bvolpato/ivygrep/security/advisories/GHSA-mj3g-6xpm-xqcr) for authenticated Web searches that could register an untracked directory. The fix first shipped in v1.3.3 and remains included. Earlier versions should upgrade; v1.3.1 is the reproduced affected version, not an established introduction boundary.
+
+### Documentation
+
+- Clarify that WinGet updates are submitted separately from GitHub releases and point Windows users to the release installer when they need the latest published version.
+
+### Validation
+
+- Document actual CUDA enhancement and semantic retrieval on an RTX 5070 Ti using the signed v1.3.4 release archive and the general MiniLM profile, with CPU fallback disallowed. The [validation report](docs/benchmarks/cuda-validation.md) records artifact identity, reproduction steps, and hardware limits.
+
 ## [1.3.4] - 2026-11-12
 
 ### Fixed
