@@ -82,6 +82,9 @@ winget install --id BrunoVolpato.ivygrep --exact
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
+WinGet updates are submitted separately and can lag GitHub releases. Use the
+Windows release installer above when you need the latest published version.
+
 Installers select a compatible archive, verify its SHA-256 checksum, and install `ig`.
 The shell installer selects a Metal build on Apple Silicon. It selects CUDA
 only on Linux x86_64 when an NVIDIA GPU with compute capability 8.0 or newer is
