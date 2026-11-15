@@ -4,6 +4,19 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-11-15
+
+This release includes all changes prepared for the unpublished v1.3.5 tag.
+
+### Fixed
+
+- Allocator inspection uses the allocator selected by the binary instead of asking jemalloc to inspect memory allocated by another allocator. This prevents a possible segmentation fault in musl library tests while preserving the shipped allocator and page-size checks.
+- Relevance benchmarks enhance and validate both the shared base and overlay of a Git worktree.
+
+### Security and validation
+
+- Include the published Web workspace advisory, CUDA validation report, updated Windows installation guidance, and external retrieval evidence prepared for v1.3.5. The Web security fix first shipped in v1.3.3.
+
 ## [1.3.5] - 2026-11-15
 
 ### Fixed
