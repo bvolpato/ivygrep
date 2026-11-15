@@ -21,6 +21,7 @@ All notable changes to ivygrep are documented in this file.
 ### Validation
 
 - Document actual CUDA enhancement and semantic retrieval on an RTX 5070 Ti using the signed v1.3.4 release archive and the general MiniLM profile, with CPU fallback disallowed. The [validation report](docs/benchmarks/cuda-validation.md) records artifact identity, reproduction steps, and hardware limits.
+- Refresh the [external file-localization benchmark](docs/benchmarks/file-localization.md) on v1.3.5 with lexical, hash, and default routing with neural vectors prepared. The report includes the top-1 gains, top-5 losses, and unchanged context-pack recall relative to the November 5 snapshot.
 
 ## [1.3.4] - 2026-11-12
 

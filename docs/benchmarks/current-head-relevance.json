@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "fe7cb0e9396aa0184681526666149c196d3066ce204cbd1589156636f85f6189"
   },
-  "ivygrep_commit": "e146a71dfb5fe07056ed97baefe698c711877261",
+  "ivygrep_commit": "7c9fd25e1aecb3d5c135bc28e5e612b264dfd20f",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -26,7 +26,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 3949.75859799888,
+      "elapsed_ms": 3963.4803030639887,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -291,7 +291,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 4735.825272044167,
+      "elapsed_ms": 4609.124697977677,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -556,7 +556,7 @@
       "candidate_budget_misses": [],
       "candidate_recall_audited": true,
       "candidate_recall_misses": [],
-      "elapsed_ms": 10631.961361970752,
+      "elapsed_ms": 11326.836021034978,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
