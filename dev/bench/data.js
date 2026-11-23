@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795164136111,
+  "lastUpdate": 1795392848253,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -79598,6 +79598,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2430.95,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d17fdcaa43db8b1df249300375e74cff1ca00440",
+          "message": "Bump the cargo group with 5 updates (#486)\n\n* Bump the cargo group with 5 updates\n\nBumps the cargo group with 5 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [notify](https://github.com/notify-rs/notify) | `8.2.1` | `8.2.2` |\n| [rusqlite](https://github.com/rusqlite/rusqlite) | `0.41.1` | `0.43.0` |\n| [uuid](https://github.com/uuid-rs/uuid) | `1.29.1` | `1.29.2` |\n| [tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala) | `0.26.9` | `0.26.13` |\n| [zstd](https://github.com/gyscos/zstd-rs) | `0.14.3` | `0.14.4` |\n\n\nUpdates `notify` from 8.2.1 to 8.2.2\n- [Release notes](https://github.com/notify-rs/notify/releases)\n- [Changelog](https://github.com/notify-rs/notify/blob/notify-8.2.2/CHANGELOG.md)\n- [Commits](https://github.com/notify-rs/notify/compare/notify-8.2.1...notify-8.2.2)\n\nUpdates `rusqlite` from 0.41.1 to 0.43.0\n- [Release notes](https://github.com/rusqlite/rusqlite/releases)\n- [Changelog](https://github.com/rusqlite/rusqlite/blob/master/Changelog.md)\n- [Commits](https://github.com/rusqlite/rusqlite/compare/v0.41.1...v0.43.0)\n\nUpdates `uuid` from 1.29.1 to 1.29.2\n- [Release notes](https://github.com/uuid-rs/uuid/releases)\n- [Commits](https://github.com/uuid-rs/uuid/compare/v1.29.1...v1.29.2)\n\nUpdates `tree-sitter-scala` from 0.26.9 to 0.26.13\n- [Release notes](https://github.com/tree-sitter/tree-sitter-scala/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-scala/compare/v0.26.9...v0.26.13)\n\nUpdates `zstd` from 0.14.3 to 0.14.4\n- [Release notes](https://github.com/gyscos/zstd-rs/releases)\n- [Commits](https://github.com/gyscos/zstd-rs/compare/v0.14.3...v0.14.4)\n\n---\nupdated-dependencies:\n- dependency-name: notify\n  dependency-version: 8.2.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: rusqlite\n  dependency-version: 0.43.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: uuid\n  dependency-version: 1.29.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tree-sitter-scala\n  dependency-version: 0.26.13\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: zstd\n  dependency-version: 0.14.4\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* [fix] Bump url to 2.5.9 to resolve RUSTSEC-2026-0592\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: Bruno Volpato <brunocvcunha@gmail.com>",
+          "timestamp": "2026-11-22T18:29:32-05:00",
+          "tree_id": "8a4e863c8d8cf07e902e0e06035a6e6e521621db",
+          "url": "https://github.com/bvolpato/ivygrep/commit/d17fdcaa43db8b1df249300375e74cff1ca00440"
+        },
+        "date": 1795392847842,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 49403.76,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 4789.35,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 66544.96,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 216383.97,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 13.75,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 2126.86,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1706,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 3045.61,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 3209.62,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.64,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 111.07,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 5931.78,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1773.64,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 2009.11,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3570.94,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 4036.6,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 4847.5,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 714.95,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 4890.42,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 274372.85,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 181.64,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 262568.78,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 22948.69,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 102565.16,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 325.3,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2987.31,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 228.98,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 423.65,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 3284.03,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 69.26,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 377.78,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 1680.02,
             "unit": "µs"
           }
         ]
