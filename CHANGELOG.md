@@ -7,10 +7,13 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 
 - C and C++ symbol lookups return definitions only. A mention such as `struct node *next` no longer counts as a definition of `node`, so a common type no longer hides its own definition. `typedef` and `using` names and C++ unions are found.
-- C++ classes and methods in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
+- C++ and Objective-C declarations in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
 - Several definitions on one line, such as `int getA() { ... } int getB() { ... }`, are all found.
 - Python module docstrings and imports no longer register words such as `provides` or `import` as symbols.
 - Previews of exact symbol hits show the definition line when a multi-line decorator or annotation precedes it.
+- R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
+- A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
+- A source file of unmatched punctuation no longer takes minutes to index.
 - Index format v31 rebuilds existing indexes once to pick up the symbol and chunking changes above.
 
 ## [1.3.6] - 2026-11-15

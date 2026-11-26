@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use rusqlite::{Connection, params, types::ToSql};
 use sha2::{Digest, Sha256};
 
@@ -1778,6 +1779,9 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
 
     // Skips comments and annotations, including multi-line ones.
     let signature = &chunk.text[first_code_line_range(&chunk.text, &chunk.language)?];
+    if let Some(name) = language_definition_name(signature, &chunk.language) {
+        return name.map(str::to_string);
+    }
 
     let keywords: &[&str] = match chunk.kind.as_str() {
         "Function" | "function" => &["fn", "def", "func", "function", "fun"],
@@ -1811,6 +1815,35 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
         allow_function_fallback,
         require_type_alias_assignment,
     )
+}
+
+/// Definition names that the generic keyword scan cannot read. The outer `None`
+/// leaves the line to that scan.
+fn language_definition_name<'a>(line: &'a str, language: &str) -> Option<Option<&'a str>> {
+    static R: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"^[`"']?([\w.]+)[`"']?\s*(?:<<?-|=)\s*function\b"#).expect("valid R regex")
+    });
+    static POWERSHELL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(?:function|filter)\s+(?:\w+:)?([\w-]+)").expect("valid PowerShell regex")
+    });
+    static CLOJURE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"^\(def(?:n-?|macro|method|multi|type|record|protocol)\s+(?:\^(?:\{[^}]*\}|\S+)\s+)*([^\s()\[\]{}"]+)"#,
+        )
+        .expect("valid Clojure regex")
+    });
+    let (pattern, exclusive) = match language.to_ascii_lowercase().as_str() {
+        "r" => (&*R, true),
+        "clojure" => (&*CLOJURE, true),
+        // Classes keep the generic scan.
+        "powershell" => (&*POWERSHELL, false),
+        _ => return None,
+    };
+    let name = pattern
+        .captures(line.trim())
+        .and_then(|captures| captures.get(1))
+        .map(|name| name.as_str());
+    (exclusive || name.is_some()).then_some(name)
 }
 
 /// Chunk windows after the first carry a `// continuation of ...` header.
@@ -1904,13 +1937,20 @@ fn heuristic_definition_names(chunk: &IndexedChunk) -> Vec<String> {
                 }),
             );
         }
-    } else {
-        names.extend(definition_name(chunk));
+    } else if let Some(name) = definition_name(chunk) {
+        // `print.order` is found by its full name and as `order` of `print`.
+        if chunk.language.eq_ignore_ascii_case("r")
+            && let Some((_, leaf)) = name.rsplit_once('.')
+            && !leaf.is_empty()
+        {
+            names.push(leaf.to_string());
+        }
+        names.push(name);
     }
     names
 }
 
-pub(crate) fn likely_definition_names(text: &str) -> Vec<String> {
+pub(crate) fn likely_definition_names(text: &str, language: &str) -> Vec<String> {
     const KEYWORDS: &[&str] = &[
         "fn",
         "def",
@@ -1927,7 +1967,10 @@ pub(crate) fn likely_definition_names(text: &str) -> Vec<String> {
     ];
     let mut seen = HashSet::new();
     text.lines()
-        .filter_map(|line| definition_name_from_signature(line.trim(), KEYWORDS, false, false))
+        .filter_map(|line| match language_definition_name(line, language) {
+            Some(name) => name.map(str::to_string),
+            None => definition_name_from_signature(line.trim(), KEYWORDS, false, false),
+        })
         .filter(|name| seen.insert(normalize_symbol(name)))
         .collect()
 }
@@ -2230,6 +2273,53 @@ mod tests {
             is_ignored: false,
             definitions: None,
         }
+    }
+
+    #[test]
+    fn extracts_definition_names_of_languages_without_a_keyword_before_the_name() {
+        for (language, text, expected) in [
+            (
+                "r",
+                "compute_mean <- function(values) {",
+                &["compute_mean"][..],
+            ),
+            ("r", "my_function = function(x) x", &["my_function"]),
+            (
+                "r",
+                "print.order <- function(x, ...) {",
+                &["order", "print.order"],
+            ),
+            ("r", "lapply(x, FUN = function(i) {", &[]),
+            ("r", "result <- function_call(x)", &[]),
+            ("powershell", "function Get-Stock {", &["Get-Stock"]),
+            (
+                "powershell",
+                "Function script:Set-Stock($Name) {",
+                &["Set-Stock"],
+            ),
+            ("powershell", "filter Select-Even { $_ }", &["Select-Even"]),
+            ("clojure", "(defn parse-order [raw]", &["parse-order"]),
+            (
+                "clojure",
+                "(defn- ^{:doc \"Parses.\"} ^String hidden [x] x)",
+                &["hidden"],
+            ),
+            ("clojure", "(default-handler x)", &[]),
+        ] {
+            assert_eq!(
+                definition_names(&chunk(language, "Function", text)),
+                expected,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            definition_names(&chunk("powershell", "Class", "class Stock {")),
+            ["Stock"]
+        );
+        assert_eq!(
+            likely_definition_names("function Set-Stock {\n}\n", "powershell"),
+            ["Set-Stock"]
+        );
     }
 
     #[test]

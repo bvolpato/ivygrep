@@ -320,8 +320,12 @@ Format v31 rebuilds once so a C or C++ type mention such as `struct node *next`
 no longer registers a definition or gets its own chunk; `typedef` and `using`
 names at file or namespace scope and C++ unions register symbols; several
 definitions on one line all register; Python module text and imports, and C++
-destructors and operators, register none; and `.h` files with C++ syntax use the
-C++ grammar. They keep the language name `c`.
+destructors and operators, register none; and `.h` files with C++ or Objective-C
+syntax use the grammar of that language. They keep the language name `c`. R,
+PowerShell, and Clojure functions register their complete names, and a byte-order
+mark does not hide the first line from the line heuristics. Query matching has
+the CPU allowance of the parse budget, so a tree with very many unnamed siblings
+falls back to heuristic chunks.
 
 ## Search pipeline
 
