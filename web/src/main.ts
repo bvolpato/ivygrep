@@ -6,6 +6,7 @@ import {
   LOAD_MORE_STEP,
   MAX_LIMIT,
   createInitialState,
+  initialSelection,
   readBoot
 } from "./app-types";
 import { workspaceMeta } from "./workspace-status";
@@ -14,6 +15,7 @@ import type {
   CopyFormat,
   CopyScope,
   SearchHit,
+  SearchMetadata,
   SearchPayload,
   TreeEntry,
   TreePayload,
@@ -26,7 +28,8 @@ import { languageIconForPath } from "./language-icons";
 import {
   isMarkdownPath,
   renderSnippet,
-  sourceBadges
+  sourceBadges,
+  workspaceLink
 } from "./render-utils";
 import "./styles.css";
 import {
@@ -35,13 +38,14 @@ import {
   escapeHtml,
   fileExtension,
   hitKey,
-  isWithin,
   parentPath,
   pathText,
   pathWithBreaks,
-  relativeWithin,
   samePath,
-  shortPath
+  searchQuery,
+  shortPath,
+  uniqueHits,
+  workspaceForPath
 } from "./ui-utils";
 
 const logoUrl = new URL("./assets/ivygrep-icon.svg", import.meta.url).href;
@@ -49,7 +53,8 @@ const boot = readBoot();
 const queryParams = new URLSearchParams(location.search);
 const fileRequests = new LatestRequestGuard();
 const treeRequests = new LatestRequestGuard();
-const state = createInitialState(queryParams.get("workspace") || boot.workspace || "");
+const initial = initialSelection(location.search, boot);
+const state = createInitialState(initial.workspace);
 
 function svgIcon(name: "folder" | "file" | "up"): string {
   if (name === "folder") {
@@ -185,12 +190,17 @@ async function loadStatus(): Promise<void> {
 
 function resolveRequestedWorkspace(): void {
   if (!state.requestedWorkspace) return;
-  const requested = state.requestedWorkspace;
-  const match = state.workspaces.find((ws) => isWithin(requested, ws.root));
+  const match = workspaceForPath(state.workspaces, state.requestedWorkspace);
+  // Refresh selects an untracked path after `ig --add`.
   if (!match) return;
   state.workspace = match.root;
-  state.scope = relativeWithin(requested, match.root);
+  state.scope = match.scope;
   state.requestedWorkspace = "";
+}
+
+/** Requested path of a URL with a query, until it is tracked. Its search must not use other workspaces. */
+function untrackedSearchPath(): string {
+  return initial.query ? state.requestedWorkspace : "";
 }
 
 function renderWorkspaces(): void {
@@ -204,7 +214,7 @@ function renderWorkspaces(): void {
     if (!filter || haystack.includes(filter)) root.appendChild(workspaceButton(ws, label));
   }
   for (const button of root.querySelectorAll<HTMLButtonElement>(".workspace")) {
-    const active = button.dataset.workspace === state.workspace;
+    const active = !untrackedSearchPath() && button.dataset.workspace === state.workspace;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   }
@@ -220,20 +230,21 @@ function workspaceButton(ws: WorkspaceStatus, label: string): HTMLButtonElement 
   button.addEventListener("click", () => {
     cancelSearch();
     fileRequests.cancel();
+    state.requestedWorkspace = "";
     state.workspace = ws.root;
     state.scope = "";
     syncUrlState();
     renderWorkspaces();
     updateScopeLabel();
-    void loadTree(".")
-      .then(refreshSearchIfQuery)
-      .catch((err: Error) => setStatus(err.message));
+    // Without a query, this removes the results of the previous workspace.
+    void loadTree(".").then(() => runSearch());
   });
   return button;
 }
 
 async function loadTree(path = "."): Promise<void> {
   const tree = byId("tree");
+  state.scopeIsFile = false;
   if (state.workspace === ALL_WORKSPACES) {
     treeRequests.cancel();
     tree.innerHTML = '<div class="empty">Select one workspace to browse files.</div>';
@@ -243,9 +254,11 @@ async function loadTree(path = "."): Promise<void> {
   try {
     const payload = await fetchTree(state.workspace, path, signal);
     if (!treeRequests.isCurrent(signal)) return;
+    state.scopeIsFile = Boolean(payload.is_file);
     renderTree(payload);
   } catch (error) {
-    if (treeRequests.isCurrent(signal)) throw error;
+    // A search does not need the tree.
+    if (treeRequests.isCurrent(signal)) tree.innerHTML = `<div class="empty">${escapeHtml((error as Error).message)}</div>`;
   }
 }
 
@@ -266,6 +279,10 @@ function renderTree(payload: TreePayload): void {
     return;
   }
   for (const row of rows) tree.appendChild(row);
+  const hidden = (payload.total || 0) - (payload.entries?.length || 0);
+  if (hidden > 0) {
+    tree.insertAdjacentHTML("beforeend", `<div class="empty">${countText(hidden, "more entry", "more entries")} not shown.</div>`);
+  }
 }
 
 function treeButton(entry: TreeEntry, kind: "parent" | "folder" | "file", active = false): HTMLButtonElement {
@@ -285,9 +302,7 @@ function treeButton(entry: TreeEntry, kind: "parent" | "folder" | "file", active
       state.scope = pathText(entry.path);
       updateScopeLabel();
       syncUrlState();
-      void loadTree(state.scope || ".")
-        .then(refreshSearchIfQuery)
-        .catch((err: Error) => setStatus(err.message));
+      void loadTree(state.scope || ".").then(refreshSearchIfQuery);
     } else {
       state.manualOpen = true;
       void openFilePath(entry.path, 1, 1, state.workspace, "").catch((err: Error) => setStatus(err.message));
@@ -302,15 +317,20 @@ function updateScopeLabel(): void {
 }
 
 function cancelSearch(): void {
+  if (state.searching) {
+    byId("summary").textContent = "Search cancelled.";
+    setStatus("Ready");
+  }
   state.events?.close();
   state.events = null;
   setSearching(false);
 }
 
 function runSearch(options: { preserveSelection?: boolean } = {}): void {
-  const q = byId<HTMLTextAreaElement>("query").value.trim();
+  const q = currentQuery();
   if (!options.preserveSelection) fileRequests.cancel();
   cancelSearch();
+  syncUrlState();
   if (!q) {
     state.hits = [];
     state.contextPack = null;
@@ -323,6 +343,16 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     byId("results").innerHTML = '<div class="empty">Enter a query to search tracked workspaces.</div>';
     return;
   }
+  const untracked = untrackedSearchPath();
+  if (untracked) {
+    state.hits = [];
+    state.contextPack = null;
+    state.pinnedHitKeys.clear();
+    updateCopyAvailability();
+    byId("summary").textContent = `${untracked} is not tracked.`;
+    byId("results").innerHTML = '<div class="empty">To index this directory, run <code>ig --add .</code> in it and select Refresh. To search other indexes, select them under Workspaces.</div>';
+    return;
+  }
   if (byId<HTMLSelectElement>("mode").value === "context" && state.workspace === ALL_WORKSPACES) {
     state.hits = [];
     state.contextPack = null;
@@ -333,8 +363,15 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     byId("results").innerHTML = '<div class="empty">Select one workspace to build context from its files, Git changes, and relationships.</div>';
     return;
   }
-  syncUrlState();
   state.searchErrors = [];
+  const search: SearchMetadata = {
+    query: q,
+    workspace: state.workspace,
+    scope: state.scope,
+    mode: byId<HTMLSelectElement>("mode").value,
+    limit: currentLimit()
+  };
+  state.search = search;
   if (options.preserveSelection) {
     state.manualOpen = true;
     state.autoOpenKey = state.currentHitKey;
@@ -363,7 +400,10 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     params.set("since", byId<HTMLInputElement>("since").value || "");
     params.set("budget_tokens", byId<HTMLInputElement>("budget").value || "8000");
   }
-  if (state.workspace !== ALL_WORKSPACES && state.scope) params.set("scope", state.scope);
+  if (state.workspace !== ALL_WORKSPACES && state.scope) {
+    params.set("scope", state.scope);
+    params.set("scope_is_file", String(state.scopeIsFile));
+  }
   const events = connectSearchStream(params, () => state.events, {
     onStatus: () => setStatus("Searching"),
     onResults: renderResults,
@@ -377,14 +417,27 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
       state.events?.close();
       state.events = null;
       setSearching(false);
-      setStatus("Search connection closed");
+      void reportLostStream(search);
     }
   });
   state.events = events;
 }
 
+/** An event stream hides the reason of its failure. The status API reports it. */
+async function reportLostStream(search: SearchMetadata): Promise<void> {
+  let reason = "Search connection closed";
+  try {
+    await fetchStatus();
+  } catch (error) {
+    reason = error instanceof TypeError ? "The ivygrep server does not answer. Run `ig --web` again." : (error as Error).message;
+  }
+  if (state.search !== search || state.searching) return;
+  setStatus(reason);
+  byId("summary").textContent = reason;
+}
+
 function refreshSearchIfQuery(): void {
-  if (byId<HTMLTextAreaElement>("query").value.trim()) runSearch();
+  if (currentQuery()) runSearch();
 }
 
 function renderResults(payload: SearchPayload): void {
@@ -395,7 +448,7 @@ function renderResults(payload: SearchPayload): void {
     state.currentHitKey = "";
     setSearching(false);
     byId("summary").textContent = payload.error;
-    byId("results").innerHTML = `${warningMarkup(payload.warnings || [])}<div class="empty">${escapeHtml(payload.error)}</div>`;
+    byId("results").innerHTML = `${warningMarkup(payload.warnings)}<div class="empty">${escapeHtml(payload.error)}</div>`;
     return;
   }
   state.searchErrors = payload.errors || [];
@@ -403,7 +456,8 @@ function renderResults(payload: SearchPayload): void {
     renderContextPack(payload.context_pack, Number(payload.elapsed_ms || 0), payload.warnings || []);
     return;
   }
-  const hits = payload.hits || [];
+  const returnedHits = payload.hits?.length || 0;
+  const hits = uniqueHits(payload.hits || []);
   state.contextPack = null;
   state.hits = hits;
   pruneResultKeySets();
@@ -417,12 +471,14 @@ function renderResults(payload: SearchPayload): void {
   byId("summary").textContent = `${countText(hits.length, "hit")} in ${Number(payload.elapsed_ms || 0).toFixed(1)} ms${errorSummary}${warningSummary}`;
   if (!hits.length) {
     state.currentHitKey = "";
-    byId("results").innerHTML = `${warningMarkup(payload.warnings || [])}<div class="empty">No hits. Try a broader query, fewer filters, or a different search mode.</div>`;
+    byId("results").innerHTML = `${warningMarkup(payload.warnings)}<div class="empty">No hits. Try a broader query, fewer filters, or a different search mode.</div>`;
     updateResultRows();
     return;
   }
   const root = byId("results");
-  root.innerHTML = warningMarkup(payload.warnings || []);
+  root.innerHTML = warningMarkup(payload.warnings);
+  const moreHits = new Map(Object.entries(payload.more_hits_in_file || {}));
+  const lastHitOfFile = new Map(hits.map((hit) => [hit.file_path, hit]));
   for (const hit of hits) {
     const item = document.createElement("article");
     const key = hitKey(hit);
@@ -442,6 +498,10 @@ function renderResults(payload: SearchPayload): void {
         </div>
       </div>
       <pre class="snippet hljs">${renderSnippet(hit, byId<HTMLTextAreaElement>("query").value)}</pre>`;
+    const more = moreHits.get(hit.file_path);
+    if (more && lastHitOfFile.get(hit.file_path) === hit) {
+      item.insertAdjacentHTML("beforeend", `<div class="context-why">${countText(more, "more match", "more matches")} in this file</div>`);
+    }
     const hitMain = item.querySelector<HTMLButtonElement>(".hit-main");
     if (key === state.currentHitKey) hitMain?.setAttribute("aria-current", "true");
     hitMain?.addEventListener("click", () => selectHit(hit));
@@ -451,7 +511,7 @@ function renderResults(payload: SearchPayload): void {
     });
     root.appendChild(item);
   }
-  if (canLoadMore(hits.length)) root.appendChild(loadMoreButton(hits.length));
+  if (canLoadMore(returnedHits)) root.appendChild(loadMoreButton(hits.length));
   const first = hits[0];
   const firstKey = hitKey(first);
   if (!state.manualOpen && state.autoOpenKey !== firstKey) {
@@ -536,10 +596,12 @@ function renderContextPack(bundle: ContextBundle, elapsedMs: number, warnings: s
   }
 }
 
-function warningMarkup(warnings: string[]): string {
+function warningMarkup(warnings: string[] = []): string {
   if (!warnings.length) return "";
+  const partial = state.searchErrors.length > 0 || warnings.some((warning) => warning.includes("partial results"));
+  const title = partial ? "Partial results" : "Warnings";
   const details = warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
-  return `<aside class="search-warnings" role="status" aria-live="polite"><strong>Partial results</strong><ul>${details}</ul></aside>`;
+  return `<aside class="search-warnings" role="status" aria-live="polite"><strong>${title}</strong><ul>${details}</ul></aside>`;
 }
 
 function selectHit(hit: SearchHit): void {
@@ -603,18 +665,12 @@ function updateCopyAvailability(): void {
 async function copyVisibleResults(): Promise<void> {
   const scope = currentCopyScope();
   const hits = copyHits(scope);
-  const text = clipboardText(
+  const text = !state.search ? "" : clipboardText(
     byId<HTMLSelectElement>("copy-format").value as CopyFormat,
     hits,
     state.contextPack,
     scope,
-    {
-      query: byId<HTMLTextAreaElement>("query").value.trim(),
-      workspace: state.workspace,
-      scope: state.scope,
-      mode: byId<HTMLSelectElement>("mode").value,
-      limit: currentLimit()
-    }
+    state.search
   );
   if (!text) {
     setStatus(`No ${scope} results to copy`);
@@ -634,13 +690,18 @@ function copyHits(scope: CopyScope): SearchHit[] {
   return state.hits;
 }
 
+/** Workspace that hit paths are relative to. All-index hits have absolute paths. */
+function hitWorkspace(): string {
+  return !state.search || state.search.workspace === ALL_WORKSPACES ? "" : state.search.workspace;
+}
+
 async function openHit(hit: SearchHit): Promise<void> {
-  const workspace = state.workspace === ALL_WORKSPACES ? "" : state.workspace;
+  const workspace = hitWorkspace();
   await openFilePath(hit.file_path, hit.start_line, hit.end_line, workspace, hitKey(hit));
 }
 
 async function openHitInEditor(hit: SearchHit): Promise<void> {
-  const workspace = state.workspace === ALL_WORKSPACES ? "" : state.workspace;
+  const workspace = hitWorkspace();
   await openPathInEditorApi(hit.file_path, hit.start_line, workspace);
   setStatus(`Opened ${shortPath(hit.file_path)}`);
 }
@@ -660,6 +721,7 @@ async function openFilePath(path: string, start = 1, end = 1, workspace = state.
   try {
     const payload = await fetchFile(workspace, path, signal);
     if (!fileRequests.isCurrent(signal)) return;
+    state.currentFileWorkspace = pathText(payload.workspace);
     state.currentFilePath = pathText(payload.path);
     state.currentFileAbsolutePath = pathText(payload.absolute_path);
     state.currentFileText = payload.text || "";
@@ -718,7 +780,7 @@ function debounce(fn: () => void, delayMs: number): () => void {
 }
 
 function applyInitialParams(): void {
-  byId<HTMLTextAreaElement>("query").value = queryParams.get("q") || boot.query || "";
+  byId<HTMLTextAreaElement>("query").value = initial.query;
   byId<HTMLSelectElement>("mode").value = queryParams.get("mode") || "hybrid";
   byId<HTMLInputElement>("limit").value = queryParams.get("limit") || String(DEFAULT_LIMIT);
   byId<HTMLInputElement>("type").value = queryParams.get("type") || "";
@@ -738,6 +800,10 @@ function updateContextControls(): void {
     : "Search code, symbols, paths";
 }
 
+function currentQuery(): string {
+  return searchQuery(byId<HTMLSelectElement>("mode").value, byId<HTMLTextAreaElement>("query").value);
+}
+
 function currentLimit(): number {
   const parsed = Number.parseInt(byId<HTMLInputElement>("limit").value, 10);
   if (!Number.isFinite(parsed)) return DEFAULT_LIMIT;
@@ -746,7 +812,7 @@ function currentLimit(): number {
 
 function syncUrlState(): void {
   const params = new URLSearchParams();
-  const query = byId<HTMLTextAreaElement>("query").value.trim();
+  const query = currentQuery();
   const mode = byId<HTMLSelectElement>("mode").value;
   const limit = currentLimit();
   const type = byId<HTMLInputElement>("type").value.trim();
@@ -755,7 +821,7 @@ function syncUrlState(): void {
   const since = byId<HTMLInputElement>("since").value.trim();
   const budget = byId<HTMLInputElement>("budget").value.trim();
   if (query) params.set("q", query);
-  if (state.workspace !== ALL_WORKSPACES) params.set("workspace", scopedWorkspacePath());
+  params.set("workspace", untrackedSearchPath() || scopedWorkspacePath());
   if (mode !== "hybrid") params.set("mode", mode);
   if (limit !== DEFAULT_LIMIT) params.set("limit", String(limit));
   if (type) params.set("type", type);
@@ -806,7 +872,11 @@ function attachEvents(): void {
   byId("copy-scope").addEventListener("change", updateCopyAvailability);
   byId("refresh").addEventListener("click", () => {
     cancelSearch();
-    void loadStatus().catch((err: Error) => setStatus(err.message));
+    void loadStatus()
+      .then(() => {
+        if (currentQuery()) runSearch({ preserveSelection: state.hits.length > 0 });
+      })
+      .catch((err: Error) => setStatus(err.message));
   });
   byId("open-current").addEventListener("click", () => {
     void openCurrentInEditor().catch((err: Error) => setStatus(err.message));
@@ -817,9 +887,16 @@ function attachEvents(): void {
     state.scope = "";
     updateScopeLabel();
     syncUrlState();
-    void loadTree(".")
-      .then(refreshSearchIfQuery)
-      .catch((err: Error) => setStatus(err.message));
+    void loadTree(".").then(refreshSearchIfQuery);
+  });
+  byId("file-view").addEventListener("click", (event) => {
+    const href = (event.target as Element).closest("a")?.getAttribute("href");
+    const link = href && workspaceLink(state.currentFilePath, href);
+    if (!link) return;
+    event.preventDefault();
+    if (samePath(link.path, state.currentFilePath)) return;
+    state.manualOpen = true;
+    void openFilePath(link.path, link.line, link.line, state.currentFileWorkspace).catch((err: Error) => setStatus(err.message));
   });
   byId("preview-mode").addEventListener("click", () => {
     state.viewerMode = "preview";
@@ -831,6 +908,7 @@ function attachEvents(): void {
   });
   byId<HTMLTextAreaElement>("query").addEventListener("keydown", (event) => {
     const contextMode = byId<HTMLSelectElement>("mode").value === "context";
+    if (event.isComposing) return;
     if (event.key === "Enter" && (!contextMode || event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       runSearch();
@@ -862,7 +940,5 @@ renderShell();
 attachEvents();
 applyInitialParams();
 void loadStatus()
-  .then(() => {
-    if (byId<HTMLTextAreaElement>("query").value.trim()) runSearch();
-  })
+  .then(refreshSearchIfQuery)
   .catch((err: Error) => setStatus(err.message));

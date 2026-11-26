@@ -2,6 +2,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -28,6 +29,7 @@ class UnixInstallerTest(unittest.TestCase):
             self.fake_bin / "curl",
             """#!/bin/sh
 set -eu
+fail=0
 head=0
 out=""
 url=""
@@ -40,11 +42,9 @@ while [ "$#" -gt 0 ]; do
         -w)
             shift 2
             ;;
-        -*I*)
-            head=1
-            shift
-            ;;
         -*)
+            case "$1" in *f*) fail=1 ;; esac
+            case "$1" in *I*) head=1 ;; esac
             shift
             ;;
         *)
@@ -61,11 +61,17 @@ case "$url" in
 esac
 file=${url##*/}
 src="$IVYGREP_FAKE_RELEASE_DIR/$file"
+if [ "$head" -eq 1 ]; then
+    status=404
+    [ ! -f "$src" ] || status=302
+    status=${IVYGREP_FAKE_HEAD_STATUS:-$status}
+    printf '%s' "$status"
+    [ "$status" != 000 ] || exit 7
+    [ "$fail" -eq 0 ] || [ "$status" -lt 400 ] || exit 22
+    exit 0
+fi
 if [ ! -f "$src" ]; then
     exit 22
-fi
-if [ "$head" -eq 1 ]; then
-    exit 0
 fi
 if [ -z "$out" ]; then
     cat "$src"
@@ -118,6 +124,7 @@ esac
         cuda_runtime: bool = False,
         nvidia_compute: str = "8.6",
         local_archive: Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if nvidia:
             self.write_executable(
@@ -152,6 +159,7 @@ esac
         if local_archive is not None:
             env["IVYGREP_INSTALL_ARCHIVE"] = str(local_archive)
             env["IVYGREP_INSTALL_CHECKSUM"] = f"{local_archive}.sha256"
+        env.update(extra_env or {})
         return subprocess.run(
             ["sh", str(ROOT / "install.sh")],
             cwd=ROOT,
@@ -292,6 +300,106 @@ esac
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ivygrep v9.9.9 linux-x86_64-musl", result.stdout)
+
+    def test_invalid_checksum_sidecar_keeps_the_installed_binary(self) -> None:
+        self.make_archive("macos-x86_64")
+        # Like the macOS sha256sum, "-c" accepts a file without a valid line.
+        self.write_executable(
+            self.fake_bin / "sha256sum",
+            f"""#!/bin/sh
+[ "${{1:-}}" != -c ] || exit 0
+exec "{sys.executable}" -c '
+import hashlib, sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest() + "  -")
+'
+""",
+        )
+        name = f"ivygrep-{TAG}-macos-x86_64.tar.gz"
+        sidecar = self.release_dir / f"{name}.sha256"
+        valid = sidecar.read_text(encoding="utf-8")
+        installed = self.install_dir / "ig"
+        installed.write_text("previous", encoding="utf-8")
+
+        for invalid in (
+            "",
+            "<!doctype html>\n",
+            f"{valid.split()[0][:-1]}  {name}\n",
+            f"{'0' * 64}  {name}\n",
+        ):
+            with self.subTest(sidecar=invalid):
+                sidecar.write_text(invalid, encoding="utf-8")
+                result = self.run_installer(os_name="Darwin", arch="x86_64")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SHA-256 verification failed", result.stderr)
+                self.assertEqual(installed.read_text(encoding="utf-8"), "previous")
+
+        sidecar.write_text(valid.upper(), encoding="utf-8")
+        result = self.run_installer(os_name="Darwin", arch="x86_64")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(installed.read_text(encoding="utf-8"), "previous")
+
+    def test_failed_accelerator_check_is_not_reported_as_missing(self) -> None:
+        self.make_archive("macos-aarch64")
+        self.make_archive("macos-aarch64-metal")
+
+        for status, reason in (("503", "not reachable (HTTP 503)"), ("000", "not reachable")):
+            with self.subTest(status=status):
+                env = {"IVYGREP_FAKE_HEAD_STATUS": status}
+                auto = self.run_installer(os_name="Darwin", arch="arm64", extra_env=env)
+                self.assertEqual(auto.returncode, 0, auto.stderr)
+                self.assertIn(f"Metal archive {reason} for {TAG}", auto.stdout)
+
+                explicit = self.run_installer(
+                    os_name="Darwin", arch="arm64", accelerator="metal", extra_env=env
+                )
+                self.assertNotEqual(explicit.returncode, 0)
+                self.assertIn(
+                    f"requested Metal archive is {reason} for {TAG}", explicit.stderr
+                )
+
+    def test_rosetta_shell_selects_apple_silicon_archive(self) -> None:
+        self.make_archive("macos-x86_64")
+        self.make_archive("macos-aarch64-metal")
+
+        for translated, target in (("1", "macos-aarch64-metal"), ("0", "macos-x86_64")):
+            with self.subTest(translated=translated):
+                self.write_executable(
+                    self.fake_bin / "sysctl", f"#!/bin/sh\necho {translated}\n"
+                )
+                result = self.run_installer(os_name="Darwin", arch="x86_64")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"archive ({target})", result.stdout)
+
+    def test_path_advice_names_the_ig_that_runs(self) -> None:
+        self.make_archive("linux-x86_64-musl")
+        other = self.root / "other"
+        other.mkdir()
+        self.write_executable(other / "ig", "#!/bin/sh\necho other\n")
+        linked = self.root / "linked"
+        linked.mkdir()
+        (linked / "ig").symlink_to(self.install_dir / "ig")
+        base = f"{self.fake_bin}:{os.environ['PATH']}"
+
+        for path, directory, shadowed, add_to_path in (
+            (f"{other}:{self.install_dir}:{base}", self.install_dir, True, False),
+            (f"{self.install_dir}:{other}:{base}", self.install_dir, False, False),
+            (f"{linked}:{self.install_dir}:{base}", self.install_dir, False, False),
+            (f"{self.install_dir}:{base}", f"{self.install_dir}/", False, False),
+            (f"{self.install_dir}/:{base}", self.install_dir, False, False),
+            (f"{other}:{base}", self.install_dir, True, True),
+        ):
+            with self.subTest(path=path, directory=str(directory)):
+                result = self.run_installer(
+                    os_name="Linux",
+                    arch="x86_64",
+                    accelerator="portable",
+                    extra_env={"PATH": path, "IVYGREP_INSTALL_DIR": str(directory)},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                note = f"Another ig comes first on PATH: {other / 'ig'}"
+                self.assertEqual(note in result.stdout, shadowed, result.stdout)
+                self.assertEqual("Another ig" in result.stdout, shadowed, result.stdout)
+                self.assertEqual("to PATH to run" in result.stdout, add_to_path)
 
 
 if __name__ == "__main__":

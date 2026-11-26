@@ -189,6 +189,17 @@ their chunks, graph edges, symbols, lexical documents, and vector keys. In a
 worktree, deletion of a base-backed path is represented by an overlay tombstone;
 see [Worktree overlays](#worktree-overlays).
 
+A regular file that ivygrep has no permission to read does not fail an index
+run. The index keeps the chunks that it has for the file, the run warns with the
+number of such files and the first path, and the snapshot records the file as
+unreadable. Each later run that scans the workspace tries to read it again. Until
+then, the clean-checkout marker is not written. A new or rebuilt worktree overlay
+cannot compare such a file with the base, so it hides the base file. If a scan
+lists a `.gitignore` or `.ignore` file that ivygrep has no permission to read, the
+run fails, because the scan ran without its rules. An unreadable directory, any
+other I/O error, a file replaced by a symlink, and a missing workspace root also
+fail the run.
+
 Watcher events use a targeted refresh only when path-level reconciliation is
 safe. New directories, ignore-file changes, uncertain Git state, and similar
 cases fall back to a full walk. A clean Git workspace whose recorded repository
@@ -205,7 +216,7 @@ complete staged recovery, not a replay of an empty or partial Merkle delta.
 These checks add store-opening/counting work even when source discovery is skipped;
 they do not validate every vector payload or compare concurrent enhancement markers.
 
-The clean-checkout reuse marker also certifies that indexed snapshot paths are Git-tracked and still match live source metadata. For paths with Git content-conversion attributes, the marker includes working-file metadata because Git can report a clean checkout after the on-disk text changes. Older certificates require reconciliation. Explicit watcher paths bypass the shortcut.
+The clean-checkout reuse marker also certifies that indexed snapshot paths are Git-tracked and still match live source metadata, and that the snapshot holds each tracked file that the walker reads. The marker includes the list of tracked paths, submodule files among them, and the tracked directories that are separate checkouts. Initializing a submodule, or a `.git` entry that appears or goes away, therefore reconciles the workspace although HEAD and the Git index do not change. For paths with Git content-conversion attributes, the marker includes working-file metadata because Git can report a clean checkout after the on-disk text changes. Older certificates require reconciliation. Explicit watcher paths bypass the shortcut.
 
 Starting with v1.3.1, CLI searches and context requests, the TUI, and `ig --add`
 ask before building an index for the home directory, a directory containing
@@ -215,12 +226,14 @@ healthy directory does not trigger this prompt. `--force` rebuilds it, while
 `--skip-gitignore` can add ignored files, and both prompt when they target a
 broad root.
 
-Main indexes and overlays mark live publication as incomplete before changing
-stores. The marker survives failures and is cleared only after stores, metadata,
-snapshot, and filter state publish successfully. Main recovery rebuilds in staging;
-no-op Git checks, watcher shortcuts, and base reuse cannot trust an unfinished
-publication. Fresh main builds also mark the interval between store promotion
-and snapshot publication.
+Main indexes and overlays mark live publication as incomplete before their first
+commit. A run that fails before that commit, for example on a read error, leaves
+the index queryable. An update that needs more than one commit first opens all
+its sources. After the first commit, the marker survives failures and is cleared
+only after stores, metadata, snapshot, and filter state publish successfully.
+Main recovery rebuilds in staging; no-op Git checks, watcher shortcuts, and base
+reuse cannot trust an unfinished publication. Fresh main builds also mark the
+interval between store promotion and snapshot publication.
 
 Hash and neural vector deletion journals prevent stale embeddings from becoming
 visible when another store fails. Merkle state is saved only after committed
@@ -1120,7 +1133,7 @@ gets a structured version error from the `Version` probe and restarts it.
 
 Version 10 added file-oriented literal results. Version 11 adds the `hash_only` search option. An older client that omits it keeps automatic model selection. A hash-only request uses hash vectors even if the daemon has a neural model loaded, and it can request only hash vectors from the background queue.
 
-Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Earlier literal output modes retain their behavior.
+Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Web literal searches do the same. Earlier literal output modes retain their behavior.
 
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered
@@ -1216,9 +1229,16 @@ Use the workspace root reported by `/api/status`. File paths and context scopes 
 Loopback is default. Every listener, loopback included, requires a generated
 per-daemon session token: any local user can reach a loopback port. API clients
 may send it as a bearer token. Loopback listeners accept only loopback Host
-names. Content Security Policy, security headers, and request, header, file,
-and concurrency limits apply to every listener. Transport is still plain HTTP;
-remote use requires a trusted network or encrypted tunnel.
+names. An API request is rejected if it has a `Sec-Fetch-Site` header other than
+`same-origin`, or an `Origin` header that does not match Host. A browser that supports
+`Sec-Fetch-Site` sends it to a loopback listener, also for a page on another port of
+the same host. A request with neither header is accepted: scripts and older browsers
+send none, and browsers send `Sec-Fetch-Site` only to trustworthy URLs such as
+loopback. On a plain HTTP listener that is not loopback, a page on another port of the
+same host can therefore start a search with the session cookie. Content Security
+Policy, security headers, and request, header, file, and concurrency limits apply to
+every listener. Transport is still plain HTTP; remote use requires a trusted network
+or encrypted tunnel.
 
 `ig --web` prints the tokenized URL to its own stdout. To open a browser it
 writes an HTML redirect page to the app home's `browser/` directory and passes

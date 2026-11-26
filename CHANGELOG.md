@@ -6,12 +6,42 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
+- The stress fixture download uses its next source when a server requests a long retry delay. Such a delay blocked the scheduled cross-platform run until its time limit, and `E2E Summary` now fails when a platform job is cancelled.
+- `install.sh` names an accelerator archive that it cannot reach instead of reporting it as not available. It also selects the Apple Silicon archive from a shell that runs under Rosetta.
+- `install.sh` reports another `ig` that comes first on `PATH`. It no longer asks to add a directory that is already on `PATH` when `IVYGREP_INSTALL_DIR` ends in `/`.
+- The PowerShell installer keeps its strict mode, error preference, functions, and variables out of the session that runs `irm ... | iex`.
+- `ig --web QUERY FILE` runs the search. A scope that is a file, or a folder that no longer exists, stopped the page before its first search.
+- `ig --web` selects the innermost workspace that contains the path. A repository or worktree inside another tracked workspace opened the outer one and found nothing.
+- `ig --web QUERY PATH` reports a path that is not tracked and shows the `ig --add` command. It searched all other indexes without a notice.
+- Web literal search keeps a hit of every matching file, up to the result limit, beside a file with many matches. It reports the matches it leaves out of listed files.
+- The Web include and exclude filters accept brace alternatives, character classes, and escaped commas. Regex queries keep leading and trailing spaces.
+- The Web UI renders files and Markdown code blocks named like object members, such as `constructor`. One of them emptied the result list or the viewer.
+- Code copied from the Web viewer or from a snippet no longer contains `Line N:` labels, and query highlighting no longer changes characters such as `<`.
+- A Web UI result opens the file in the workspace that produced it after a switch to another workspace. Copied JSON describes the search that produced the results.
+- The Web UI URL keeps "All indices" and an empty query after a reload.
+- Links between workspace files in a Markdown preview open in the viewer. Other links open in a new tab.
+- The Web UI reports why a search failed, for example a lost session, and Refresh runs the query again. Warnings that do not mean partial results have their own title.
+- Identical Web results are shown once, so arrow keys and Pin reach every result. The Enter key of an input method no longer starts a search.
+- The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
+- Malformed Web requests get a 400 or 431 response instead of a closed connection.
+- Search ranks a file such as `src/handler_tests.rs` as a test, like `src/handler_test.rs`. It competed with source files at full weight.
+- A file without read permission no longer fails an index run and no longer makes the workspace unsearchable. ivygrep skips the file with a warning, keeps the chunks that the index has for it, and tries again on the next run. This changes the rule of v1.3.1, where a permission error failed the update. Other I/O errors, an unreadable `.gitignore` or `.ignore` file, a file replaced by a symlink, and a missing workspace root still fail the update, but a failure before the first commit now leaves the index queryable.
+- `ig --add` finds sources that Git status cannot report as changed: the files of a submodule after `git submodule update --init` or `deinit`, a tracked directory that gets or loses its own `.git` entry, and a tracked file that was missing only while the first scan ran. The clean-checkout shortcut kept the older index until the next commit.
+- `ig --add` and `ig --add --force` rebuild an index whose `workspace.json` or `index_incarnation` file is damaged. They stopped with a JSON or UTF-8 error.
+- `ig --doctor` and searches no longer rebuild the index of a directory whose only text files are larger than 16 MiB.
 - A search answers while files in the workspace keep changing. After a daemon start or a first index, steady writes such as a log file kept the watcher in its startup state, and each search waited for the 60-second deadline and returned no results.
 - Concurrent daemon searches no longer remove each other's stores when an index needs a rebuild. `--all-indices` and Web searches could fail or return no results, and the rebuild could turn the watcher of the workspace off.
 - The daemon watches a plain directory again after another directory takes its place, for example after `rm -rf` and an extracted archive. Edits stayed out of search results while `ig --status` showed a live watcher.
 - A daemon that a query starts no longer keeps the standard input and the working directory of that query. `producer | ig QUERY` could wait forever, and a volume could not be ejected.
 - The watcher updates files in a directory named `.ivygrep`, which the indexer already included.
 - A daemon exits within seconds after its app home is deleted or replaced. Such a daemon recreated deleted indexes, and it later removed the socket of the daemon that replaced it.
+
+### Security
+
+- `install.sh` compares SHA-256 digests directly. The `sha256sum -c` of macOS accepts an empty or malformed checksum file, so the installer could install an archive that it did not verify.
+- The Web API rejects requests with a `Sec-Fetch-Site` header other than `same-origin`. A page on another port of the same host, or a redirect, could start searches with the session cookie and add ignored files to an index. Older browsers, and all browsers on a plain HTTP address outside loopback, do not send this header, so the check does not cover them.
+- On macOS, the Web UI opens a file as text when no editor is configured. It used `open`, which runs files such as `.command` scripts.
 
 ## [1.3.6] - 2026-11-15
 

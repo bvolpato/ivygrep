@@ -1252,21 +1252,20 @@ async fn run_add(
 
     ensure_no_nested_workspaces(&workspace.root)?;
 
-    let mut meta =
-        workspace
-            .read_metadata()?
-            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-                id: workspace.id.clone(),
-                root: workspace.root.clone(),
-                created_at_unix: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                last_indexed_at_unix: None,
-                watch_enabled: watch,
-                skip_gitignore,
-                index_generation: 0,
-            });
+    let mut meta = workspace.read_undamaged_metadata()?.unwrap_or_else(|| {
+        crate::workspace::WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_indexed_at_unix: None,
+            watch_enabled: watch,
+            skip_gitignore,
+            index_generation: 0,
+        }
+    });
     meta.watch_enabled = watch;
     meta.skip_gitignore = skip_gitignore;
     workspace.ensure_dirs()?;
