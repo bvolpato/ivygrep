@@ -133,7 +133,8 @@ a path scope. The path keeps a workspace of its own when it is in a Git checkout
 has its own index, or is excluded by ignore rules. It also keeps one while the
 outer index needs a rebuild, so that a search of the path does not start that
 rebuild. The same applies when the path has indexable files and the outer index
-has no file below it yet. The
+has no file below it yet. An index of the home directory, a directory above it, or
+the filesystem root is never used for a path below it. The
 recursive watch still covers nested checkouts; their events are dropped by the
 filter, except for the `.git` entry itself. When a directory whose files are in
 the index gets a `.git` entry (`git init`, or a clone into it), the watcher

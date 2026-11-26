@@ -197,6 +197,9 @@ fn cli_does_not_index_the_home_directory_without_confirmation() {
     let ivygrep_home = tmp.path().join("ivygrep_home");
     std::fs::create_dir_all(&user_home).unwrap();
     std::fs::write(user_home.join("notes.rs"), "pub fn greeting() {}\n").unwrap();
+    let project = user_home.join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("lib.rs"), "pub fn project_fn() {}\n").unwrap();
     // The test has no terminal, so `ig` cannot ask.
     let ig = |args: &[&str]| {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
@@ -235,6 +238,12 @@ fn cli_does_not_index_the_home_directory_without_confirmation() {
     // An existing index of the home directory needs no confirmation.
     ig(&["greeting"]).assert().success().stdout(found);
     ig(&["--add"]).assert().success();
+    // A search of one directory leaves the index of the home directory alone.
+    ig(&["--skip-gitignore", "project_fn", "project"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("lib.rs"));
+    ig(&["--rm", "project"]).assert().success();
     // These rebuild the index, or add the ignored files to it.
     ig(&["--add", "--force"])
         .assert()

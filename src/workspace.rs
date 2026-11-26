@@ -1725,6 +1725,11 @@ fn indexed_plain_ancestor(root: &Path) -> Option<PathBuf> {
             metadata.last_indexed_at_unix.is_some() && root.starts_with(&metadata.root)
         })
         .max_by_key(|(_, metadata)| metadata.root.components().count())?;
+    // A search of one directory must not update, watch, or expand an index of
+    // the home directory or the filesystem root.
+    if crate::cli::is_broad_root(&metadata.root) {
+        return None;
+    }
     let rel_path = root.strip_prefix(&metadata.root).ok()?;
     // By default, a search leaves out ignored files, also when the index has
     // them.

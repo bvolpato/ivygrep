@@ -3100,6 +3100,10 @@ fn current_broad_root(root: &Path) -> Option<BroadRoot> {
     broad_root(root, home.as_deref())
 }
 
+pub(crate) fn is_broad_root(root: &Path) -> bool {
+    current_broad_root(root).is_some()
+}
+
 fn is_affirmative(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
