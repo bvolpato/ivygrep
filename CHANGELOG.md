@@ -4,6 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `ig agent install` and `ig agent doctor` use the configuration file that `CODEX_HOME` or `CLAUDE_CONFIG_DIR` selects. An empty `IVYGREP_AGENT_HOME` no longer writes the file into the current directory.
+- `ig agent install` accepts an empty JSON config, a JSON config with a UTF-8 byte order mark, and an inline `mcp_servers` table in the Codex config. An unreadable config error names the file. `ig agent doctor` fails when a detected client has an invalid config, instead of reporting a healthy setup.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.

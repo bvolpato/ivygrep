@@ -44,8 +44,12 @@ impl AgentClient {
 
     fn config_path(self, home: &Path) -> PathBuf {
         match self {
-            Self::Claude => home.join(".claude.json"),
-            Self::Codex => home.join(".codex").join("config.toml"),
+            Self::Claude => client_config_dir("CLAUDE_CONFIG_DIR")
+                .unwrap_or_else(|| home.to_path_buf())
+                .join(".claude.json"),
+            Self::Codex => client_config_dir("CODEX_HOME")
+                .unwrap_or_else(|| home.join(".codex"))
+                .join("config.toml"),
             Self::Cursor => home.join(".cursor").join("mcp.json"),
         }
     }
@@ -153,6 +157,7 @@ pub fn doctor() -> Result<()> {
         .collect::<Vec<_>>();
 
     let mut configured = 0usize;
+    let mut invalid = Vec::new();
     for status in &clients {
         match (&status.detected_by, &status.config) {
             (Some(detected_by), Ok(true)) => {
@@ -164,11 +169,14 @@ pub fn doctor() -> Result<()> {
                 status.client.label(),
                 status.client.executable_name()
             ),
-            (Some(detected_by), Err(error)) => println!(
-                "✗ {}: detected ({detected_by}), config invalid: {error:#}. Run `ig agent install {}` after fixing malformed config.",
-                status.client.label(),
-                status.client.executable_name()
-            ),
+            (Some(detected_by), Err(error)) => {
+                invalid.push(status.client.label());
+                println!(
+                    "✗ {}: detected ({detected_by}), config invalid: {error:#}. Run `ig agent install {}` after fixing malformed config.",
+                    status.client.label(),
+                    status.client.executable_name()
+                );
+            }
             (None, _) => println!("- {}: not detected", status.client.label()),
         }
     }
@@ -186,15 +194,32 @@ pub fn doctor() -> Result<()> {
         "✓ Real search: {} result(s) in {} ms",
         smoke.result_count, smoke.elapsed_ms
     );
+    if !invalid.is_empty() {
+        bail!("invalid config for {}", invalid.join(", "));
+    }
     println!("Agent setup healthy.");
     Ok(())
 }
 
 fn agent_home() -> Result<PathBuf> {
-    env::var_os("IVYGREP_AGENT_HOME")
-        .map(PathBuf::from)
+    non_empty_env_path("IVYGREP_AGENT_HOME")
         .or_else(dirs::home_dir)
         .context("cannot locate home directory")
+}
+
+/// The configuration directory that a client's own variable selects.
+/// `IVYGREP_AGENT_HOME` names the home of every client and overrides it.
+fn client_config_dir(variable: &str) -> Option<PathBuf> {
+    if non_empty_env_path("IVYGREP_AGENT_HOME").is_some() {
+        return None;
+    }
+    non_empty_env_path(variable)
+}
+
+fn non_empty_env_path(variable: &str) -> Option<PathBuf> {
+    env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Debug)]
@@ -495,10 +520,24 @@ fn write_client_config(
     Ok((path, changed))
 }
 
+fn read_config(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// Parse a JSON config. An empty file is an empty object, and a leading UTF-8
+/// byte order mark is not part of the document.
+fn read_json_config(path: &Path) -> Result<Value> {
+    let bytes = read_config(path)?;
+    let source = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+    if source.trim_ascii().is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    serde_json::from_slice(source).with_context(|| format!("{} is not valid JSON", path.display()))
+}
+
 fn write_json_config(path: &Path, executable: &Path) -> Result<bool> {
     let mut root = if path.exists() {
-        serde_json::from_slice::<Value>(&fs::read(path)?)
-            .with_context(|| format!("{} is not valid JSON", path.display()))?
+        read_json_config(path)?
     } else {
         Value::Object(Map::new())
     };
@@ -530,18 +569,19 @@ fn write_json_config(path: &Path, executable: &Path) -> Result<bool> {
     Ok(true)
 }
 
+fn read_codex_config(path: &Path) -> Result<DocumentMut> {
+    let source = String::from_utf8(read_config(path)?)
+        .with_context(|| format!("{} is not valid UTF-8", path.display()))?;
+    source
+        .parse::<DocumentMut>()
+        .with_context(|| format!("{} is not valid TOML", path.display()))
+}
+
 fn write_codex_config(path: &Path, executable: &Path) -> Result<bool> {
-    let source = if path.exists() {
-        fs::read_to_string(path)?
+    let mut document = if path.exists() {
+        read_codex_config(path)?
     } else {
-        String::new()
-    };
-    let mut document = if source.trim().is_empty() {
         DocumentMut::new()
-    } else {
-        source
-            .parse::<DocumentMut>()
-            .with_context(|| format!("{} is not valid TOML", path.display()))?
     };
     if codex_document_matches(&document, executable) {
         return Ok(false);
@@ -550,7 +590,7 @@ fn write_codex_config(path: &Path, executable: &Path) -> Result<bool> {
         document["mcp_servers"] = Item::Table(Table::new());
     }
     let servers = document["mcp_servers"]
-        .as_table_mut()
+        .as_table_like_mut()
         .with_context(|| format!("{}.mcp_servers must be a TOML table", path.display()))?;
     if !servers.get("ig").is_some_and(Item::is_table_like) {
         servers.insert("ig", Item::Table(Table::new()));
@@ -578,17 +618,14 @@ fn config_matches(client: AgentClient, home: &Path, executable: &Path) -> Result
     match client {
         AgentClient::Claude | AgentClient::Cursor => json_config_matches(&path, executable),
         AgentClient::Codex => {
-            let document = fs::read_to_string(&path)?
-                .parse::<DocumentMut>()
-                .with_context(|| format!("{} is not valid TOML", path.display()))?;
+            let document = read_codex_config(&path)?;
             Ok(codex_document_matches(&document, executable))
         }
     }
 }
 
 fn json_config_matches(path: &Path, executable: &Path) -> Result<bool> {
-    let root: Value = serde_json::from_slice(&fs::read(path)?)
-        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let root = read_json_config(path)?;
     let Some(server) = root["mcpServers"]["ig"].as_object() else {
         return Ok(false);
     };
@@ -807,6 +844,38 @@ mod tests {
         let before = fs::read(&path).unwrap();
         assert!(write_json_config(&path, Path::new("/tmp/ig")).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn install_accepts_empty_and_byte_order_marked_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mcp.json");
+        let executable = env::current_exe().unwrap().canonicalize().unwrap();
+        for source in ["", "\n", "\u{feff}", "\u{feff}{\"theme\":\"dark\"}"] {
+            fs::write(&path, source).unwrap();
+            assert!(!json_config_matches(&path, &executable).unwrap());
+            assert!(write_json_config(&path, &executable).unwrap(), "{source:?}");
+            assert!(json_config_matches(&path, &executable).unwrap());
+        }
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["theme"], "dark");
+    }
+
+    #[test]
+    fn codex_install_accepts_inline_server_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "mcp_servers = { other = { command = \"other\" } }\n").unwrap();
+        let executable = env::current_exe().unwrap().canonicalize().unwrap();
+
+        assert!(write_codex_config(&path, &executable).unwrap());
+        let document = read_codex_config(&path).unwrap();
+        assert!(codex_document_matches(&document, &executable));
+        assert_eq!(
+            document["mcp_servers"]["other"]["command"].as_str(),
+            Some("other")
+        );
+        assert!(!write_codex_config(&path, &executable).unwrap());
     }
 
     #[cfg(unix)]
