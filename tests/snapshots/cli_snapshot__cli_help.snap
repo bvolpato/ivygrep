@@ -38,7 +38,7 @@ Options:
       --refs                  Find exact symbol references
       --callers               Find functions or methods that call the named symbol
       --json                  Emit machine-readable JSON without ANSI styling
-  -C, --context <LINES>       Lines before and after the focused match to include in each snippet. This changes output size, not retrieval ranking [default: 2]
+  -C, --context <LINES>       Lines before and after the focused match to include in each snippet. This changes output size, not retrieval ranking. --refs shows one line. --symbol and --callers show the complete chunk [default: 2]
       --type <TYPE_FILTER>    Filter by language name, extension, or alias (e.g. rust, rs, py, python, c++, bash, md)
       --all-indices           Search every tracked workspace instead of resolving one PATH
       --include <GLOBS>       Include only comma-separated path globs. May be repeated

@@ -640,7 +640,8 @@ fallback for languages without a grammar, and continuation windows never
 register symbols. Qualified lookups (`Owner.method`, `Owner::method`,
 `Owner#method`, `Owner->method`) filter by owner, preferring exact-case matches
 and falling back to the bare name; reference and caller scans are restricted
-to the languages that define the symbol. Adding these columns bumped the index
+to the languages that define the symbol. C, C++, and Objective-C count as one
+language, as do JavaScript and TypeScript. Adding these columns bumped the index
 format to v22.
 
 Format v23 rebuilds existing indexes so unchanged Swift and Objective-C files
@@ -654,8 +655,9 @@ marks, and JavaScript joiners; case-insensitive lookup still folds ASCII only.
 Leading and trailing dollar sigils retain their existing bare-name aliases.
 
 Reference searches use indexed identifier candidates, then verify source syntax.
-`--refs` includes non-call uses such as callbacks and function values; `--callers`
-returns chunks containing calls. Whitespace, newlines, and generic arguments do
+`--refs` includes non-call uses such as callbacks and function values, and returns
+the matching line without context lines; `--callers` returns chunks containing
+calls, including constructor and macro calls. Whitespace, newlines, and generic arguments do
 not need to be adjacent to the name. Tree-sitter excludes declaration names,
 including Go type, alias, and interface method names, comments, and literal
 text; files without a usable parse use quote/comment masking and a conservative
