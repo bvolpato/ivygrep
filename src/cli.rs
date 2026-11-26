@@ -1,9 +1,10 @@
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use colored::Colorize;
 use tracing_subscriber::EnvFilter;
 
@@ -11,8 +12,8 @@ use crate::config;
 use crate::daemon;
 use crate::embedding::create_model;
 use crate::indexer::{
-    index_workspace, remove_workspace_index, workspace_index_matches_skip_gitignore,
-    workspace_is_indexed,
+    IndexingSummary, index_workspace, remove_workspace_index,
+    workspace_index_matches_skip_gitignore, workspace_is_indexed,
 };
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
@@ -32,8 +33,8 @@ use crate::search::{
 };
 use crate::search_service::{FileSearchBatch, HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
-    Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
-    resolve_workspace_and_scope_with_base,
+    Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces_with_warnings,
+    resolve_workspace_and_scope_with_base, root_is_gone,
 };
 
 fn parse_context_lines(value: &str) -> std::result::Result<usize, String> {
@@ -66,7 +67,7 @@ fn parse_result_limit(value: &str) -> std::result::Result<usize, String> {
     version,
     about = "Semantic grep that stays local",
     long_about = None,
-    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --since main --budget 8000\n  printf 'panic at src/auth.rs:42' | ig context -\n  ig agent install claude\n  ig hardware\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
+    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --since main --budget 8000\n  printf 'panic at src/auth.rs:42' | ig context -\n  ig agent install claude\n  ig hardware\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web\n  ig -- context    # search for a word that is also a command"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -226,7 +227,7 @@ pub struct Cli {
     #[arg(long)]
     pub file_name_only: bool,
 
-    /// Include source-signal explanations and detailed progress diagnostics.
+    /// Include source-signal explanations.
     #[arg(long)]
     pub verbose: bool,
 
@@ -313,8 +314,8 @@ pub struct ContextArgs {
     #[arg(long)]
     pub no_watch: bool,
 
-    /// Include detailed progress diagnostics.
-    #[arg(long)]
+    /// Accepted for compatibility. A context pack always explains its selection.
+    #[arg(long, hide = true)]
     pub verbose: bool,
 
     /// Include files excluded by .gitignore.
@@ -376,6 +377,51 @@ fn normalize_glob_args(cli: &mut Cli) {
         .collect();
 }
 
+/// Options that search for exact text or a symbol. No subcommand accepts them.
+const SEARCH_MODE_FLAGS: [&str; 5] = ["--literal", "--regex", "--symbol", "--refs", "--callers"];
+const SUBCOMMAND_WORDS: [&str; 4] = ["context", "agent", "hardware", "help"];
+
+/// Whether `argument` is a search-mode flag, alone or in a group of short
+/// options such as `-fl`. The rest of a group after `C` or `n` is a value.
+fn is_search_mode_flag(argument: &OsStr) -> bool {
+    let Some(argument) = argument.to_str() else {
+        return false;
+    };
+    match argument.strip_prefix('-') {
+        Some(long) if long.starts_with('-') => SEARCH_MODE_FLAGS.contains(&argument),
+        Some(short) => short
+            .chars()
+            .take_while(|flag| !matches!(flag, 'C' | 'n'))
+            .any(|flag| flag == 'l'),
+        None => false,
+    }
+}
+
+/// Whether a search-mode flag precedes the first word that is also a
+/// subcommand, so that the word is a query or a path.
+fn searches_subcommand_word(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .position(|argument| SUBCOMMAND_WORDS.iter().any(|word| argument == word))
+        .is_some_and(|word| {
+            arguments[..word]
+                .iter()
+                .any(|argument| is_search_mode_flag(argument))
+        })
+}
+
+fn parse_cli(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> std::result::Result<Cli, clap::Error> {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    let mut command = Cli::command();
+    if searches_subcommand_word(&arguments) {
+        command = command.args_conflicts_with_subcommands(true);
+    }
+    Cli::from_arg_matches(&command.try_get_matches_from(arguments)?)
+}
+
 pub async fn run() -> Result<()> {
     init_tracing();
 
@@ -383,7 +429,7 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let mut cli = Cli::parse();
+    let mut cli = parse_cli(env::args_os()).unwrap_or_else(|error| error.exit());
     let mut agent_command = None;
     let mut hardware = false;
     let context_args = match cli.command.take() {
@@ -411,10 +457,8 @@ pub async fn run() -> Result<()> {
     normalize_glob_args(&mut cli);
 
     // Resolve --type aliases: "rs" → "rust", "py" → "python", "c++" → "cpp", etc.
-    if let Some(ref tf) = cli.type_filter
-        && let Some(canonical) = crate::chunking::resolve_type_alias(tf)
-    {
-        cli.type_filter = Some(canonical.to_string());
+    if let Some(ref tf) = cli.type_filter {
+        cli.type_filter = Some(crate::chunking::require_type_alias(tf)?.to_string());
     }
     let action_count = [
         cli.add_path.is_some(),
@@ -541,7 +585,14 @@ pub async fn run() -> Result<()> {
             Some(DaemonResponse::Error { message }) => {
                 bail!("could not start ivygrep web server: {message}");
             }
-            _ => bail!("could not start ivygrep web server"),
+            Some(other) => bail!("could not start ivygrep web server: {other:?}"),
+            None if env::var_os("IVYGREP_NO_AUTOSPAWN").is_some() => bail!(
+                "could not start ivygrep web server: no daemon runs, and IVYGREP_NO_AUTOSPAWN prevents starting one"
+            ),
+            None => bail!(
+                "could not start ivygrep web server: no daemon answered; see {}",
+                config::app_home()?.join("daemon.log").display()
+            ),
         };
         println!("ivygrep web listening at {url}");
         std::io::stdout().flush().ok();
@@ -569,7 +620,7 @@ pub async fn run() -> Result<()> {
             .query_path
             .as_deref()
             .or_else(|| cli.query.as_deref().map(Path::new));
-        run_doctor(path, cli.fix, cli.deep, cli.json)?;
+        run_doctor(path, cli.fix, cli.deep, cli.json, cli.yes)?;
         return Ok(());
     }
 
@@ -843,7 +894,10 @@ async fn run_status(json: bool) -> Result<()> {
     // Read status directly from the filesystem — no need to route through
     // the daemon socket. Status data (SQLite stats, PID files, metadata)
     // is all local. This avoids blocking when the daemon is busy.
-    let workspaces = list_workspaces()?;
+    let (workspaces, warnings) = list_workspaces_with_warnings()?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
 
     if json {
         let mut payload = serde_json::to_value(&workspaces)?;
@@ -1304,7 +1358,22 @@ async fn run_add(
     if let Some(response) =
         daemon::request::<fn(String, usize, usize)>(&request, watch, None).await?
     {
-        print_daemon_response(response, json)?;
+        match response {
+            // Without a summary, another run had already covered this request.
+            DaemonResponse::Ack { summary, .. } if json => {
+                let summary = summary.unwrap_or_else(|| {
+                    Box::new(IndexingSummary {
+                        workspace_id: workspace.id.clone(),
+                        indexed_files: 0,
+                        deleted_files: 0,
+                        total_chunks: workspace.quick_index_health().chunk_count as usize,
+                        phase_timings: Default::default(),
+                    })
+                });
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            response => print_daemon_response(response, json)?,
+        }
         if wait_for_enhancement {
             trigger_workspace_enhancement(&workspace, hash, true).await?;
         }
@@ -1351,6 +1420,10 @@ async fn trigger_workspace_enhancement(
         }
         return Ok(());
     }
+    if wait {
+        // An error that a worker left before this wait is not its result.
+        let _ = std::fs::remove_file(workspace.index_dir.join(".enhancing.error"));
+    }
     if hash_only {
         if !active {
             workspace.trigger_background_hash_enhancement()?;
@@ -1368,6 +1441,9 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
     let terminal_error;
     let mut reported_queue = false;
     loop {
+        // Read this first, so that the status holds the result of a worker
+        // that has ended.
+        let active = workspace.is_enhancing_active();
         let workspaces = crate::workspace::list_workspaces()?;
         let status = workspaces
             .iter()
@@ -1388,8 +1464,12 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
                     .unwrap_or_default()
             );
         }
-        if !workspace.is_enhancing_active() {
-            if !hash_only && workspace.needs_neural_enhancement() {
+        if !active {
+            // A neural run can follow a hash-only run, but not a failed one.
+            if status.enhancing_error.is_none()
+                && !hash_only
+                && workspace.needs_neural_enhancement()
+            {
                 workspace.trigger_background_enhancement()?;
                 if workspace.is_enhancing_active() {
                     continue;
@@ -1515,17 +1595,15 @@ async fn run_gc(json: bool) -> Result<()> {
 }
 
 async fn run_remove(path: &Path, json: bool) -> Result<()> {
-    let workspace = Workspace::resolve(path)?;
+    let workspace = Workspace::resolve_for_removal(path)?;
     let request = DaemonRequest::Remove {
         path: workspace.root.clone(),
     };
-    if let Some(response) =
-        daemon::request::<fn(String, usize, usize)>(&request, false, None).await?
-    {
-        return print_daemon_response(response, json);
+    match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
+        Some(DaemonResponse::Ack { .. }) if json => {}
+        Some(response) => return print_daemon_response(response, json),
+        None => remove_workspace_index(&workspace)?,
     }
-
-    remove_workspace_index(&workspace)?;
 
     if json {
         println!("{}", serde_json::json!({"removed": workspace.id}));
@@ -1824,20 +1902,6 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         let first_run = matches!(initial_index_state, Some(WorkspaceIndexState::NotIndexed));
         let needs_repair = matches!(initial_index_state, Some(WorkspaceIndexState::Unhealthy));
         if first_run || needs_repair {
-            let msg = if needs_repair {
-                "Index unhealthy — rebuilding"
-            } else if workspace.is_worktree() {
-                "First run — computing worktree overlay"
-            } else {
-                "First run — indexing"
-            };
-            eprintln!(
-                "{} {} {}",
-                "⟐".bold(),
-                msg.bold(),
-                workspace.root.display().to_string().dimmed()
-            );
-
             if needs_repair {
                 // A first run made this check before it tried the daemon. A
                 // repair makes it only here: the daemon rebuilds an unhealthy
@@ -2357,6 +2421,20 @@ fn render_file_results(
         }
     }
 
+    if first_line_only {
+        for file in &mut grouped {
+            for hit in &mut file.hits {
+                hit.preview = hit
+                    .preview
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+
     if file_name_only {
         if json {
             let files = grouped
@@ -2410,17 +2488,8 @@ fn render_file_results(
                 println!("    {} {}", "reason:".dimmed(), hit.reason.trim());
             }
 
-            let rendered_preview = if first_line_only {
-                hit.preview
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            } else {
-                hit.preview.trim().to_string()
-            };
-            for line in rendered_preview.lines() {
+            let preview = hit.preview.trim_end();
+            for line in preview.lines().skip_while(|line| line.trim().is_empty()) {
                 println!("    {}", line);
             }
         }
@@ -2456,7 +2525,7 @@ fn report_search_warnings(warnings: &[String]) {
 
 fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
     match response {
-        DaemonResponse::Ack { message } => {
+        DaemonResponse::Ack { message, .. } => {
             if json {
                 println!("{}", serde_json::json!({"message": message}));
             } else {
@@ -2501,13 +2570,33 @@ fn init_tracing() {
         .try_init();
 }
 
-fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<()> {
+fn run_doctor(
+    path: Option<&Path>,
+    fix: bool,
+    deep: bool,
+    json: bool,
+    assume_yes: bool,
+) -> Result<()> {
     let target = match path {
         Some(path) => path.to_path_buf(),
         None => env::current_dir()?,
     };
-    let workspace = Workspace::resolve(&target)?;
-    let report = crate::doctor::inspect_and_maybe_fix(&workspace, fix, deep)?;
+    // The index that a search of this path uses.
+    let (workspace, _, base) = resolve_workspace_and_scope_with_base(&target)?;
+    let report =
+        crate::doctor::inspect_and_fix_if_confirmed(&workspace, fix, deep, &mut |state| {
+            // A first index must not hold a second copy of a workspace below
+            // it. A repair keeps the root that it repairs.
+            if state == WorkspaceIndexState::NotIndexed {
+                ensure_no_nested_workspaces(&workspace.root)?;
+            }
+            if let Some(base) = &base
+                && !assume_yes
+            {
+                confirm_broad_build(base, false, false)?;
+            }
+            confirm_broad_index(&workspace.root, assume_yes)
+        })?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2576,7 +2665,7 @@ fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<
 }
 
 fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
-    let args = env::args().skip(1).collect::<Vec<_>>();
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         return Ok(false);
     }
@@ -2934,13 +3023,29 @@ fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>)
         .collect()
 }
 
+/// `path` as one shell argument.
+fn shell_quoted(path: &Path) -> String {
+    let path = path.display().to_string();
+    #[cfg(not(windows))]
+    if let Ok(quoted) = shlex::try_quote(&path) {
+        return quoted.into_owned();
+    }
+    #[cfg(windows)]
+    if path.contains(' ') {
+        return format!("\"{path}\"");
+    }
+    path
+}
+
 fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
-    if let Ok(workspace_roots) = list_workspace_roots() {
+    if let Ok(mut workspace_roots) = list_workspace_roots() {
+        // A saved index of a deleted directory holds no file of the target.
+        workspace_roots.retain(|root| !root_is_gone(root));
         let conflicts = nested_workspace_conflicts(target_root, workspace_roots);
         if !conflicts.is_empty() {
             let conflict_msgs: Vec<String> = conflicts
                 .iter()
-                .map(|p| format!("ig --rm {}", p.display()))
+                .map(|p| format!("ig --rm {}", shell_quoted(p)))
                 .collect();
             let paths_list: Vec<String> = conflicts
                 .iter()
@@ -3223,6 +3328,37 @@ mod tests {
         for answer in ["", "\n", "n", "no", "yep", "y es"] {
             assert!(!is_affirmative(answer), "{answer:?}");
         }
+    }
+
+    #[test]
+    fn search_mode_flags_make_subcommand_words_searchable() {
+        let parse = |arguments: &[&str]| parse_cli(arguments.iter().map(OsString::from));
+        for (arguments, query, path) in [
+            (&["ig", "--literal", "context"][..], "context", None),
+            (
+                &["ig", "--symbol", "context", "-n", "5", "src"],
+                "context",
+                Some("src"),
+            ),
+            (&["ig", "-fl", "needle", "agent"], "needle", Some("agent")),
+            (&["ig", "--refs", "help"], "help", None),
+            (&["ig", "--callers", "hardware"], "hardware", None),
+            (&["ig", "--literal", "--", "context"], "context", None),
+        ] {
+            let cli = parse(arguments).unwrap();
+            assert!(cli.command.is_none(), "{arguments:?}");
+            assert_eq!(cli.query.as_deref(), Some(query), "{arguments:?}");
+            assert_eq!(cli.query_path.as_deref(), path.map(Path::new));
+        }
+        // Without a search-mode flag before it, the word is a subcommand.
+        for arguments in [
+            &["ig", "context", "task"][..],
+            &["ig", "--hash", "-C2", "context", "task"],
+            &["ig", "hardware"],
+        ] {
+            assert!(parse(arguments).unwrap().command.is_some(), "{arguments:?}");
+        }
+        assert!(parse(&["ig", "context", "task", "--literal"]).is_err());
     }
 
     #[test]

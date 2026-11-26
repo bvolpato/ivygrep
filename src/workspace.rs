@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -338,6 +339,50 @@ impl Workspace {
 
     pub fn resolve(path: &Path) -> Result<Self> {
         Self::resolve_with_main_worktree_root(path).map(|(workspace, _)| workspace)
+    }
+
+    /// The workspace whose saved index a removal of `path` deletes. A registered
+    /// root wins over the root that a search of `path` uses, because it can be
+    /// gone, renamed, or below a newer Git root. Such a workspace is a
+    /// [`Self::ledger_only`] handle.
+    pub(crate) fn resolve_for_removal(path: &Path) -> Result<Self> {
+        let absolute = std::path::absolute(path)?;
+        // The name as given matters after a rename that only changes its case.
+        let renamed = match (absolute.parent(), absolute.file_name()) {
+            (Some(parent), Some(name)) => {
+                canonicalize_existing_part(parent).map(|parent| parent.join(name))
+            }
+            _ => None,
+        };
+        let candidates = [
+            Some(absolute.clone()),
+            renamed,
+            canonicalize_existing_part(&absolute),
+        ];
+        let resolved = Self::resolve(path).ok();
+        let entries = workspace_registry()?.entries;
+        for candidate in candidates.into_iter().flatten() {
+            if let Some((index_dir, metadata)) =
+                entries.iter().find(|(_, entry)| entry.root == candidate)
+            {
+                return Ok(resolved
+                    .filter(|workspace| workspace.index_dir == *index_dir)
+                    .unwrap_or_else(|| Self::ledger_only(index_dir.clone(), metadata)));
+            }
+        }
+        resolved
+            .filter(Self::has_saved_index)
+            .with_context(|| format!("no saved index for {}", path.display()))
+    }
+
+    /// Whether anything but lock files is saved for this workspace. A removal
+    /// keeps the lock files.
+    fn has_saved_index(&self) -> bool {
+        fs::read_dir(&self.index_dir).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.path().extension() != Some(OsStr::new("lock")))
+        })
     }
 
     /// Resolve `path` and also return what [`Self::main_worktree_root`] would:
@@ -776,6 +821,17 @@ impl Workspace {
     pub fn is_enhancing_active(&self) -> bool {
         let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
         status.active() || is_active_pid_alive(&self.enhancing_pid_path())
+    }
+
+    /// Why the last background enhancement failed, unless a worker runs again.
+    pub(crate) fn enhancement_error(&self) -> Option<String> {
+        if self.is_enhancing_active() {
+            return None;
+        }
+        jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS)
+            .record
+            .and_then(|record| record.last_error)
+            .or_else(|| fs::read_to_string(self.index_dir.join(".enhancing.error")).ok())
     }
 
     /// Pid of the live background worker of this workspace, whether it runs
@@ -1443,6 +1499,14 @@ pub fn detect_workspace_root(path: &Path) -> Result<PathBuf> {
     Ok(current)
 }
 
+/// `path` with its longest existing prefix made canonical.
+fn canonicalize_existing_part(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|existing| {
+        let rest = path.strip_prefix(existing).ok()?;
+        Some(existing.canonicalize().ok()?.join(rest))
+    })
+}
+
 /// Whether a workspace root no longer exists as a directory, such as a deleted
 /// Git worktree. A root that exists but cannot be read (permissions, a stalled
 /// mount) is not gone.
@@ -1623,9 +1687,36 @@ pub(crate) fn resolve_workspace_and_scope_with_base(
     path: &Path,
 ) -> Result<(Workspace, Option<WorkspaceScope>, Option<PathBuf>)> {
     let canonical = config::canonicalize_lossy(path)?;
-    let (workspace, base) = Workspace::resolve_with_main_worktree_root(&canonical)?;
+    let (mut workspace, mut base) = Workspace::resolve_with_main_worktree_root(&canonical)?;
+    if let Some(root) = indexed_plain_ancestor(&workspace.root) {
+        (workspace, base) = Workspace::resolve_with_main_worktree_root(&root)?;
+    }
     let scope = scope_for_canonical_path(&workspace.root, &canonical)?;
     Ok((workspace, scope, base))
+}
+
+/// The nearest indexed directory above `root`, when `root` is not in a Git
+/// checkout and has no index of its own. A path below such a directory is a
+/// scope of its index, as a path below a Git root is. A directory that the
+/// outer index ignores stays a workspace of its own.
+fn indexed_plain_ancestor(root: &Path) -> Option<PathBuf> {
+    if is_git_workspace_root(root) {
+        return None;
+    }
+    let (_, metadata) = workspace_registry()
+        .ok()?
+        .entries
+        .into_iter()
+        .filter(|(_, metadata)| {
+            metadata.last_indexed_at_unix.is_some() && root.starts_with(&metadata.root)
+        })
+        .max_by_key(|(_, metadata)| metadata.root.components().count())?;
+    let rel_path = root.strip_prefix(&metadata.root).ok()?;
+    let indexed = !rel_path.as_os_str().is_empty()
+        && crate::walker::SourcePathMatcher::new(&metadata.root, metadata.skip_gitignore)
+            .allows_dir(rel_path)
+            .unwrap_or(false);
+    indexed.then_some(metadata.root)
 }
 
 fn scope_for_canonical_path(root: &Path, canonical: &Path) -> Result<Option<WorkspaceScope>> {
@@ -1806,10 +1897,16 @@ fn workspace_registry() -> Result<WorkspaceRegistry> {
 }
 
 pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
-    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
+    let (workspaces, warnings) = list_workspaces_with_warnings()?;
     for warning in warnings {
         tracing::warn!("{warning}");
     }
+    Ok(workspaces)
+}
+
+/// Every tracked workspace, and a warning per registry entry that cannot be read.
+pub(crate) fn list_workspaces_with_warnings() -> Result<(Vec<WorkspaceStatus>, Vec<String>)> {
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
 
     let mut by_id = BTreeMap::new();
     let reranker = crate::reranker::runtime_status();
@@ -2053,7 +2150,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         );
     }
 
-    Ok(by_id.into_values().collect())
+    Ok((by_id.into_values().collect(), warnings))
 }
 
 /// Registered workspaces as `(index_dir, metadata)` without the per-index size
@@ -2827,6 +2924,51 @@ mod tests {
         assert!(
             !invalid.load(Ordering::Relaxed),
             "a concurrent reader observed a missing or partial index format marker"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn plain_subdirectory_is_a_scope_of_an_indexed_ancestor() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let tmp = tempfile::tempdir().unwrap();
+        let notes = tmp.path().canonicalize().unwrap().join("notes");
+        for directory in ["work/deep", "drafts", "separate"] {
+            std::fs::create_dir_all(notes.join(directory)).unwrap();
+            std::fs::write(notes.join(directory).join("note.md"), "# Note\n").unwrap();
+        }
+        std::fs::write(notes.join(".ignore"), "drafts/\n").unwrap();
+        let resolve = |path: &str| {
+            let (workspace, scope) = resolve_workspace_and_scope(&notes.join(path)).unwrap();
+            (
+                workspace.root,
+                scope.map(|scope| (scope.rel_path, scope.is_file)),
+            )
+        };
+        assert_eq!(resolve("work"), (notes.join("work"), None));
+
+        let model = crate::embedding::create_hash_model();
+        for root in [&notes, &notes.join("separate")] {
+            let workspace = Workspace::resolve(root).unwrap();
+            crate::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
+        }
+        let scope = |path: &str, is_file| Some((PathBuf::from(path), is_file));
+        assert_eq!(resolve("work"), (notes.clone(), scope("work", false)));
+        assert_eq!(
+            resolve("work/deep/note.md"),
+            (notes.clone(), scope("work/deep/note.md", true))
+        );
+        // Another index, an ignored directory, and a checkout stay separate.
+        assert_eq!(resolve("separate"), (notes.join("separate"), None));
+        assert_eq!(resolve("drafts"), (notes.join("drafts"), None));
+        let git_dir = notes.join("work/.git");
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        std::fs::create_dir_all(git_dir.join("refs")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(
+            resolve("work/deep"),
+            (notes.join("work"), scope("deep", false))
         );
     }
 

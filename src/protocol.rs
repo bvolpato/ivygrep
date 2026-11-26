@@ -221,6 +221,9 @@ impl DaemonRequestEnvelope {
 pub enum DaemonResponse {
     Ack {
         message: String,
+        /// What an `Index` request did. Older daemons omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<Box<crate::indexer::IndexingSummary>>,
     },
     Status {
         workspaces: Vec<WorkspaceStatus>,

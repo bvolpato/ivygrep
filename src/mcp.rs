@@ -1734,6 +1734,9 @@ fn execute_ivygrep_search(
     {
         bail!("budget_tokens must be between 256 and 131072");
     }
+    if let Some(type_filter) = &args.type_filter {
+        crate::chunking::require_type_alias(type_filter)?;
+    }
     if !wants_context_pack && args.budget_tokens.is_some() {
         bail!("budget_tokens requires output=context_pack");
     }

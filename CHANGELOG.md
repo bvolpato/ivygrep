@@ -4,6 +4,20 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `--wait-for-enhancement` reports a failed neural worker and exits. Without a model, for example offline, it started a new worker without end and never returned.
+- `ig --rm PATH` removes the index of a directory that no longer exists, that a newer Git root contains, or that was renamed. It fails when PATH has no saved index. The index of a deleted directory, such as a removed Git worktree, no longer blocks an index of the directory above it.
+- A search, context, or MCP request for a path below an indexed plain directory uses that index with a path scope. It built a second index, and `ig --add` of the directory then failed.
+- `ig --doctor --fix` rebuilds an index after an interrupted indexing run, also when `ig --doctor` ran first. It asks before it indexes a home directory or the filesystem root, and it applies the sub-workspace check to a first index.
+- `ig --doctor` reports an offline watcher, a failed background enhancement, and a daemon endpoint that no daemon answers.
+- `ig --add --json` and `ig --rm --json` print the same fields with and without a daemon. `--first-line-only` applies to `--json` output.
+- `--literal`, `--symbol`, `--refs`, `--callers`, and `--regex` search for the words `context`, `agent`, `hardware`, and `help`. Other searches for them need `--`, as in `ig -- context`.
+- `--since` accepts every valid branch name, such as `fix/issue#12`.
+- An unknown `--type`, or MCP `type`, is an error. It returned no results.
+- An argument that is not valid UTF-8 no longer causes a panic. Errors for an unusable data directory and for `ig --web` without a daemon name the cause. `ig --status` reports workspaces whose metadata it cannot read.
+- Text previews keep the indentation of their first line. A first index without a daemon prints its notice once.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.
