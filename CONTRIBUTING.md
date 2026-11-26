@@ -228,7 +228,7 @@ Do not commit one-off experiment transcripts, local paths, agent prompts, or raw
 2. Register parser and language detection in `src/chunking.rs`.
 3. Add representative parser and retrieval tests.
 4. Add context-graph import handling when language has local imports.
-5. Update supported-language counts and lists in README and website.
+5. Update supported-language counts and lists in `README.md`, `docs/guide.md`, and the website.
 
 ## Review and release
 
