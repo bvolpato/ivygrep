@@ -25,6 +25,7 @@ All notable changes to ivygrep are documented in this file.
 - Identical Web results are shown once, so arrow keys and Pin reach every result. The Enter key of an input method no longer starts a search.
 - The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
 - Malformed Web requests get a 400 or 431 response instead of a closed connection.
+- Search ranks a file such as `src/handler_tests.rs` as a test, like `src/handler_test.rs`. It competed with source files at full weight.
 
 ### Security
 
