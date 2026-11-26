@@ -157,9 +157,12 @@ the appropriate stores before local queries use them.
 2. Inspect index health and stored format version.
 3. Walk indexable files while applying Git ignore rules unless explicitly
    disabled. As in Git, `.gitignore` and `info/exclude` rules stop at the root of
-   a repository, which includes a submodule inside the workspace. `.ignore` files
-   apply from every directory above the workspace. Above a plain directory, all
-   of these rules apply.
+   a repository, which includes a submodule inside the workspace. They do not
+   stop at a directory whose `.git` or `.jj` entry is not a repository. One rule
+   differs from Git: if the root of the workspace has a `.git` file, its
+   `info/exclude` rules also apply in submodules. `.ignore` files apply from every
+   directory above the workspace. Above a plain directory, all of these rules
+   apply.
 4. Build a flat Merkle snapshot of relative paths and file fingerprints.
 5. Send files through a bounded scanner/chunker producer.
 6. Parse supported languages with Tree-sitter or a bounded text fallback. The

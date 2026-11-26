@@ -7,7 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 
 - Search works inside a Git submodule. A submodule, a clone made with `git clone --separate-git-dir`, and a linked worktree of either are standalone workspaces. ivygrep took their Git directory for the main checkout: every search in a submodule failed with `base index format incompatible`, and a separate Git directory was indexed as a workspace. When ivygrep rebuilds the checkout, it removes that index. An index of a submodule no longer prevents an index of its parent repository.
-- `.gitignore` and `info/exclude` rules above a Git repository no longer apply to its files, as in Git. A rule such as `*` or `.worktrees/**` in a directory above a repository or a linked worktree left its index empty. A submodule inside a workspace also stops the rules of its parent repository. `.ignore` files above a repository and all rules above a plain directory still apply. An affected index rebuilds on first use.
+- `.gitignore` and `info/exclude` rules above a Git repository no longer apply to its files, as in Git. A rule such as `*` or `.worktrees/**` in a directory above a repository or a linked worktree left its index empty. A submodule inside a workspace also stops the rules of its parent repository, except the `info/exclude` rules of a workspace whose root has a `.git` file. `.ignore` files above a repository and all rules above a plain directory still apply. An index with such rules above its repository rebuilds on first use. The next `ig --add` adds the submodule files that rules of the parent hid.
 
 ## [1.3.6] - 2026-11-15
 

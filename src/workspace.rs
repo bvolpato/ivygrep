@@ -1472,23 +1472,8 @@ pub(crate) fn is_git_workspace_root(path: &Path) -> bool {
     if marker.is_dir() {
         return is_git_dir(&marker);
     }
-    if !marker.is_file() {
-        return false;
-    }
-
-    let Ok(contents) = fs::read_to_string(marker) else {
-        return false;
-    };
-    let Some(raw_git_dir) = contents.trim().strip_prefix("gitdir:") else {
-        return false;
-    };
-    let raw_git_dir = PathBuf::from(raw_git_dir.trim());
-    let git_dir = if raw_git_dir.is_absolute() {
-        raw_git_dir
-    } else {
-        path.join(raw_git_dir)
-    };
-    is_git_dir(&git_dir)
+    marker.is_file()
+        && git_dir_from_marker(path, &marker).is_some_and(|git_dir| is_git_dir(&git_dir))
 }
 
 pub(crate) fn is_git_dir(path: &Path) -> bool {
@@ -3079,6 +3064,7 @@ mod tests {
                 .success()
         );
 
+        assert!(is_git_workspace_root(&worktree));
         let workspace = Workspace::resolve(&worktree).unwrap();
         let canonical_main = main.canonicalize().unwrap();
         assert_eq!(workspace.main_worktree_root(), Some(canonical_main.clone()));
