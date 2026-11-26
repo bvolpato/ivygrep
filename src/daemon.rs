@@ -265,6 +265,15 @@ fn should_expand_memory_query(query: &str, hits: &[SearchHit], limit: Option<usi
             >= files.len() * 4
 }
 
+/// Whether the results obey Boolean operators. Memory probes embed the query in a
+/// sentence, where its operators would be read as text.
+fn is_boolean_request(query: &str, warnings: &[String]) -> bool {
+    crate::search::has_explicit_boolean_operators(query)
+        && !warnings
+            .iter()
+            .any(|warning| warning == crate::search::BOOLEAN_NOT_APPLIED_WARNING)
+}
+
 fn memory_query_variants(query: &str) -> [String; 2] {
     let query = query
         .char_indices()
@@ -4666,7 +4675,7 @@ async fn handle_request_with_cancellation(
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
-                let mut all_hits = Vec::new();
+                let mut all_hits = crate::search_service::WorkspaceHits::default();
                 let mut all_errors = workspace_warnings;
                 let mut successful_workspaces = 0usize;
                 let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
@@ -4808,13 +4817,7 @@ async fn handle_request_with_cancellation(
                     ) {
                         Ok(outcome) => {
                             successful_workspaces += 1;
-                            let mut hits = outcome.hits;
-                            if all_indices {
-                                for hit in &mut hits {
-                                    hit.file_path = workspace.root.join(&hit.file_path);
-                                }
-                            }
-                            all_hits.append(&mut hits);
+                            all_hits.add(&workspace.root, all_indices, outcome.hits);
                             // A warning about how the query was read is the
                             // same for every workspace. Like every entry here it
                             // keeps the results out of the query cache, which
@@ -4835,6 +4838,7 @@ async fn handle_request_with_cancellation(
                     }
                     tracing::trace!("daemon_search_hybrid={:?}", task_started.elapsed());
                 }
+                let mut all_hits = all_hits.into_hits();
                 all_hits.sort_by(|a, b| {
                     b.score
                         .partial_cmp(&a.score)
@@ -4910,6 +4914,7 @@ async fn handle_request_with_cancellation(
                 if !disable_memory_expansion
                     && !hash_only
                     && !force_neural
+                    && !is_boolean_request(&expansion_query, &errors)
                     && should_expand_memory_query(&expansion_query, &hits, limit)
                 {
                     let scope_is_file = expansion_options
@@ -7825,9 +7830,9 @@ mod tests {
         let model = create_hash_model();
         index_workspace(&workspace, model.as_ref()).unwrap();
 
-        let request = DaemonRequest::Search {
+        let request = |query: &str| DaemonRequest::Search {
             path: Some(workspace.root.clone()),
-            query: "What should I remember before planning my weekend trip?".to_string(),
+            query: query.to_string(),
             limit: Some(5),
             context: 2,
             type_filter: None,
@@ -7840,7 +7845,8 @@ mod tests {
             hash_only: false,
             disable_memory_expansion: false,
         };
-        let response = handle_request(test_state(), request).await;
+        let query = "What should I remember before planning my weekend trip?";
+        let response = handle_request(test_state(), request(query)).await;
         let DaemonResponse::SearchResults { hits, .. } = response else {
             panic!("expected search results");
         };
@@ -7848,6 +7854,26 @@ mod tests {
             hits.iter()
                 .any(|hit| hit.sources.iter().any(|source| source == "memory")),
             "daemon-backed clients should receive default memory expansion"
+        );
+
+        for index in 0..3 {
+            std::fs::write(
+                repo.path().join(format!("flight-{index}.md")),
+                format!("# Weekend trip note\nRemember planning preference {index} for flights."),
+            )
+            .unwrap();
+        }
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let query = "remember planning preference weekend trip NOT flights";
+        let response = handle_request(test_state(), request(query)).await;
+        let DaemonResponse::SearchResults { hits, .. } = response else {
+            panic!("expected search results");
+        };
+        assert!(hits.len() >= 3);
+        assert!(
+            hits.iter()
+                .all(|hit| !hit.file_path.to_string_lossy().contains("flight")),
+            "a memory probe ignored NOT: {hits:?}"
         );
     }
 

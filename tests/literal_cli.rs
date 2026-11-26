@@ -403,6 +403,18 @@ fn filename_searches_deduplicate_overlapping_workspaces_before_limiting_files() 
         );
         assert_eq!(result_paths(&files), expected);
         assert_eq!(files[1]["hit_count"], 3);
+        let hybrid = run(
+            &home,
+            &root,
+            &["--hash", "--no-watch", "--all-indices", "--json", "needle"],
+        );
+        let nested_file = hybrid
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["file_path"] == expected[1].to_str().unwrap())
+            .unwrap();
+        assert_eq!(nested_file["hit_count"], 1);
         for mode in ["--literal", "--regex"] {
             let names: Vec<PathBuf> = serde_json::from_value(run(
                 &home,

@@ -1187,3 +1187,135 @@ fn public_boolean_constraints_gate_symbol_and_path_variants() {
         "symbol/path candidates escaped the kind constraint"
     );
 }
+
+fn login_workspace(root: &Path) -> Workspace {
+    fs::write(
+        root.join("login.py"),
+        "def login_page():\n    return 'open the login page and submit the form'\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("invoice.py"),
+        "def total_due():\n    return 'sum of the open invoices'\n",
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root).unwrap();
+    index_workspace(
+        &workspace,
+        &HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS),
+    )
+    .unwrap();
+    workspace
+}
+
+#[test]
+#[serial]
+fn wildcards_in_ordinary_text_are_punctuation() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let workspace = login_workspace(root.path());
+    let options = SearchOptions::default();
+    for query in [
+        "Steps to reproduce:\n* open the login page\n* submit the form",
+        "The wrong text:\n* login page",
+        "login-form: *",
+        "login form, by kind: * submit",
+    ] {
+        let hits = hybrid_search(&workspace, query, None, &options)
+            .unwrap_or_else(|error| panic!("{query:?} failed: {error:#}"));
+        assert_eq!(
+            hits.first().map(|hit| hit.file_path.as_path()),
+            Some(Path::new("login.py")),
+            "{query:?}: {hits:?}"
+        );
+    }
+    let error = hybrid_search(&workspace, "kind: * AND login", None, &options).unwrap_err();
+    assert!(error.to_string().contains("Boolean query"), "{error:#}");
+    assert!(
+        hybrid_search(&workspace, "zzqqxx *", None, &options)
+            .unwrap()
+            .is_empty(),
+        "a standalone star matched unrelated documents"
+    );
+}
+
+#[test]
+#[serial]
+fn deeply_nested_queries_do_not_overflow_the_stack() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let workspace = login_workspace(root.path());
+    for query in [
+        format!("{} login", "(".repeat(20_000)),
+        format!("{}login{}", "(".repeat(20_000), ")".repeat(20_000)),
+        format!("{}login{}", "text:(".repeat(20_000), ")".repeat(20_000)),
+        "login page broke :(\n".repeat(5_000),
+    ] {
+        assert!(
+            !hybrid_search(&workspace, &query, None, &SearchOptions::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let negations = format!("{}login", "NOT ".repeat(20_000));
+    hybrid_search_outcome(&workspace, &negations, None, &SearchOptions::default()).unwrap();
+}
+
+#[test]
+#[serial]
+fn boolean_operands_can_be_identifiers() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    for (path, text) in [
+        ("both.rs", "fn both() { redirect(url_for(target)); }\n"),
+        (
+            "apart.rs",
+            "fn apart() { redirect(target); for url in urls {} }\n",
+        ),
+        ("only.rs", "fn only() { url_for(target); }\n"),
+        ("sha256.rs", "fn digest() { redirect(target); }\n"),
+    ] {
+        fs::write(root.path().join(path), text).unwrap();
+    }
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    index_workspace(
+        &workspace,
+        &HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS),
+    )
+    .unwrap();
+    let files = |names: &[&str]| names.iter().map(PathBuf::from).collect::<HashSet<_>>();
+    for (query, expected) in [
+        ("url_for AND redirect", files(&["both.rs"])),
+        ("urlFor AND redirect", files(&["both.rs"])),
+        ("redirect NOT url_for", files(&["apart.rs", "sha256.rs"])),
+        ("sha256 AND redirect", files(&["sha256.rs"])),
+        ("redirect AND NOT (url_for OR sha256)", files(&["apart.rs"])),
+    ] {
+        for limit in [Some(1), None, Some(usize::MAX)] {
+            let options = SearchOptions {
+                limit,
+                ..Default::default()
+            };
+            let hits = hybrid_search(&workspace, query, None, &options)
+                .unwrap_or_else(|error| panic!("{query:?} failed: {error:#}"));
+            assert!(!hits.is_empty(), "{query:?} lost its matches");
+            assert!(
+                paths(&hits).is_subset(&expected),
+                "{query:?} leaked: {hits:?}"
+            );
+        }
+    }
+    assert!(
+        hybrid_search(
+            &workspace,
+            "\"redirect target\" AND url_for",
+            None,
+            &SearchOptions::default()
+        )
+        .is_err(),
+        "a quoted phrase still needs positions"
+    );
+}

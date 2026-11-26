@@ -1,5 +1,5 @@
 use super::*;
-use tantivy::query_grammar::{UserInputAst, UserInputLeaf};
+use tantivy::query_grammar::{Delimiter, UserInputAst, UserInputLeaf, UserInputLiteral};
 
 pub(super) type LexicalDocuments = Vec<(usize, f32, TantivyDocument)>;
 
@@ -31,7 +31,7 @@ pub(crate) const BOOLEAN_NOT_APPLIED_WARNING: &str = "\
 /// Keep identifier-like input and quoted/escaped/code-span words on the ordinary
 /// expansion path. An unfinished quote must not hide a Boolean operator from
 /// the strict parser, which validates the remaining grammar.
-pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
+pub(crate) fn has_explicit_boolean_operators(query: &str) -> bool {
     let query = query.trim();
     let syntax_prefix = query
         .strip_prefix('"')
@@ -168,11 +168,11 @@ pub(super) fn parse_lexical_query(
     text: &str,
     signature_scoring: SignatureScoring,
 ) -> std::result::Result<Box<dyn Query>, tantivy::query::QueryParserError> {
-    if signature_scoring != SignatureScoring::Plain {
-        return guard_query_grammar(text, || parser.parse_query(text));
-    }
     let mut ast = parse_user_input(text)?;
-    boost_explicit_signature_clauses(&mut ast);
+    read_wildcards_as_text(&mut ast);
+    if signature_scoring == SignatureScoring::Plain {
+        boost_explicit_signature_clauses(&mut ast);
+    }
     parser.build_query_from_user_input_ast(ast)
 }
 
@@ -204,29 +204,105 @@ pub(super) fn has_sign_before_bare_star(text: &str) -> bool {
     false
 }
 
-/// Runs a call into Tantivy's query grammar and reports a panic inside it as a
-/// syntax error, which callers already handle like any other text the grammar
-/// rejects. The known trigger is answered without calling the grammar, so it
-/// prints no panic message; the unwind guard covers inputs not found yet.
-fn guard_query_grammar<T>(
-    text: &str,
-    parse: impl FnOnce() -> std::result::Result<T, tantivy::query::QueryParserError>,
-) -> std::result::Result<T, tantivy::query::QueryParserError> {
-    let syntax_error = || tantivy::query::QueryParserError::SyntaxError(text.to_string());
-    if has_sign_before_bare_star(text) {
-        return Err(syntax_error());
+/// Deepest group or `NOT` nesting passed to Tantivy's grammar.
+const MAX_QUERY_NESTING: usize = 64;
+
+/// Whether `text` nests groups or `NOT` deeper than [`MAX_QUERY_NESTING`].
+/// Tantivy's grammar recurses for every unclosed `(` and every `NOT` in a row,
+/// and a stack overflow aborts the process. An unclosed `:(` on each line of a
+/// chat log is enough.
+pub(super) fn nests_too_deeply(text: &str) -> bool {
+    let (mut groups, mut negations) = (0usize, 0usize);
+    let mut word_start = None;
+    for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
+        if !character.is_whitespace() && !matches!(character, '(' | ')') {
+            word_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = word_start.take() {
+            negations = if &text[start..index] == "NOT" {
+                negations + 1
+            } else {
+                0
+            };
+        }
+        match character {
+            '(' => groups += 1,
+            ')' => groups = groups.saturating_sub(1),
+            _ => {}
+        }
+        if groups > MAX_QUERY_NESTING || negations > MAX_QUERY_NESTING {
+            return true;
+        }
     }
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(parse))
-        .unwrap_or_else(|_| Err(syntax_error()))
+    false
 }
 
+/// Parses text with Tantivy's query grammar and reports a panic inside it as a
+/// syntax error, which callers already handle like any other text the grammar
+/// rejects. The known triggers are answered without calling the grammar: a panic
+/// prints a message, and the unwind guard cannot catch a stack overflow.
 fn parse_user_input(
     text: &str,
 ) -> std::result::Result<UserInputAst, tantivy::query::QueryParserError> {
-    guard_query_grammar(text, || {
-        tantivy::query_grammar::parse_query(text)
-            .map_err(|_| tantivy::query::QueryParserError::SyntaxError(text.to_string()))
-    })
+    let syntax_error = || tantivy::query::QueryParserError::SyntaxError(text.to_string());
+    if has_sign_before_bare_star(text) || nests_too_deeply(text) {
+        return Err(syntax_error());
+    }
+    std::panic::catch_unwind(|| tantivy::query_grammar::parse_query(text))
+        .map_err(|_| syntax_error())?
+        .map_err(|_| syntax_error())
+}
+
+/// Whether the grammar read `label: *` as an exists clause. No text field of the
+/// index can serve one, and the search fails only when the clause runs.
+fn has_exists_clause(ast: &UserInputAst) -> bool {
+    match ast {
+        UserInputAst::Clause(clauses) => clauses.iter().any(|(_, child)| has_exists_clause(child)),
+        UserInputAst::Boost(child, _) => has_exists_clause(child),
+        UserInputAst::Leaf(leaf) => matches!(leaf.as_ref(), UserInputLeaf::Exists { .. }),
+    }
+}
+
+/// Reads wildcards in ordinary text as punctuation. `Steps to reproduce:` before
+/// a `* item` line is the word before the colon, not an exists clause, and a
+/// standalone `*` is not a clause that matches every document.
+fn read_wildcards_as_text(ast: &mut UserInputAst) {
+    match ast {
+        UserInputAst::Clause(clauses) => {
+            for (_, child) in clauses.iter_mut() {
+                read_wildcards_as_text(child);
+            }
+            clauses.retain(|(_, child)| !is_empty_clause(child));
+        }
+        UserInputAst::Boost(child, _) => {
+            read_wildcards_as_text(child);
+            if is_empty_clause(child) {
+                *ast = UserInputAst::Clause(Vec::new());
+            }
+        }
+        UserInputAst::Leaf(leaf) => match leaf.as_mut() {
+            UserInputLeaf::All => *ast = UserInputAst::Clause(Vec::new()),
+            UserInputLeaf::Exists { field } => {
+                **leaf = word_literal(std::mem::take(field)).into();
+            }
+            _ => {}
+        },
+    }
+}
+
+fn is_empty_clause(ast: &UserInputAst) -> bool {
+    matches!(ast, UserInputAst::Clause(clauses) if clauses.is_empty())
+}
+
+fn word_literal(phrase: String) -> UserInputLiteral {
+    UserInputLiteral {
+        field_name: None,
+        phrase,
+        delimiter: Delimiter::None,
+        slop: 0,
+        prefix: false,
+    }
 }
 
 /// Wraps explicit `signature:` term clauses in a boost that restores 5x when the
@@ -289,26 +365,171 @@ fn boolean_query_error(text: &str) -> String {
     )
 }
 
+/// A parsed Boolean request: the index query and, when an operand needs it, the
+/// expression that decides from chunk text.
+struct StrictBooleanQuery {
+    query: Box<dyn Query>,
+    verify: Option<OperandCheck>,
+}
+
 /// The strict parse of a request with explicit operators. It fails on syntax
 /// the grammar rejects and on clauses the index cannot serve, such as phrases.
 fn strict_boolean_query(
     ctx: &SearchContext,
     text: &str,
     signature_scoring: SignatureScoring,
-) -> Result<Box<dyn Query>> {
-    let parser = lexical_query_parser(
-        ctx,
-        signature_scoring,
-        should_use_conjunctive_numeric_query(text),
-    );
-    let mut ast = parse_user_input(text).map_err(|_| anyhow::anyhow!(boolean_query_error(text)))?;
+) -> Result<StrictBooleanQuery> {
+    let conjunction = should_use_conjunctive_numeric_query(text);
+    let parser = lexical_query_parser(ctx, signature_scoring, conjunction);
+    let mut ast = parse_user_input(text)
+        .ok()
+        .filter(|ast| !has_exists_clause(ast))
+        .with_context(|| boolean_query_error(text))?;
     anchor_negative_clauses(&mut ast);
+    // Issue text often names an identifier next to an emphasized NOT. It stays
+    // text, so only a lookup gets split operands.
+    let verify = (!is_prompt_shaped(text))
+        .then(|| OperandCheck::new(&ast, conjunction))
+        .flatten();
+    if verify.is_some() {
+        ask_for_split_operand_tokens(&mut ast);
+    }
     if signature_scoring == SignatureScoring::Plain {
         boost_explicit_signature_clauses(&mut ast);
     }
-    parser
+    let query = parser
         .build_query_from_user_input_ast(ast)
-        .with_context(|| boolean_query_error(text))
+        .with_context(|| boolean_query_error(text))?;
+    Ok(StrictBooleanQuery { query, verify })
+}
+
+/// Code-analyzer tokens in order, repeats included.
+fn code_tokens(text: &str) -> Vec<String> {
+    let mut analyzer = build_code_analyzer();
+    let mut stream = analyzer.token_stream(text);
+    let mut tokens = Vec::new();
+    while stream.advance() {
+        tokens.push(stream.token().text.clone());
+    }
+    tokens
+}
+
+/// Tokens of an unquoted operand that the code tokenizer splits, such as
+/// `url_for`, `LocalProxy`, or `sha256`. Tantivy reads it as a phrase, which the
+/// index cannot serve without positions.
+fn split_operand_tokens(leaf: &UserInputLeaf) -> Option<Vec<String>> {
+    let UserInputLeaf::Literal(literal) = leaf else {
+        return None;
+    };
+    if literal.field_name.is_some() || literal.delimiter != Delimiter::None {
+        return None;
+    }
+    let tokens = code_tokens(&literal.phrase);
+    (tokens.len() > 1).then_some(tokens)
+}
+
+fn has_split_operand(ast: &UserInputAst) -> bool {
+    match ast {
+        UserInputAst::Clause(clauses) => clauses.iter().any(|(_, child)| has_split_operand(child)),
+        UserInputAst::Boost(child, _) => has_split_operand(child),
+        UserInputAst::Leaf(leaf) => split_operand_tokens(leaf).is_some(),
+    }
+}
+
+/// Rewrites split operands so that the query matches every chunk the expression
+/// can match: a positive operand asks for all its tokens, and a negated clause
+/// that contains one excludes nothing. `OperandCheck` decides afterwards.
+fn ask_for_split_operand_tokens(ast: &mut UserInputAst) {
+    match ast {
+        UserInputAst::Clause(clauses) => {
+            clauses.retain(|(occur, child)| {
+                *occur != Some(Occur::MustNot) || !has_split_operand(child)
+            });
+            for (_, child) in clauses.iter_mut() {
+                ask_for_split_operand_tokens(child);
+            }
+        }
+        UserInputAst::Boost(child, _) => ask_for_split_operand_tokens(child),
+        UserInputAst::Leaf(leaf) => {
+            if let Some(tokens) = split_operand_tokens(leaf) {
+                *ast = UserInputAst::Clause(
+                    tokens
+                        .into_iter()
+                        .map(|token| {
+                            let leaf = UserInputLeaf::from(word_literal(token));
+                            (Some(Occur::Must), leaf.into())
+                        })
+                        .collect(),
+                );
+            }
+        }
+    }
+}
+
+/// Evaluates a Boolean expression with split operands on chunk text and path.
+/// A split operand matches where its tokens are adjacent.
+enum OperandCheck {
+    All,
+    Word(Vec<String>),
+    Clause(Vec<(Occur, OperandCheck)>),
+}
+
+impl OperandCheck {
+    /// `None` when no operand is split, or when the expression also has a clause
+    /// that only the index can answer, such as a range or a `field:` clause.
+    fn new(ast: &UserInputAst, conjunction: bool) -> Option<Self> {
+        if !has_split_operand(ast) {
+            return None;
+        }
+        let default = if conjunction {
+            Occur::Must
+        } else {
+            Occur::Should
+        };
+        Self::build(ast, default)
+    }
+
+    fn build(ast: &UserInputAst, default: Occur) -> Option<Self> {
+        match ast {
+            UserInputAst::Clause(clauses) => clauses
+                .iter()
+                .map(|(occur, child)| {
+                    Some((occur.unwrap_or(default), Self::build(child, default)?))
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(Self::Clause),
+            UserInputAst::Boost(child, _) => Self::build(child, default),
+            UserInputAst::Leaf(leaf) => match leaf.as_ref() {
+                UserInputLeaf::All => Some(Self::All),
+                UserInputLeaf::Literal(literal) if literal.field_name.is_none() => {
+                    let tokens = code_tokens(&literal.phrase);
+                    (!tokens.is_empty()).then_some(Self::Word(tokens))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    fn matches(&self, text: &[String], path: &[String]) -> bool {
+        match self {
+            Self::All => true,
+            Self::Word(tokens) => [text, path]
+                .iter()
+                .any(|field| field.windows(tokens.len()).any(|window| window == tokens)),
+            Self::Clause(clauses) => {
+                let is = |expected: Occur| {
+                    clauses
+                        .iter()
+                        .filter(move |(occur, _)| *occur == expected)
+                        .map(|(_, child)| child.matches(text, path))
+                };
+                !is(Occur::MustNot).any(|matched| matched)
+                    && is(Occur::Must).all(|matched| matched)
+                    && (clauses.iter().any(|(occur, _)| *occur == Occur::Must)
+                        || is(Occur::Should).any(|matched| matched))
+            }
+        }
+    }
 }
 
 /// A structured request has one bounded pool satisfying the original parsed
@@ -332,35 +553,79 @@ pub(super) fn boolean_candidates(
     if !has_explicit_boolean_operators(text) {
         return Ok(BooleanSearch::Absent);
     }
-    let query = match strict_boolean_query(ctx, text, signature_scoring) {
-        Ok(query) => query,
-        Err(_) if is_prompt_shaped(text) => return Ok(BooleanSearch::NotApplied),
-        Err(error) => return Err(error),
-    };
+    let StrictBooleanQuery { query, verify } =
+        match strict_boolean_query(ctx, text, signature_scoring) {
+            Ok(query) => query,
+            Err(_) if is_prompt_shaped(text) => return Ok(BooleanSearch::NotApplied),
+            Err(error) => return Err(error),
+        };
     let query = constrain_query_to_scope(query, &ctx.fields, options.scope_filter.as_ref())?;
     let query = constrain_query_to_glob_paths(query, &ctx.fields, glob_filter);
     let mut documents = Vec::new();
     let mut keys = HashSet::new();
     for (index, searcher) in ctx.searchers.iter().enumerate() {
-        let eligibility = CandidateEligibility::new(ctx, index, options, paths, None);
-        for (score, address) in collect_top_docs_with_eligibility(
-            searcher,
-            query.as_ref(),
-            &ctx.fields,
-            glob_filter,
-            eligibility,
-            limit,
-            options.cancel_token.as_ref(),
-        )? {
-            let document = searcher.doc::<TantivyDocument>(address)?;
-            if let Some(chunk) = fetch_chunk_by_id(document.clone(), &ctx.fields) {
+        let mut fetch = limit;
+        loop {
+            let eligibility = CandidateEligibility::new(ctx, index, options, paths, None);
+            let addresses = collect_top_docs_with_eligibility(
+                searcher,
+                query.as_ref(),
+                &ctx.fields,
+                glob_filter,
+                eligibility,
+                fetch,
+                options.cancel_token.as_ref(),
+            )?;
+            let exhausted = addresses.len() < fetch;
+            let mut pool = Vec::with_capacity(addresses.len());
+            for (score, address) in addresses {
+                let document = searcher.doc::<TantivyDocument>(address)?;
+                if let Some(chunk) = fetch_chunk_by_id(document.clone(), &ctx.fields) {
+                    pool.push((chunk, score, document));
+                }
+            }
+            if let Some(check) = &verify {
+                retain_verified_chunks(ctx, check, &mut pool)?;
+                // Rejected chunks must not use up the pool of a later match.
+                if pool.len() < limit && !exhausted && fetch < MAX_VERIFIED_BOOLEAN_CANDIDATES {
+                    fetch = fetch.saturating_mul(4).min(MAX_VERIFIED_BOOLEAN_CANDIDATES);
+                    continue;
+                }
+                pool.truncate(limit);
+            }
+            for (chunk, score, document) in pool {
                 keys.insert(chunk.vector_key);
                 documents.push((index, score, document));
             }
+            break;
         }
     }
     Ok(BooleanSearch::Pool(BooleanCandidates {
         documents,
         keys: Arc::new(keys),
     }))
+}
+
+/// Most candidates read to fill the pool of a request with split operands.
+const MAX_VERIFIED_BOOLEAN_CANDIDATES: usize = 50_000;
+
+fn retain_verified_chunks(
+    ctx: &SearchContext,
+    check: &OperandCheck,
+    pool: &mut Vec<(IndexedChunk, f32, TantivyDocument)>,
+) -> Result<()> {
+    let keys = pool
+        .iter()
+        .map(|(chunk, _, _)| chunk.vector_key)
+        .collect::<Vec<_>>();
+    let texts = ctx.fetch_chunk_texts_by_vector_keys_batch(&keys)?;
+    pool.retain(|(chunk, _, _)| {
+        texts.get(&chunk.vector_key).is_some_and(|text| {
+            check.matches(
+                &code_tokens(text),
+                &code_tokens(&index_path_string(&chunk.file_path)),
+            )
+        })
+    });
+    Ok(())
 }
