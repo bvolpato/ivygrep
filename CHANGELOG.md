@@ -4,6 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
+- The stress fixture download uses its next source when a server requests a long retry delay. Such a delay blocked the scheduled cross-platform run until its time limit, and `E2E Summary` now fails when a platform job is cancelled.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.
