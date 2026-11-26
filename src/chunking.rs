@@ -1884,7 +1884,7 @@ fn types_with_body(code: &str) -> Vec<ExtraName<'_>> {
     static TYPE_WITH_BODY: LazyLock<Regex> = LazyLock::new(|| {
         let arguments = r"\((?:[^(){};]|\((?:[^(){};]|\([^(){};]*\))*\))*\)";
         Regex::new(&format!(
-            r"(?x) \b(?:class|struct|union|enum)\b
+            r"(?x) \b(?:enum\s+(?:class|struct)|class|struct|union|enum)\b
             # Attributes and export macros before the name.
             (?:\s*(?:\[\[[^\[\]{{}};]*\]\] | \b[A-Za-z_]\w*\s*{arguments} | \b[A-Z_][A-Z0-9_]*\b | \b__\w+[\t\ ]))*
             \s*\b(?:[A-Za-z_]\w*::)*(?P<name>[A-Za-z_]\w*)\s*
@@ -1901,10 +1901,18 @@ fn types_with_body(code: &str) -> Vec<ExtraName<'_>> {
     TYPE_WITH_BODY
         .captures_iter(code)
         .filter_map(|captures| captures.name("name"))
-        .map(|name| {
+        .filter_map(|name| {
             line += code[counted..name.start()].matches('\n').count();
             counted = name.start();
-            (line, name.as_str(), false)
+            // `class SHA256 final {` has the shape of a macro and a name.
+            let name = if name.as_str() == "final" {
+                code[..name.start()]
+                    .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
+                    .find(|word| !word.is_empty())?
+            } else {
+                name.as_str()
+            };
+            Some((line, name, false))
         })
         .collect()
 }
@@ -3490,13 +3498,20 @@ mod tests {
             ),
             (
                 "panel.h",
-                "namespace ui {\nAPI_BEGIN\nenum class policy {\n    block,\n};\ntemplate <typename T>\nclass API Panel final : public Base<T>\n{\npublic:\n  struct Size { int w; };\n};\nvoid show(class Panel *panel);\n}\n",
+                "namespace ui {\nAPI_BEGIN\nenum class policy {\n    block,\n};\ntemplate <typename T>\nclass API Panel final : public Base<T>\n{\npublic:\n  struct Size { int w; };\n};\nenum class LEVEL { LOW };\nclass SHA256 final {\n  int state;\n};\nvoid show(class Panel *panel);\n}\n",
                 &[
                     ("ui", None),
                     ("policy", None),
                     ("Panel", None),
                     ("Size", Some("ui")),
+                    ("LEVEL", Some("ui")),
+                    ("SHA256", Some("ui")),
                 ],
+            ),
+            (
+                "level.h",
+                "MYLIB_NAMESPACE_BEGIN\nenum class LEVEL {\n  LOW\n};\nclass SHA256 final {\npublic:\n  FIELDS\n};\nMYLIB_NAMESPACE_END\n",
+                &[("LEVEL", None), ("SHA256", None)],
             ),
         ] {
             assert_eq!(parsed_definitions(path, source), pairs(expected), "{path}");
