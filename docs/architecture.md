@@ -176,6 +176,8 @@ staged promotion, the indexer asks the daemon to release cached readers of the
 replaced workspace and its dependent worktrees. Unchanged scans retain those
 readers. This ordering lets Windows replace the stores without live SQLite or
 Tantivy handles and prevents searches from reopening them during replacement.
+A search that finds an index it cannot query takes the same exclusive leases
+before it rebuilds the index. Other searches wait and then read the new stores.
 
 ### Incremental indexing
 
@@ -800,7 +802,10 @@ whose error says that the workspace directory no longer exists, so `ig --status`
 keeps showing why the workspace is not watched; later passes leave the record
 alone. The index and `watch_enabled` stay, so the same path checked out again is
 watched by the next request or supervisor pass, and that registration replaces
-the record. A root that exists but cannot be watched or read is not gone: it
+the record. A root that is another directory than the one the watcher
+registered, after a rename or a deletion and a new directory at the same path,
+gets a new watcher from the next search, index request, or supervisor pass. A
+root that exists but cannot be watched or read is not gone: it
 keeps the recorded failure, the retries, and the 30 s to 15 min backoff.
 
 Indexes of workspaces that no longer exist are garbage collected
@@ -856,7 +861,10 @@ and gives memory back as it is freed, and an idle musl daemon stayed between
 174 and 185 MiB through an hour of 64 busy sessions, at the price of an
 allocator lock that every thread shares.
 
-An auto-spawned daemon writes to `daemon.log` in the app home. A client rotates
+A daemon checks every five seconds that the lock file of its app home is still
+the one it holds, and exits without cleanup when the home was deleted or
+replaced. An auto-spawned daemon reads nothing from standard input, runs in the
+app home, and writes to `daemon.log` there. A client rotates
 a log over 10 MiB to `daemon.log.1` when it spawns a daemon, and on Unix a
 running daemon checks once a minute and does the same, redirecting its own
 stdout and stderr to the fresh file. Output that goes to a terminal or a

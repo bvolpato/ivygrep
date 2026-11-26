@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- A search answers while files in the workspace keep changing. After a daemon start or a first index, steady writes such as a log file kept the watcher in its startup state, and each search waited for the 60-second deadline and returned no results.
+- Concurrent daemon searches no longer remove each other's stores when an index needs a rebuild. `--all-indices` and Web searches could fail or return no results, and the rebuild could turn the watcher of the workspace off.
+- The daemon watches a plain directory again after another directory takes its place, for example after `rm -rf` and an extracted archive. Edits stayed out of search results while `ig --status` showed a live watcher.
+- A daemon that a query starts no longer keeps the standard input and the working directory of that query. `producer | ig QUERY` could wait forever, and a volume could not be ejected.
+- The watcher updates files in a directory named `.ivygrep`, which the indexer already included.
+- A daemon exits within seconds after its app home is deleted or replaced. Such a daemon recreated deleted indexes, and it later removed the socket of the daemon that replaced it.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.
