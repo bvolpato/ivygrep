@@ -31,6 +31,28 @@ pub(crate) fn open(root: &Path, path: &Path) -> io::Result<File> {
     regular_file(open_components(root, &components)?)
 }
 
+/// The name of a file as its directory stores it. A case-insensitive file
+/// system opens other spellings, which are not paths in Git or in an index.
+pub(crate) fn stored_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let absolute = root.join(path);
+    if !absolute.is_file() {
+        return None;
+    }
+    let typed = crate::workspace::index_path_string(path);
+    let stored = absolute
+        .canonicalize()
+        .ok()
+        .zip(root.canonicalize().ok())
+        .and_then(|(file, root)| {
+            file.strip_prefix(root)
+                .ok()
+                .map(crate::workspace::index_path_string)
+        })
+        // A symlink resolves to another name and keeps its own.
+        .filter(|stored| stored.to_lowercase() == typed.to_lowercase());
+    Some(PathBuf::from(stored.unwrap_or(typed)))
+}
+
 /// Names of `path` beneath `root`. An absolute `path` must start with `root`.
 fn relative_components<'a>(root: &Path, path: &'a Path) -> io::Result<Vec<&'a OsStr>> {
     let relative = if path.is_absolute() {

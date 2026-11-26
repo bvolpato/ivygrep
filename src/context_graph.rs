@@ -1683,7 +1683,10 @@ fn existing_workspace_file(
 ) -> Option<PathBuf> {
     let normalized = normalize_relative_path(relative)?;
     let exists = snapshot.map_or_else(
-        || root.join(&normalized).is_file(),
+        || {
+            crate::workspace_file::stored_path(root, &normalized).as_deref()
+                == Some(normalized.as_path())
+        },
         |snapshot| snapshot.files.contains_key(&index_path_string(&normalized)),
     );
     exists.then_some(normalized)
@@ -2582,6 +2585,9 @@ pub(crate) fn expand_context_tests(
 }
 
 fn context_test_expansion(edge: RankedEdge, seeds: &BTreeSet<String>) -> Option<GraphExpansion> {
+    if !matches!(edge.kind, FileEdgeKind::Dependency | FileEdgeKind::Test) {
+        return None;
+    }
     let source = index_path_string(&edge.source_path);
     let target = index_path_string(&edge.target_path);
     let (test_path, seed_path) =
@@ -2592,6 +2598,10 @@ fn context_test_expansion(edge: RankedEdge, seeds: &BTreeSet<String>) -> Option<
         } else {
             return None;
         };
+    // A test imports helpers. It is not the code that they test.
+    if path_looks_like_test(&seed_path) {
+        return None;
+    }
     Some(GraphExpansion {
         file_path: test_path,
         seed_path,
@@ -2709,7 +2719,8 @@ pub(crate) fn overlay_shadowed_paths(workspace: &Workspace) -> HashSet<String> {
 }
 
 fn personalized_page_rank(edges: &[RankedEdge], seeds: &BTreeSet<String>) -> HashMap<String, f64> {
-    let mut adjacency = HashMap::<String, Vec<(String, f64)>>::new();
+    // Floating-point sums depend on their order, so nodes need a fixed order.
+    let mut adjacency = BTreeMap::<String, Vec<(String, f64)>>::new();
     for edge in edges {
         let source = index_path_string(&edge.source_path);
         let target = index_path_string(&edge.target_path);
@@ -2874,6 +2885,85 @@ mod tests {
 
     fn canonical_tempdir() -> tempfile::TempDir {
         tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn page_rank_is_identical_for_identical_edges() {
+        let edge = |source: &str, target: String| RankedEdge {
+            source_path: PathBuf::from(source),
+            target_path: PathBuf::from(target),
+            kind: FileEdgeKind::Dependency,
+            cochange_count: 0,
+        };
+        let mut edges = Vec::new();
+        for index in 0..20 {
+            edges.push(edge("left.rs", format!("{index}.rs")));
+            edges.push(edge("right.rs", format!("{}.rs", index * 7 % 20)));
+            edges.push(edge("top.rs", format!("{}.rs", index * 3 % 11)));
+        }
+        let seeds = ["left.rs", "right.rs", "top.rs"].map(String::from).into();
+        let ranks = || {
+            let mut ranks = personalized_page_rank(&edges, &seeds)
+                .into_iter()
+                .map(|(node, rank)| (node, rank.to_bits()))
+                .collect::<Vec<_>>();
+            ranks.sort();
+            ranks
+        };
+        let first = ranks();
+        for _ in 0..50 {
+            assert_eq!(ranks(), first);
+        }
+    }
+
+    #[test]
+    fn files_that_a_test_imports_are_not_its_tests() {
+        let expansion = |source: &str, target: &str, kind, seed: &str| {
+            context_test_expansion(
+                RankedEdge {
+                    source_path: PathBuf::from(source),
+                    target_path: PathBuf::from(target),
+                    kind,
+                    cochange_count: 0,
+                },
+                &BTreeSet::from([seed.to_string()]),
+            )
+            .map(|expansion| expansion.file_path)
+        };
+        let dependency = FileEdgeKind::Dependency;
+        let test = "tests/test_main.py";
+        assert_eq!(expansion(test, "tests/helpers.py", dependency, test), None);
+        assert_eq!(
+            expansion(
+                "tests/README.md",
+                "pkg/main.py",
+                FileEdgeKind::Documentation,
+                "pkg/main.py"
+            ),
+            None
+        );
+        assert_eq!(
+            expansion(test, "pkg/main.py", dependency, "pkg/main.py"),
+            Some(PathBuf::from(test))
+        );
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn live_edges_use_the_stored_spelling_of_a_path() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/Models")).unwrap();
+        fs::write(root.path().join("app/Models/Invoice.php"), "<?php\n").unwrap();
+        if !root.path().join("APP").exists() {
+            return; // case-sensitive volume
+        }
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("app/Controller.php"),
+            "<?php\nuse App\\Models\\Invoice;\n",
+        );
+        assert_eq!(edges, []);
     }
 
     #[cfg(unix)]
@@ -4401,7 +4491,7 @@ const char *example = "\
     fn php_grouped_imports_resolve_each_owning_file() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("app/Acme/Util")).unwrap();
-        for owner in ["Auth", "Clock", "foo", "bar", "FOO", "BAR"] {
+        for owner in ["Auth", "Clock", "foo", "bar", "LIMIT", "RATE"] {
             fs::write(
                 root.path().join(format!("app/Acme/Util/{owner}.php")),
                 "<?php namespace Acme\\Util;\n",
@@ -4426,12 +4516,12 @@ const char *example = "\
                 &["foo", "bar"][..],
             ),
             (
-                "<?php\nuse const Acme\\Util\\{FOO, BAR};\n",
-                &["FOO", "BAR"][..],
+                "<?php\nuse const Acme\\Util\\{LIMIT, RATE};\n",
+                &["LIMIT", "RATE"][..],
             ),
             (
-                "<?php\nuse function Acme\\Util\\foo as release_foo;\nuse const Acme\\Util\\FOO;\n",
-                &["foo", "FOO"][..],
+                "<?php\nuse function Acme\\Util\\foo as release_foo;\nuse const Acme\\Util\\LIMIT;\n",
+                &["foo", "LIMIT"][..],
             ),
             (
                 "<?php\nuse Acme\\Util\\Auth, Acme\\Util\\Clock as ReleaseClock;\n",
@@ -4454,12 +4544,12 @@ const char *example = "\
                 &["Auth", "Clock"][..],
             ),
             (
-                "<?php\nuse function Acme\\Util\\foo, Acme\\Util\\bar;\nuse const Acme\\Util\\FOO, Acme\\Util\\BAR;\n",
-                &["foo", "bar", "FOO", "BAR"][..],
+                "<?php\nuse function Acme\\Util\\foo, Acme\\Util\\bar;\nuse const Acme\\Util\\LIMIT, Acme\\Util\\RATE;\n",
+                &["foo", "bar", "LIMIT", "RATE"][..],
             ),
             (
-                "<?php\nuse Acme\\Util\\{\n    Auth as ReleaseAuth,\n    function foo as release_foo,\n    const FOO,\n};\n",
-                &["Auth", "foo", "FOO"][..],
+                "<?php\nuse Acme\\Util\\{\n    Auth as ReleaseAuth,\n    function foo as release_foo,\n    const LIMIT,\n};\n",
+                &["Auth", "foo", "LIMIT"][..],
             ),
         ] {
             let edges =
