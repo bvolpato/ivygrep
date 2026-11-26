@@ -1153,6 +1153,15 @@ impl Workspace {
         self.index_health_with_options(true)
     }
 
+    /// [`Self::quick_index_health`] without its side effect: that check removes
+    /// the PID file of a crashed index run, which the repair still needs to see.
+    pub(crate) fn looks_queryable(&self) -> bool {
+        !matches!(
+            legacy_pid_status(&self.indexing_pid_path(), false),
+            LegacyPidStatus::Stale
+        ) && self.quick_index_health().is_queryable()
+    }
+
     fn index_health_with_options(&self, verify_stores: bool) -> WorkspaceIndexHealth {
         let mut issues = Vec::new();
         let metadata = self.read_metadata().ok().flatten();

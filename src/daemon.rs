@@ -419,6 +419,9 @@ enum WatchReadiness {
 
 struct WatchControl {
     workspace: Workspace,
+    /// The root directory that the backend watches. Read before the watch
+    /// starts, so a replacement in between is recognized.
+    root_identity: Option<DirectoryIdentity>,
     notify: Notify,
     shutdown: Notify,
     dirty: AtomicBool,
@@ -441,6 +444,7 @@ impl WatchControl {
     fn new(workspace: Workspace) -> Self {
         let (readiness, _) = tokio::sync::watch::channel(WatchReadiness::Reconciling);
         Self {
+            root_identity: DirectoryIdentity::read(&workspace.root),
             workspace,
             notify: Notify::new(),
             shutdown: Notify::new(),
@@ -456,6 +460,15 @@ impl WatchControl {
             pending_work: Mutex::new(PendingWatchWork::default()),
             job_nonce: Mutex::new(None),
         }
+    }
+
+    /// Whether another directory took the place of the watched root. The
+    /// backend then reports nothing for the new one. A root that is missing or
+    /// cannot be read is not a replacement.
+    fn root_was_replaced(&self) -> bool {
+        self.root_identity.as_ref().is_some_and(|watched| {
+            DirectoryIdentity::read(&self.workspace.root).is_some_and(|current| current != *watched)
+        })
     }
 
     fn job_nonce(&self) -> Option<String> {
@@ -1723,6 +1736,8 @@ pub(crate) struct DaemonState {
     watcher_recovery: Arc<Mutex<HashMap<String, WatcherRecovery>>>,
     /// Requests, index runs, and watch updates, for the idle memory trim.
     activity: Arc<DaemonActivity>,
+    /// The single-instance lock of a running daemon.
+    daemon_lock: Option<Arc<File>>,
 }
 
 /// What the daemon is doing, as far as the idle memory trim needs to know.
@@ -1791,8 +1806,32 @@ fn create_search_model() -> Arc<dyn EmbeddingModel> {
 }
 
 impl DaemonState {
+    /// Remove the socket and the PID file at shutdown, unless the app home was
+    /// replaced: they can belong to another daemon then.
+    fn release_endpoint(&self) {
+        if self
+            .daemon_lock
+            .as_deref()
+            .is_none_or(crate::ipc::is_current_daemon_lock)
+        {
+            crate::ipc::cleanup_socket();
+            crate::ipc::cleanup_daemon_pid();
+        }
+    }
+
     fn watcher_registered(&self, workspace_id: &str) -> bool {
         self.watchers.lock().contains_key(workspace_id)
+    }
+
+    /// Whether a registered watcher still watches the workspace root.
+    fn watcher_covers_root(&self, workspace_id: &str) -> bool {
+        // A stalled mount must not hold the registry lock.
+        let control = self
+            .watchers
+            .lock()
+            .get(workspace_id)
+            .map(|registration| registration.control.clone());
+        control.is_some_and(|control| !control.root_was_replaced())
     }
 
     /// The error to report instead of attempting another registration while
@@ -1958,14 +1997,38 @@ impl DaemonState {
         workspaces: &[Workspace],
         skip_gitignore: bool,
         direct_exclusive: bool,
-        unfinished_publication_exclusive: bool,
+        repair_exclusive: bool,
+        cancellation: Option<&AtomicBool>,
+    ) -> Option<Vec<WorkspaceModeLease>> {
+        self.acquire_workspace_leases_for_rebuild(
+            workspaces,
+            skip_gitignore,
+            direct_exclusive,
+            repair_exclusive,
+            HashSet::new(),
+            cancellation,
+        )
+    }
+
+    /// [`Self::acquire_workspace_leases`] with exclusive leases for `rebuild`,
+    /// the workspaces that a search found unqueryable under a shared lease. The
+    /// stores are inspected only under a lease: on Windows, an open store fails
+    /// the exclusive holder that removes it.
+    fn acquire_workspace_leases_for_rebuild(
+        &self,
+        workspaces: &[Workspace],
+        skip_gitignore: bool,
+        direct_exclusive: bool,
+        repair_exclusive: bool,
+        mut rebuild: HashSet<String>,
         cancellation: Option<&AtomicBool>,
     ) -> Option<Vec<WorkspaceModeLease>> {
         let mut requirements = HashMap::new();
         let mut base_ids = HashMap::new();
         for workspace in workspaces {
             let workspace_requires_mutation = direct_exclusive
-                || (unfinished_publication_exclusive
+                || rebuild.contains(&workspace.id)
+                || (repair_exclusive
                     && (workspace.has_unfinished_index_publication()
                         || workspace.base_has_unfinished_index_publication()));
             requirements
@@ -2002,6 +2065,10 @@ impl DaemonState {
                 })
                 .collect::<Vec<_>>()
         };
+        let shared_search_workspaces = workspaces
+            .iter()
+            .filter(|workspace| repair_exclusive && !requirements[&workspace.id])
+            .collect::<Vec<_>>();
         let mut requirements = requirements.into_iter().collect::<Vec<_>>();
         requirements.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let mut leases = Vec::with_capacity(requirements.len());
@@ -2021,12 +2088,31 @@ impl DaemonState {
                 &workspace_readiness_signature(workspace),
             )
         }) {
+            // The stores changed while this request waited for its leases.
             drop(leases);
             return self.acquire_workspace_leases(
                 workspaces,
                 skip_gitignore,
                 true,
                 false,
+                cancellation,
+            );
+        }
+        let unqueryable = shared_search_workspaces
+            .into_iter()
+            .filter(|workspace| self.search_may_rebuild(workspace, skip_gitignore))
+            .map(|workspace| workspace.id.clone())
+            .collect::<Vec<_>>();
+        if !unqueryable.is_empty() {
+            // Each retry adds a workspace to `rebuild`, so the retries end.
+            drop(leases);
+            rebuild.extend(unqueryable);
+            return self.acquire_workspace_leases_for_rebuild(
+                workspaces,
+                skip_gitignore,
+                direct_exclusive,
+                repair_exclusive,
+                rebuild,
                 cancellation,
             );
         }
@@ -2052,10 +2138,10 @@ impl DaemonState {
     }
 
     /// Shared search leases for plain (non-worktree) workspaces when every
-    /// coordinator can grant immediately. Returns `None` as soon as one is
-    /// contended, releasing anything already taken, so callers fall back to
-    /// the blocking wait. This keeps the common uncontended query on one
-    /// blocking hop instead of two.
+    /// coordinator can grant immediately and every index is known to be ready.
+    /// Returns `None` otherwise, releasing anything already taken, so callers
+    /// fall back to the blocking wait. This keeps the common uncontended query
+    /// on one blocking hop instead of two.
     fn try_acquire_search_leases_inline(
         &self,
         workspaces: &[Workspace],
@@ -2081,7 +2167,31 @@ impl DaemonState {
                 .try_acquire_shared(skip_gitignore)?;
             leases.push(lease);
         }
-        Some(leases)
+        // Checked under the leases: only then can no other request replace the
+        // stores. The blocking path decides what an unproven index needs.
+        workspaces
+            .iter()
+            .all(|workspace| {
+                self.workspace_is_ready(
+                    workspace,
+                    skip_gitignore,
+                    &workspace_readiness_signature(workspace),
+                )
+            })
+            .then_some(leases)
+    }
+
+    /// Whether a search of `workspace` can rebuild its stores before it reads
+    /// them. A rebuild removes files that every other search of the workspace
+    /// reads, so it needs the exclusive lease.
+    fn search_may_rebuild(&self, workspace: &Workspace, skip_gitignore: bool) -> bool {
+        workspace.has_unfinished_index_publication()
+            || workspace.base_has_unfinished_index_publication()
+            || (!self.workspace_is_ready(
+                workspace,
+                skip_gitignore,
+                &workspace_readiness_signature(workspace),
+            ) && !workspace.looks_queryable())
     }
 
     fn ensure_search_watcher(
@@ -2169,8 +2279,8 @@ impl DaemonState {
                     )
                 };
                 let control = match control {
-                    Some(control) => Some(control),
-                    None => {
+                    Some(control) if !control.root_was_replaced() => Some(control),
+                    _ => {
                         let (requires_watcher, metadata_stamp) =
                             self.workspace_requires_watcher(workspace, cached_policy);
                         metadata_stamps[index] = metadata_stamp;
@@ -3175,6 +3285,7 @@ fn create_daemon_state() -> DaemonState {
         web_server: Arc::new(Mutex::new(None)),
         watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(DaemonActivity::default()),
+        daemon_lock: None,
     }
 }
 
@@ -3198,8 +3309,8 @@ async fn run_daemon_inner() -> Result<()> {
     // socket so two daemons can't both bind and steal it from each other
     // (which would leave the loser a zombie still holding file watchers).
     // Held for the daemon's lifetime.
-    let _daemon_lock = match crate::ipc::acquire_daemon_lock()? {
-        Some(file) => file,
+    let daemon_lock = match crate::ipc::acquire_daemon_lock()? {
+        Some(file) => Arc::new(file),
         None => {
             daemon_log("another ivygrep daemon is already running; exiting");
             return Ok(());
@@ -3213,7 +3324,9 @@ async fn run_daemon_inner() -> Result<()> {
         socket_path.display()
     ));
 
-    let state = create_daemon_state();
+    let mut state = create_daemon_state();
+    state.daemon_lock = Some(daemon_lock.clone());
+    spawn_app_home_check(daemon_lock);
     if std::env::var_os("IVYGREP_SKIP_WATCHER_RESTORE").is_none() {
         let restore_state = state.clone();
         tokio::task::spawn_blocking(move || restore_configured_watchers(&restore_state));
@@ -3247,8 +3360,7 @@ async fn run_daemon_inner() -> Result<()> {
             }
             daemon_log("received shutdown signal; stopping watchers and cleaning up");
             stop_all_watchers(&shutdown_state);
-            crate::ipc::cleanup_socket();
-            crate::ipc::cleanup_daemon_pid();
+            shutdown_state.release_endpoint();
             std::process::exit(0);
         });
     }
@@ -3534,6 +3646,25 @@ fn active_web_addr(state: &DaemonState) -> Option<SocketAddr> {
     guard.as_ref().map(|runtime| runtime.local_addr)
 }
 
+/// How often the daemon checks that its app home still exists.
+const APP_HOME_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Exit when the app home was deleted or replaced. No client can reach this
+/// daemon then, another daemon can start, and watchers would rebuild indexes
+/// that the user deleted. Nothing is cleaned up: the files at the old paths are
+/// gone or belong to the other daemon.
+fn spawn_app_home_check(daemon_lock: Arc<File>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(APP_HOME_CHECK_INTERVAL).await;
+            if !crate::ipc::is_current_daemon_lock(&daemon_lock) {
+                daemon_log("the app home was deleted or replaced; exiting");
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
 fn restore_configured_watchers(state: &DaemonState) {
     supervise_watchers(state);
 }
@@ -3556,7 +3687,7 @@ fn supervise_watchers(state: &DaemonState) {
     for (index_dir, metadata) in workspaces {
         if !metadata.watch_enabled
             || metadata.last_indexed_at_unix.is_none()
-            || state.watcher_registered(&metadata.id)
+            || state.watcher_covers_root(&metadata.id)
         {
             continue;
         }
@@ -5462,8 +5593,7 @@ async fn handle_request_with_cancellation(
             info!("restart requested, shutting down");
             stop_all_watchers(&state);
             // Clean up socket so the new daemon can bind immediately
-            crate::ipc::cleanup_socket();
-            crate::ipc::cleanup_daemon_pid();
+            state.release_endpoint();
             // Schedule exit after the response is sent
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -5495,6 +5625,15 @@ fn register_resolved_watcher(state: &DaemonState, workspace: Workspace) -> Resul
     #[cfg(test)]
     if FAIL_NEXT_WATCHER_REGISTRATION.with(|fail| fail.replace(false)) {
         anyhow::bail!("injected watcher registration failure");
+    }
+
+    if state.watcher_registered(&workspace.id) && !state.watcher_covers_root(&workspace.id) {
+        // A new registration scans the new directory before it reports ready.
+        let stale = state.watchers.lock().remove(&workspace.id);
+        if let Some(stale) = stale {
+            stop_watcher(&workspace, stale);
+            state.clear_workspace_contexts(&workspace);
+        }
     }
 
     let mut watchers = state.watchers.lock();
@@ -5865,10 +6004,15 @@ fn complete_initial_watch_reconciliation(control: &WatchControl) {
     control
         .initial_scan_required
         .store(false, Ordering::Relaxed);
-    publish_initial_watch_readiness_if_caught_up(control);
+    publish_initial_watch_readiness(control, false);
 }
 
-fn publish_initial_watch_readiness_if_caught_up(control: &WatchControl) {
+/// Publish startup readiness once no event from before the end of the initial
+/// scan waits for an update. `backlog_indexed` says that the worker claimed its
+/// last update after that scan and completed it. Such an update covers every
+/// event from before the scan ended, so newer events must not hold readiness
+/// back: a workspace whose files never stop changing would never become ready.
+fn publish_initial_watch_readiness(control: &WatchControl, backlog_indexed: bool) {
     if !control
         .initial_reconciliation_pending
         .load(Ordering::Relaxed)
@@ -5876,10 +6020,11 @@ fn publish_initial_watch_readiness_if_caught_up(control: &WatchControl) {
         return;
     }
     let pending = control.pending_work.lock();
+    let backlog_possible =
+        !matches!(pending.change, WatchChange::None) || control.indexing.load(Ordering::Relaxed);
     if !control.active.load(Ordering::Relaxed)
         || control.initial_scan_required.load(Ordering::Relaxed)
-        || !matches!(pending.change, WatchChange::None)
-        || control.indexing.load(Ordering::Relaxed)
+        || (backlog_possible && !backlog_indexed)
         || !control
             .initial_reconciliation_pending
             .swap(false, Ordering::Relaxed)
@@ -6011,7 +6156,11 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 break;
             }
 
-            if !control.initial_scan_required.load(Ordering::Relaxed) {
+            // Searches wait for startup to finish, so its updates skip the debounce.
+            if !control
+                .initial_reconciliation_pending
+                .load(Ordering::Relaxed)
+            {
                 wait_for_watch_quiet(&control).await;
             }
             if !control.active.load(Ordering::Relaxed) {
@@ -6023,6 +6172,9 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
             }
 
             while control.active.load(Ordering::Relaxed) {
+                // Read before the claim: an Index request can finish the scan
+                // between the two, and its queued events must not be missed.
+                let claimed_after_scan = !control.initial_scan_required.load(Ordering::Relaxed);
                 let Some(pending_work) = control.take_pending_work().or_else(|| {
                     control
                         .initial_scan_required
@@ -6174,6 +6326,9 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             state.clear_workspace_contexts(&control.workspace);
                         }
                         complete_initial_watch_reconciliation(&control);
+                        if claimed_after_scan {
+                            publish_initial_watch_readiness(&control, true);
+                        }
                         if crate::config::background_enhancement_enabled() {
                             let queue = state.enhancement_queue.clone();
                             let edited = control.workspace.clone();
@@ -6246,13 +6401,18 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                     }
                 }
 
-                if control.active.load(Ordering::Relaxed) && control.dirty.load(Ordering::Relaxed) {
+                if control.active.load(Ordering::Relaxed)
+                    && control.dirty.load(Ordering::Relaxed)
+                    && !control
+                        .initial_reconciliation_pending
+                        .load(Ordering::Relaxed)
+                {
                     wait_for_watch_quiet(&control).await;
                 }
             }
 
             control.indexing.store(false, Ordering::Relaxed);
-            publish_initial_watch_readiness_if_caught_up(&control);
+            publish_initial_watch_readiness(&control, false);
             if !control.active.load(Ordering::Relaxed) {
                 break;
             }
@@ -6326,6 +6486,7 @@ fn ensure_queryable_workspace(
     skip_gitignore: bool,
 ) -> Result<bool> {
     state.check_watcher_reconciliation(workspace)?;
+    let signature = workspace_readiness_signature(workspace);
     let indexed_filter_is_current =
         workspace_index_matches_skip_gitignore(workspace, skip_gitignore);
     if let Some(mut metadata) = workspace.read_metadata()?
@@ -6338,12 +6499,20 @@ fn ensure_queryable_workspace(
         state.refresh_workspace_watcher(workspace)?;
     }
 
+    // A worktree is ready only after its overlay is reconciled as well.
+    let remember_ready = || {
+        if !workspace.is_worktree() && signature.indexing_incomplete.is_none() {
+            state.store_workspace_ready(workspace, skip_gitignore, signature.clone());
+        }
+    };
     if workspace.quick_index_health().is_queryable() && indexed_filter_is_current {
+        remember_ready();
         return Ok(false);
     }
 
     let health = workspace.index_health();
     if health.is_queryable() && indexed_filter_is_current {
+        remember_ready();
         return Ok(false);
     }
 
@@ -6595,10 +6764,8 @@ fn modified_nanos(metadata: &std::fs::Metadata) -> u128 {
 }
 
 fn is_always_ignored_watch_path(rel: &Path) -> bool {
-    rel.components().any(|component| {
-        let part = component.as_os_str();
-        part == ".git" || part == ".ivygrep"
-    })
+    rel.components()
+        .any(|component| component.as_os_str() == ".git")
 }
 
 fn daemon_log(message: &str) {
@@ -7011,16 +7178,24 @@ async fn spawn_daemon_if_missing(autospawn: bool) {
     // keep watcher restore and supervision.
     cmd.arg("--daemon");
 
-    // Redirect daemon I/O to a log file to keep the CLI terminal clean.
+    // The daemon outlives this process and must not hold its terminal, pipes,
+    // or working directory. Output goes to a log file.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
     if let Ok(mut log_file) = open_daemon_log_file() {
         let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
-        let log_stderr = log_file.try_clone();
-        cmd.stdout(std::process::Stdio::from(log_file));
-        if let Ok(stderr_file) = log_stderr {
+        if let Ok(stderr_file) = log_file.try_clone() {
             cmd.stderr(std::process::Stdio::from(stderr_file));
-        } else {
-            cmd.stderr(std::process::Stdio::null());
         }
+        cmd.stdout(std::process::Stdio::from(log_file));
+    }
+    // A relative app home is relative to the working directory.
+    if let Ok(home) = config::app_home()
+        && home.is_absolute()
+        && home.is_dir()
+    {
+        cmd.current_dir(home);
     }
 
     #[cfg(unix)]
@@ -7325,6 +7500,7 @@ mod tests {
             web_server: Arc::new(Mutex::new(None)),
             watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(DaemonActivity::default()),
+            daemon_lock: None,
         }
     }
 
@@ -10726,6 +10902,46 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn initial_reconciliation_finishes_while_events_keep_arriving() {
+        let (_home, _repo, control) = queued_startup_watch_change();
+        let mut readiness = control.readiness.subscribe();
+        // The scan is complete, and its queued edit is not indexed yet.
+        complete_initial_watch_reconciliation(&control);
+        assert!(matches!(*readiness.borrow(), WatchReadiness::Reconciling));
+
+        // A new event arrives as soon as the worker claims the previous one.
+        let churn_control = control.clone();
+        let churn = tokio::spawn(async move {
+            loop {
+                if !churn_control.dirty.load(Ordering::Relaxed) {
+                    churn_control.mark_paths_dirty([PathBuf::from("stable.rs")]);
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+        spawn_watch_worker(test_state(), control.clone());
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            readiness.wait_for(|value| !matches!(value, WatchReadiness::Reconciling)),
+        )
+        .await;
+        let outcome = outcome.map(|value| matches!(*value.unwrap(), WatchReadiness::Ready));
+        churn.abort();
+        control.active.store(false, Ordering::Relaxed);
+        control.notify.notify_one();
+        assert!(
+            outcome.expect("events after the scan must not hold readiness back"),
+            "startup catch-up failed"
+        );
+        assert!(indexed_file_contains(
+            &control.workspace,
+            "edited.rs",
+            "after_startup_marker"
+        ));
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn initial_reconciliation_reports_startup_catchup_failure_and_recovers() {
         let (_home, _repo, control) = queued_startup_watch_change();
         let workspace = &control.workspace;
@@ -11949,6 +12165,8 @@ mod tests {
         let filter = WatchEventFilter::new(&workspace);
 
         assert!(filter.path_should_reindex(&workspace.root.join("src/lib.rs")));
+        // The name of a directory does not make it the app home.
+        assert!(filter.path_should_reindex(&workspace.root.join(".ivygrep/notes.md")));
         assert!(!filter.path_should_reindex(&workspace.index_dir.join("job.json")));
         assert!(!filter.path_should_reindex(&home.join("daemon.log")));
     }
@@ -12352,6 +12570,80 @@ mod tests {
         assert!(!ready.leases[0].exclusive);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn concurrent_searches_rebuild_an_unqueryable_index_and_keep_its_settings() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let (_repo, workspace) = indexed_workspace("rebuilt_once_marker");
+        let state = test_state();
+        let _watcher_cleanup = WatcherCleanup(&state);
+        register_watcher(&state, &workspace.root).unwrap();
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        let write_old_format = || {
+            std::fs::write(
+                workspace.index_format_version_path(),
+                (crate::workspace::INDEX_FORMAT_VERSION - 1).to_string(),
+            )
+            .unwrap();
+        };
+        let search_leases = || {
+            state.acquire_search_leases(
+                std::slice::from_ref(&workspace),
+                false,
+                None,
+                RequestOrigin::Local,
+            )
+        };
+        assert!(!search_leases().await.unwrap().unwrap().leases[0].exclusive);
+
+        // The index becomes unqueryable while a search waits for its lease.
+        let mutation = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+        let waiting = search_leases();
+        tokio::pin!(waiting);
+        poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        write_old_format();
+        drop(mutation);
+        assert!(
+            waiting.await.unwrap().unwrap().leases[0].exclusive,
+            "a rebuild removes stores that other searches read"
+        );
+
+        for _ in 0..3 {
+            let before = workspace.read_index_incarnation().unwrap();
+            write_old_format();
+            let searches = (0..8)
+                .map(|_| {
+                    let mut request = literal_request_for(&workspace, "rebuilt_once_marker");
+                    if let DaemonRequest::LiteralSearch { path, .. } = &mut request {
+                        *path = None;
+                    }
+                    tokio::spawn(handle_request(state.clone(), request))
+                })
+                .collect::<Vec<_>>();
+            for search in searches {
+                let response = search.await.unwrap();
+                assert!(
+                    matches!(&response, DaemonResponse::SearchResults { hits, warnings } if hits.len() == 1 && warnings.is_empty()),
+                    "{response:?}"
+                );
+            }
+            assert_ne!(workspace.read_index_incarnation().unwrap(), before);
+            assert!(workspace.quick_index_health().is_queryable());
+            assert!(
+                workspace.read_metadata().unwrap().unwrap().watch_enabled,
+                "a rebuild must not turn the watcher off"
+            );
+        }
+    }
+
     async fn wait_for_initial_watch_reconciliation(state: &DaemonState, workspace: &Workspace) {
         let skip_gitignore = workspace.read_metadata().unwrap().unwrap().skip_gitignore;
         let leases = tokio::time::timeout(
@@ -12480,10 +12772,16 @@ mod tests {
     fn uncontended_search_leases_are_granted_inline_and_contended_ones_are_not() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
-        let repo = tempdir().unwrap();
-        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let (_repo, workspace) = indexed_workspace("inline_lease_marker");
         let state = test_state();
 
+        assert!(
+            state
+                .try_acquire_search_leases_inline(std::slice::from_ref(&workspace), false)
+                .is_none(),
+            "the blocking path checks an index before its first search"
+        );
+        assert!(!ensure_queryable_workspace(&state, &workspace, false).unwrap());
         let first = state
             .try_acquire_search_leases_inline(std::slice::from_ref(&workspace), false)
             .expect("idle workspace grants a shared lease inline");
@@ -13200,8 +13498,7 @@ mod tests {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
 
-        let repo = tempdir().unwrap();
-        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let (_repo, workspace) = indexed_workspace("opposite_mode_marker");
         let state = test_state();
         let active_lease = state.acquire_workspace_mode(&workspace, false);
         let request_id = uuid::Uuid::new_v4();
@@ -14028,6 +14325,61 @@ mod tests {
         assert!(state.watcher_recovery.lock().is_empty());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn watcher_of_a_replaced_plain_root_is_registered_again() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("notes");
+        let make = |path: &Path, marker: &str| {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("lib.rs"), format!("pub fn {marker}() {{}}\n")).unwrap();
+        };
+        make(&root, "before_swap_marker");
+        let workspace = Workspace::resolve(&root).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        let _watcher_cleanup = WatcherCleanup(&state);
+        register_watcher(&state, &root).unwrap();
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        let watched = || state.watchers.lock()[&workspace.id].control.clone();
+        let swap = |marker: &str| {
+            let next = parent.path().join(marker);
+            make(&next, marker);
+            std::fs::rename(&root, parent.path().join(format!("{marker}-old"))).unwrap();
+            std::fs::rename(&next, &root).unwrap();
+        };
+
+        // A search finds the new directory.
+        let stale = watched();
+        swap("searched_swap_marker");
+        let response = handle_request(
+            state.clone(),
+            test_hybrid_search_request(&workspace, "searched_swap_marker"),
+        )
+        .await;
+        assert!(
+            matches!(&response, DaemonResponse::SearchResults { hits, .. } if hits.iter().any(|hit| hit.preview.contains("searched_swap_marker"))),
+            "{response:?}"
+        );
+        let current = watched();
+        assert!(!Arc::ptr_eq(&stale, &current));
+        assert!(!stale.active.load(Ordering::Relaxed));
+
+        // Without a search, the supervisor does.
+        swap("supervised_swap_marker");
+        supervise_watchers(&state);
+        assert!(!Arc::ptr_eq(&current, &watched()));
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        assert!(indexed_file_contains(
+            &workspace,
+            "lib.rs",
+            "supervised_swap_marker"
+        ));
+    }
+
     /// A registered, reconciled watcher for a fresh root, as the release tests need it.
     async fn watched_root(state: &DaemonState, root: &Path) -> (Workspace, Arc<WatchControl>) {
         std::fs::create_dir(root).unwrap();
@@ -14426,6 +14778,42 @@ mod tests {
             external_git_exclude_state(&exclude),
             ExternalGitExcludeState::Missing
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn daemon_of_a_deleted_home_leaves_the_endpoint_of_its_successor() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let endpoint = || {
+            [
+                crate::ipc::socket_path().unwrap(),
+                crate::ipc::daemon_pid_path().unwrap(),
+            ]
+        };
+        let start = || {
+            let lock = crate::ipc::acquire_daemon_lock().unwrap().unwrap();
+            for path in endpoint() {
+                std::fs::write(path, "").unwrap();
+            }
+            DaemonState {
+                daemon_lock: Some(Arc::new(lock)),
+                ..test_state()
+            }
+        };
+        let wiped = start();
+        std::fs::remove_dir_all(home.path()).unwrap();
+        std::fs::create_dir(home.path()).unwrap();
+        let successor = start();
+        assert!(!crate::ipc::is_current_daemon_lock(
+            wiped.daemon_lock.as_ref().unwrap()
+        ));
+        wiped.release_endpoint();
+        assert!(endpoint().iter().all(|path| path.exists()));
+
+        successor.release_endpoint();
+        assert!(endpoint().iter().all(|path| !path.exists()));
     }
 
     #[test]
