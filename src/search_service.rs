@@ -417,6 +417,30 @@ mod tests {
 
     #[test]
     #[serial]
+    fn all_workspace_selection_names_workspaces_without_a_complete_index() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn rebuilding() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        crate::indexer::index_workspace(&workspace, crate::embedding::create_hash_model().as_ref())
+            .unwrap();
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.last_indexed_at_unix = None;
+        workspace.write_metadata(&metadata).unwrap();
+
+        let selection = select_all_indexed_workspaces(Workspace::resolve).unwrap();
+        assert!(selection.workspaces.is_empty());
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(
+            selection.warnings[0].contains(&workspace.root.display().to_string()),
+            "{:?}",
+            selection.warnings
+        );
+    }
+
+    #[test]
+    #[serial]
     fn all_workspace_selection_survives_corrupt_registry_entries() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };

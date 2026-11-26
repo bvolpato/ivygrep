@@ -328,6 +328,9 @@ pub(crate) fn job_status_at(
     }
 }
 
+/// Detail of an enhancement record that names the lane of its worker.
+pub(crate) const WORKER_LANE_DETAIL: &str = "lane";
+
 pub fn process_is_alive(pid: u32, expected_start_time: Option<&str>) -> bool {
     #[cfg(unix)]
     {
@@ -432,8 +435,12 @@ pub fn process_start_time_token(pid: u32) -> Option<String> {
     {
         use std::process::Command;
 
+        // `ps` prints the start time in the locale and time zone of its caller.
+        // Processes compare tokens, so every caller must get the same text.
         let output = Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC")
             .output()
             .ok()?;
         if !output.status.success() {
@@ -590,6 +597,31 @@ mod tests {
         assert_eq!(current.nonce.as_deref(), Some(second_nonce));
         assert_eq!(current.phase, "second");
         assert!(current.active);
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    #[serial]
+    fn process_start_token_is_independent_of_locale_and_time_zone() {
+        let names = ["LC_ALL", "TZ"];
+        let saved = names.map(std::env::var_os);
+        let token = |locale: &str, zone: &str| {
+            unsafe {
+                std::env::set_var("LC_ALL", locale);
+                std::env::set_var("TZ", zone);
+            }
+            process_start_time_token(std::process::id()).expect("own process start time")
+        };
+        let tokens = [token("C", "UTC"), token("de_DE.UTF-8", "Asia/Tokyo")];
+        for (name, value) in names.into_iter().zip(saved) {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        assert_eq!(tokens[0], tokens[1]);
     }
 
     #[cfg(unix)]

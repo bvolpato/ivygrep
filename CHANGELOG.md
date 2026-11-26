@@ -4,6 +4,17 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- On macOS, a process recognizes running watchers and workers that started with another locale or time zone. `ig --status` reported a live watcher as offline, and `--wait-for-enhancement` failed with `background enhancement stalled` after a second process started a second worker.
+- `ig --status` shows a hash worker, and a worker that waits for its start, after an earlier worker of the workspace finished. It also keeps the pause reason. A process that received the PID of a dead worker no longer blocks enhancement.
+- `ig --add --force`, `ig --rm`, and other index removals no longer fail with `Directory not empty` or `No such file or directory` while another process reads or updates the index.
+- An `--all-indices` search warns about each workspace that it skips because the index of that workspace is not complete. During a rebuild it returned no results without a message.
+- `ig --status` reports the error when the updates of a live watcher fail. It reported `configured + live`.
+- Hash and neural coverage no longer count vectors of text that was removed or replaced.
+- `ig --doctor` reports a burst of watcher events only while events wait. The finding stayed until the daemon restarted.
+- A query warns when the path of the daemon socket is too long for a Unix socket. Only `daemon.log` named the reason why no daemon and no watcher ran.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.

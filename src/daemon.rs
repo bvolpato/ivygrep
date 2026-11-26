@@ -6994,6 +6994,13 @@ async fn spawn_daemon_if_missing(autospawn: bool) {
         return;
     }
 
+    if let Some(problem) = crate::ipc::socket_path_problem() {
+        // Once per process: an MCP session asks for the daemon on each call.
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| eprintln!("warning: {problem}"));
+        return;
+    }
+
     let Ok(exe) = std::env::current_exe() else {
         return;
     };

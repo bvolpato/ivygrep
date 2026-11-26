@@ -903,7 +903,13 @@ statistics. If that lock is unavailable, it keeps workspace identity and job
 progress and sets `statistics_unavailable`. CLI JSON omits those statistics;
 MCP returns `null` counts and readiness. Text and Web status show that statistics
 are temporarily unavailable instead of interpreting placeholders as an empty
-index or complete coverage.
+index or complete coverage. Coverage leaves out stored vectors whose removal is
+pending, so an edited workspace reads as complete only after enhancement.
+
+A worker process renews its job record from its start, also while a guard holds
+it back or it waits for a place. The record names the lane, the PID, and the
+start time of the process. A later process with the same PID is therefore not
+mistaken for the worker.
 
 The split of the SQLite store into stored chunks, graph, and auxiliary bytes
 comes from `dbstat`, which reads every page of the store. A status listing
