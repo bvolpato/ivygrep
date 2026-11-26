@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   isMarkdownPath,
   languageForPath,
+  markQueryTerms,
   queryTerms,
   renderCode,
   renderMarkdown,
-  renderSnippet
+  renderSnippet,
+  workspaceLink
 } from "./render-utils";
 
 describe("render-utils", () => {
@@ -44,5 +46,30 @@ describe("render-utils", () => {
 
   it("extracts stable terms from free-form queries", () => {
     expect(queryTerms("fix OAuth token refresh")).toEqual(["fix", "oauth", "token", "refresh"]);
+  });
+
+  it("renders files and code fences named like object members", () => {
+    for (const name of ["constructor", "__proto__"]) {
+      const hit = { file_path: `docs/${name}`, start_line: 1, end_line: 1, score: 1, preview: "plain text" };
+      expect(renderSnippet(hit, "")).toContain("plain text");
+      expect(renderMarkdown(`\`\`\`${name}\nplain text\n\`\`\``)).toContain("plain text");
+    }
+  });
+
+  it("does not mark query terms inside escaped characters", () => {
+    expect(markQueryTerms("a &lt; b &amp;&amp; it&#x27;s", "lt amp x27")).toBe("a &lt; b &amp;&amp; it&#x27;s");
+    expect(markQueryTerms("lt &lt; b", "lt")).toBe('<mark class="query-mark">lt</mark> &lt; b');
+  });
+
+  it("resolves Markdown links between workspace files", () => {
+    expect(workspaceLink("docs/a/guide.md", "../lib%20x.md?raw=1#L12")).toEqual({ path: "docs/lib x.md", line: 12 });
+    expect(workspaceLink("docs/guide.md", "/src/lib.rs")).toEqual({ path: "src/lib.rs", line: 1 });
+    expect(workspaceLink("guide.md", "../../outside.md")).toEqual({ path: "../../outside.md", line: 1 });
+    expect(workspaceLink("docs/guide.md", "#usage")).toEqual({ path: "docs/guide.md", line: 1 });
+    for (const external of ["https://example.com/a", "//example.com/a", "mailto:a@example.com"]) {
+      expect(workspaceLink("docs/guide.md", external)).toBeUndefined();
+    }
+    expect(renderMarkdown("[x](https://example.com)")).toContain('target="_blank" rel="noopener noreferrer"');
+    expect(renderMarkdown("[x](lib.md)")).not.toContain("target=");
   });
 });
