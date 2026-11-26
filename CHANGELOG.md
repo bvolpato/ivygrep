@@ -8,7 +8,7 @@ All notable changes to ivygrep are documented in this file.
 
 - `--wait-for-enhancement` reports a failed neural worker and exits. Without a model, for example offline, it started a new worker without end and never returned.
 - `ig --rm PATH` removes the index of a directory that no longer exists, that a newer Git root contains, or that was renamed. It fails when PATH has no saved index. The index of a deleted directory, such as a removed Git worktree, no longer blocks an index of the directory above it.
-- A search, context, or MCP request for a path below an indexed plain directory uses that index with a path scope. It built a second index, and `ig --add` of the directory then failed.
+- A search, context, or MCP request for a path below an indexed plain directory uses that index with a path scope. It built a second index, and `ig --add` of the directory then failed. A second index is still built for an ignored directory, for a directory that the outer index does not have yet, and while the outer index needs a rebuild.
 - `ig --doctor --fix` rebuilds an index after an interrupted indexing run, also when `ig --doctor` ran first. It asks before it indexes a home directory or the filesystem root, and it applies the sub-workspace check to a first index.
 - `ig --doctor` reports an offline watcher, a failed background enhancement, and a daemon endpoint that no daemon answers.
 - `ig --add --json` and `ig --rm --json` print the same fields with and without a daemon. `--first-line-only` applies to `--json` output.

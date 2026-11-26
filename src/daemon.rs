@@ -1154,17 +1154,8 @@ impl WatchEventFilter {
         if fs2::FileExt::try_lock_shared(&index_lock).is_err() {
             return true;
         }
-        let first = format!("{}/", crate::workspace::index_path_string(rel_dir));
-        // `0` follows `/` in byte order, so this is every path with the prefix.
-        let past = format!("{}0", first.trim_end_matches('/'));
-        crate::indexer::open_sqlite_readonly(&self.workspace.sqlite_path())
-            .and_then(|sqlite| {
-                Ok(sqlite.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path >= ?1 AND file_path < ?2)",
-                    rusqlite::params![first, past],
-                    |row| row.get::<_, bool>(0),
-                )?)
-            })
+        self.workspace
+            .has_indexed_file_below(rel_dir)
             .unwrap_or(true)
     }
 

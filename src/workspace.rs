@@ -430,8 +430,8 @@ impl Workspace {
         git_main_worktree_root(&self.root).filter(|main| *main != self.root)
     }
 
-    /// A workspace handle for job-ledger access only, built from a registry
-    /// entry without resolving the root (which may be missing). It carries no
+    /// A workspace handle for saved state only, built from a registry entry
+    /// without resolving the root (which may be missing). It carries no
     /// repository or worktree information; do not index or search through it.
     pub(crate) fn ledger_only(index_dir: PathBuf, metadata: &WorkspaceMetadata) -> Self {
         Self {
@@ -1152,6 +1152,20 @@ impl Workspace {
         read_sqlite_vector_key_count(&self.index_dir)
     }
 
+    /// Whether the index holds a chunk of a file below `rel_dir`. This does not
+    /// read the base index of an overlay.
+    pub(crate) fn has_indexed_file_below(&self, rel_dir: &Path) -> Result<bool> {
+        let first = format!("{}/", index_path_string(rel_dir));
+        // `0` follows `/` in byte order, so this is every path with the prefix.
+        let past = format!("{}0", first.trim_end_matches('/'));
+        let sqlite = crate::indexer::open_sqlite_readonly(&self.sqlite_path())?;
+        Ok(sqlite.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path >= ?1 AND file_path < ?2)",
+            rusqlite::params![first, past],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Measures the SQLite tiers of a store of any size. This reads every
     /// page of the store.
     pub fn index_component_sizes(&self) -> IndexComponentSizes {
@@ -1697,13 +1711,13 @@ pub(crate) fn resolve_workspace_and_scope_with_base(
 
 /// The nearest indexed directory above `root`, when `root` is not in a Git
 /// checkout and has no index of its own. A path below such a directory is a
-/// scope of its index, as a path below a Git root is. A directory that the
-/// outer index ignores stays a workspace of its own.
+/// scope of its index, as a path below a Git root is. An ignored directory, and
+/// one that the outer index cannot answer for, stays a workspace of its own.
 fn indexed_plain_ancestor(root: &Path) -> Option<PathBuf> {
     if is_git_workspace_root(root) {
         return None;
     }
-    let (_, metadata) = workspace_registry()
+    let (index_dir, metadata) = workspace_registry()
         .ok()?
         .entries
         .into_iter()
@@ -1712,11 +1726,28 @@ fn indexed_plain_ancestor(root: &Path) -> Option<PathBuf> {
         })
         .max_by_key(|(_, metadata)| metadata.root.components().count())?;
     let rel_path = root.strip_prefix(&metadata.root).ok()?;
-    let indexed = !rel_path.as_os_str().is_empty()
-        && crate::walker::SourcePathMatcher::new(&metadata.root, metadata.skip_gitignore)
+    // By default, a search leaves out ignored files, also when the index has
+    // them.
+    let allowed = !rel_path.as_os_str().is_empty()
+        && crate::walker::SourcePathMatcher::new(&metadata.root, false)
             .allows_dir(rel_path)
             .unwrap_or(false);
-    indexed.then_some(metadata.root)
+    if !allowed {
+        return None;
+    }
+    let outer = Workspace::ledger_only(index_dir, &metadata);
+    // The health check removes the PID file of a crashed indexing run, which
+    // the repair of the outer index needs.
+    let crashed = matches!(
+        legacy_pid_status(&outer.indexing_pid_path(), false),
+        LegacyPidStatus::Stale
+    );
+    let usable = !crashed
+        && outer.quick_index_health().is_queryable()
+        // `root` can be newer than the outer index.
+        && (outer.has_indexed_file_below(rel_path).unwrap_or(false)
+            || !workspace_has_indexable_files(root, false));
+    usable.then_some(metadata.root)
 }
 
 fn scope_for_canonical_path(root: &Path, canonical: &Path) -> Result<Option<WorkspaceScope>> {
@@ -2970,6 +3001,56 @@ mod tests {
             resolve("work/deep"),
             (notes.join("work"), scope("deep", false))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn plain_subdirectory_stays_separate_when_the_outer_index_cannot_answer() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let tmp = tempfile::tempdir().unwrap();
+        let notes = tmp.path().canonicalize().unwrap().join("notes");
+        let add = |directory: &str, file: &str, contents: &[u8]| {
+            std::fs::create_dir_all(notes.join(directory)).unwrap();
+            std::fs::write(notes.join(directory).join(file), contents).unwrap();
+        };
+        add("work", "note.md", b"# Note\n");
+        add("drafts", "note.md", b"# Note\n");
+        std::fs::write(notes.join(".ignore"), "drafts/\n").unwrap();
+        let outer = Workspace::resolve(&notes).unwrap();
+        let model = crate::embedding::create_hash_model();
+        crate::indexer::index_workspace(&outer, model.as_ref()).unwrap();
+        let mut metadata = outer.read_metadata().unwrap().unwrap();
+        metadata.skip_gitignore = true;
+        outer.write_metadata(&metadata).unwrap();
+        crate::indexer::index_workspace(&outer, model.as_ref()).unwrap();
+        assert!(outer.has_indexed_file_below(Path::new("drafts")).unwrap());
+        let uses_outer = |path: &str| {
+            let workspace = resolve_workspace_and_scope(&notes.join(path)).unwrap().0;
+            assert!(workspace.root == notes || workspace.root == notes.join(path));
+            workspace.root == notes
+        };
+        assert!(uses_outer("work"));
+        assert!(!uses_outer("drafts"), "a search leaves out ignored files");
+
+        // An index that needs a rebuild is left as it is, with the PID file of
+        // its crashed run.
+        let format = std::fs::read(outer.index_format_version_path()).unwrap();
+        std::fs::write(outer.index_format_version_path(), "29").unwrap();
+        assert!(!uses_outer("work"));
+        std::fs::write(outer.index_format_version_path(), format).unwrap();
+        std::fs::write(outer.indexing_pid_path(), "not a process").unwrap();
+        assert!(!uses_outer("work"));
+        std::fs::remove_file(outer.indexing_pid_path()).unwrap();
+        assert!(uses_outer("work"));
+
+        // The index does not have a new directory until its next run.
+        add("later", "note.md", b"# Note\n");
+        add("photos", "photo.jpg", b"\xff\xd8\xff\xe0\0\0");
+        assert!(!uses_outer("later"));
+        assert!(uses_outer("photos"));
+        crate::indexer::index_workspace(&outer, model.as_ref()).unwrap();
+        assert!(uses_outer("later"));
     }
 
     #[test]
