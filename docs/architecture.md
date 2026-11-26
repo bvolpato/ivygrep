@@ -613,9 +613,9 @@ selected workspace without following child symlinks. Preview metadata and text
 come from the same opened file; unavailable live previews use indexed text.
 
 Literal and regex searches compare single lines. A pattern keeps its spaces and
-loses one trailing line break. A literal pattern with any other line break, or a
-regex whose every match needs one, has no results, and the CLI and MCP say so in
-a warning.
+loses one trailing line break. A literal pattern also loses trailing carriage
+returns. A literal pattern with any other line break, or a regex whose every match
+needs one, has no results, and the CLI and MCP say so in a warning.
 
 Literal and regex previews return lines up to 1 KiB unchanged. A longer line,
 such as a minified bundle or source map, keeps a 1 KiB window around its first

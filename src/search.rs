@@ -1036,7 +1036,8 @@ fn literal_search_candidates(
     if query_text.trim().is_empty() || options.bounded_limit() == Some(0) {
         return Ok(None);
     }
-    let query = without_final_line_break(query_text);
+    // A shell `$(...)` removes the `\n` of a final `\r\n` and keeps the `\r`.
+    let query = without_final_line_break(query_text).trim_end_matches('\r');
     if query.contains('\n') {
         return Ok(None);
     }
@@ -7637,7 +7638,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(lines("if"), ["diff the notes", "  if ready"]);
-        for query in ["if ", " if", "  if ready\r\n"] {
+        for query in ["if ", " if", "  if ready\r\n", "  if ready\r"] {
             assert_eq!(lines(query), ["  if ready"], "{query:?}");
         }
         assert!(lines(" \n").is_empty());
