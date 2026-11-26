@@ -52,10 +52,6 @@ fn search_hits(
             .chars()
             .any(|character| character.is_ascii_alphanumeric())
     {
-        // Literal search rejects text that no single line can contain.
-        if query_text.contains('\n') {
-            return Ok(Vec::new());
-        }
         let literal_options = SearchOptions {
             limit: options.limit.or(Some(DEFAULT_SEARCH_LIMIT)),
             ..options.clone()

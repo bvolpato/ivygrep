@@ -159,8 +159,10 @@ pub fn regex_search_with_options(
     if max_hits == 0 {
         return Ok(Vec::new());
     }
-    let pattern = line_pattern(pattern)?;
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let Some(pattern) = line_pattern(pattern) else {
+        return Ok(Vec::new());
+    };
 
     // Try to use index-backed pre-filtering via literal extraction.
     let candidate_files = index_prefilter_files(
@@ -199,8 +201,10 @@ pub fn regex_file_name_search_with_options(
     if options.is_cancelled() || options.bounded_limit() == Some(0) {
         return Ok(Vec::new());
     }
-    let pattern = line_pattern(pattern)?;
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let Some(pattern) = line_pattern(pattern) else {
+        return Ok(Vec::new());
+    };
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(true)
         .build(pattern)?;
@@ -267,17 +271,12 @@ pub fn regex_file_name_search_with_options(
     Ok(groups)
 }
 
-/// Files are searched one line at a time, so a pattern whose every match needs
-/// a line break cannot match. Report it instead of returning no results.
-fn line_pattern(pattern: &str) -> Result<&str> {
+/// The pattern without its final line break. `None` when every match needs a
+/// line break: files are searched one line at a time.
+pub(crate) fn line_pattern(pattern: &str) -> Option<&str> {
     let pattern = crate::search::without_final_line_break(pattern);
-    if regex_syntax::parse(pattern).is_ok_and(|hir| requires_line_break(&hir)) {
-        anyhow::bail!(
-            "regex search matches within one line, but the pattern needs a line break. \
-             Search for one of its lines."
-        );
-    }
-    Ok(pattern)
+    let needs_line_break = regex_syntax::parse(pattern).is_ok_and(|hir| requires_line_break(&hir));
+    (!needs_line_break).then_some(pattern)
 }
 
 fn requires_line_break(hir: &Hir) -> bool {
@@ -1264,9 +1263,9 @@ mod tests {
     }
 
     #[test]
-    fn line_pattern_rejects_patterns_that_need_a_line_break() {
+    fn line_pattern_finds_patterns_that_need_a_line_break() {
         for pattern in ["a\nb", r"a\nb", r"a\r?\nb", r"(a\n)+b", r"a\n|b\n", "a\n\n"] {
-            assert!(line_pattern(pattern).is_err(), "{pattern:?}");
+            assert!(line_pattern(pattern).is_none(), "{pattern:?}");
         }
         for pattern in [r"a\n|b", r"a\n?b", r"a[\r\n]b", r"(?s)a.b", r"a\s+b", "a("] {
             assert_eq!(line_pattern(pattern).unwrap(), pattern, "{pattern:?}");

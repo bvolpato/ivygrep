@@ -1038,11 +1038,7 @@ fn literal_search_candidates(
     }
     let query = without_final_line_break(query_text);
     if query.contains('\n') {
-        anyhow::bail!(
-            "literal search matches within one line, but the query has {} lines. \
-             Search for one of its lines, or search without literal mode.",
-            query.lines().count()
-        );
+        return Ok(None);
     }
 
     let query_lower = fold_literal_case(query);
@@ -1060,6 +1056,19 @@ fn literal_search_candidates(
         return Ok(None);
     }
     Ok(Some(LiteralCandidates { query_lower, paths }))
+}
+
+/// Explains the empty result of a pattern that [`pattern_needs_line_break`] reports.
+pub(crate) const MULTI_LINE_PATTERN_WARNING: &str = "literal and regex searches match within one line, but this pattern needs a line break. Search for one of its lines, or search without this mode.";
+
+/// Whether a literal or regex pattern can only match across lines. Both modes
+/// search one line at a time, so it has no results.
+pub(crate) fn pattern_needs_line_break(pattern: &str, regex: bool) -> bool {
+    if regex {
+        crate::regex_search::line_pattern(pattern).is_none()
+    } else {
+        without_final_line_break(pattern).contains('\n')
+    }
 }
 
 /// A pasted line can end with its line break. It is not part of the pattern.
@@ -7607,15 +7616,11 @@ mod tests {
 
     #[test]
     #[serial]
-    fn literal_search_keeps_spaces_and_rejects_line_breaks() {
+    fn literal_search_keeps_spaces_and_drops_one_line_break() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
-        std::fs::write(
-            tmp.path().join("notes.txt"),
-            "diff the notes\n  if ready\n漢字 行\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "diff the notes\n  if ready\n").unwrap();
         let workspace = Workspace::resolve(tmp.path()).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
@@ -7636,17 +7641,10 @@ mod tests {
             assert_eq!(lines(query), ["  if ready"], "{query:?}");
         }
         assert!(lines(" \n").is_empty());
-
-        let error = literal_search(&workspace, "diff the notes\n  if ready", &options)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("within one line"), "{error}");
-        // A hybrid query without ASCII words runs the literal pass.
-        assert!(
-            hybrid_search(&workspace, "漢字\n行", Some(&model), &options)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(lines("diff the notes\n  if ready").is_empty());
+        for (pattern, multi_line) in [("if \n", false), ("a\nb", true), ("a\n\n", true)] {
+            assert_eq!(pattern_needs_line_break(pattern, false), multi_line);
+        }
     }
 
     #[test]
