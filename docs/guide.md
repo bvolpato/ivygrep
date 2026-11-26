@@ -63,7 +63,7 @@ Since v1.3.1, search immediately excludes a file that the safe file reader confi
 
 ### Worktrees
 
-Linked Git worktrees share a base index. Each worktree stores only changed chunks and tombstones. An overlay tombstone hides a base-backed file that was deleted on that branch, and it does not change what other worktrees can search.
+Linked Git worktrees share a base index. Each worktree stores only changed chunks and tombstones. An overlay tombstone hides a base-backed file that was deleted on that branch, and it does not change what other worktrees can search. A deleted file that only the worktree had needs no tombstone. Its overlay entries are removed.
 
 ### Broad directories
 
@@ -136,17 +136,19 @@ Use `--since main`, `--since HEAD~3`, or `--since '@{upstream}'` inside a Git wo
 
 Context packs can include Git history for deleted files, labeled `git_deleted`. Search excludes files that it confirms are missing from the workspace.
 
-Abridged output:
+Abridged output of `ig context` on the ripgrep 16.0.0 source:
 
 ```text
 # ivygrep context
-Budget: 7642 / 8000 estimated tokens
-Coverage: 7 files | 2 primary | 1 definitions | 1 dependencies | 0 dependents | 2 callers | 0 references | 1 tests | 0 config | 0 docs
-Candidates: 31 retrieved | 14 selected
+Task: expand a tilde in the global core.excludesFile path
+Budget: 980 / 1000 estimated tokens (truncated)
+Anchors: core.excludesFile, excludesFile
+Coverage: 2 files | 2 primary | 0 definitions | 1 dependencies | 1 dependents | 0 callers | 0 references | 1 tests | 0 config | 0 docs
+Candidates: 15 retrieved | 3 selected
 ## Evidence
-### 1. src/auth/refresh.rs:118-166 [primary, definition]
-Why: task anchor; changed implementation.
-Signals: lexical, symbol, git change.
+### 1. crates/ignore/src/gitignore.rs:986-1014 [primary, test]
+Why: rank 1 for primary retrieval; rank 2 for anchor test retrieval.
+Signals: lexical, neural, semantic.
 ```
 
 ## Agents and MCP
@@ -155,7 +157,7 @@ Agents call `ig_search` for discovery. Set `output=context_pack` and `budget_tok
 
 Automatic setup detects the client, preserves existing configuration, writes the absolute `ig` path, verifies the MCP handshake, and runs a search. Restart an open client after installation. `ig agent doctor` checks the connection.
 
-The [README](../README.md#connect-a-coding-agent) lists the setup commands, and the [MCP page](https://bvolpato.github.io/ivygrep/integrations/mcp.html) lists the request fields.
+The [README](../README.md#connect-a-coding-agent) lists the setup commands, and the [MCP page](https://bvolpato.github.io/ivygrep/integrations/mcp.html) shows requests with the main fields. `tools/list` returns the complete schema.
 
 ## Notes
 

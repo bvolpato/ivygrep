@@ -97,12 +97,12 @@ pytest 2>&1 | ig context -
 
 A context pack starts from your task, from paths in pasted text, and from your Git changes. It adds definitions, callers, references, dependencies, dependents, tests, configuration, and docs. It stops at the token budget.
 
-Each item names its file and lines, its role, and the reason for its selection:
+Each item names its file and lines, its role, and the reason for its selection. This one is from a pack for ripgrep:
 
 ```text
-### 1. src/auth/refresh.rs:118-166 [primary, definition]
-Why: task anchor; changed implementation.
-Signals: lexical, symbol, git change.
+### 1. crates/ignore/src/gitignore.rs:986-1014 [primary, test]
+Why: rank 1 for primary retrieval; rank 2 for anchor test retrieval.
+Signals: lexical, neural, semantic.
 ```
 
 A pack is evidence to read. It does not generate an answer or change files. See [how `--since` selects changes](docs/guide.md#context-packs).
@@ -185,7 +185,7 @@ Read [Web UI security](docs/guide.md#web-ui) before you bind the Web UI to anoth
 ## How it works
 
 1. A Git-aware walker finds changed and indexable files.
-2. Tree-sitter splits 24 languages into functions and classes. Other files use text chunks.
+2. Tree-sitter splits 24 languages into functions and classes. Other files use heuristic or text chunks.
 3. SQLite stores metadata and relationships, Tantivy stores keywords, and USearch stores vectors.
 4. Keyword and exact search work first. Background workers then add hash vectors and neural vectors.
 5. A query runs bounded exact, keyword, symbol, hash, and neural passes, then ranks the files.
@@ -197,9 +197,9 @@ Read the [architecture](docs/architecture.md) for storage, retrieval, worktrees,
 | What | Result | Scope |
 | --- | --- | --- |
 | Issue text to a fixed file | Top 1: 47%, top 5: 70% | 30 issues from 10 open source projects, v1.3.5 ([method and losses](docs/benchmarks/file-localization.md)) |
-| Context pack contains a fixed file | 77% | Same issues, 4,172 tokens on average |
+| Context pack contains a fixed file | 77% | Same issues, 4,172 tokens on average, v1.3.5 |
 | Notes retrieval | 74.9% recall@20 | MemoryQuest, v1.2.7 ([report](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html)) |
-| One million chunks | 6.19 ms warm CLI p95 | Synthetic corpus, hash-only, v1.2.7 ([report](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html)) |
+| One million chunks | 6.19 ms warm CLI p95 | Synthetic corpus, hash-only, v1.2.7 ([data](https://bvolpato.github.io/ivygrep/benchmarks/public-million-current.json), [method](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html)) |
 
 The million-chunk result measures scale and footprint, not retrieval quality or coding-task accuracy. See the [dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html) and the [cost of the current model under concurrent load](https://bvolpato.github.io/ivygrep/benchmarks/resource-load.html).
 
