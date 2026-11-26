@@ -209,11 +209,15 @@ pub(super) fn has_sign_before_bare_star(text: &str) -> bool {
 /// before the stack does: each level doubles the cost of every seek, and a tree
 /// of them triples it.
 const MAX_QUERY_NESTING: usize = 6;
+/// Most levels of a parsed query. A level of [`MAX_QUERY_NESTING`] can be a
+/// disjunction of conjunctions with a boost.
+const MAX_AST_DEPTH: usize = 64;
 
 /// Whether open groups and `NOT` runs of `text` add up to more than
 /// [`MAX_QUERY_NESTING`] levels. An unclosed `:(` on each line of a chat log is
 /// enough to overflow the stack, which aborts the process.
 pub(super) fn nests_too_deeply(text: &str) -> bool {
+    let text = &without_phrases(text);
     // Depth outside each open group.
     let mut open = Vec::new();
     let (mut depth, mut negations) = (0usize, 0usize);
@@ -249,6 +253,71 @@ pub(super) fn nests_too_deeply(text: &str) -> bool {
     false
 }
 
+/// `text` with placeholders for quoted phrases and escaped characters, whose
+/// parentheses are text.
+fn without_phrases(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(character) = rest.chars().next() {
+        let at_term = plain
+            .chars()
+            .next_back()
+            .is_none_or(|previous| previous.is_whitespace() || "():+-".contains(previous));
+        let length = match character {
+            '\\' => rest.chars().take(2).map(char::len_utf8).sum(),
+            '"' | '\'' if at_term => phrase_length(rest, character).unwrap_or(0),
+            _ => 0,
+        };
+        if length == 0 {
+            plain.push(character);
+            rest = &rest[character.len_utf8()..];
+        } else {
+            plain.push('_');
+            rest = &rest[length..];
+        }
+    }
+    plain
+}
+
+/// Bytes up to the closing quote of the phrase at the start of `text`.
+fn phrase_length(text: &str, quote: char) -> Option<usize> {
+    let mut escaped = false;
+    text.char_indices().skip(1).find_map(|(index, character)| {
+        let closes = character == quote && !escaped;
+        escaped = character == '\\' && !escaped;
+        closes.then_some(index + 1)
+    })
+}
+
+/// Whether the grammar built more levels than [`nests_too_deeply`] counted, for
+/// example from a parenthesis that it reads as text.
+fn is_too_deep(ast: &UserInputAst) -> bool {
+    let mut pending = vec![(ast, 0, 0)];
+    while let Some((ast, depth, conjunctions)) = pending.pop() {
+        // A group holds at most one conjunction, and the query holds one more.
+        if depth > MAX_AST_DEPTH || conjunctions > MAX_QUERY_NESTING + 1 {
+            return true;
+        }
+        match ast {
+            UserInputAst::Clause(clauses) => {
+                let conjunction = clauses.len() > 1
+                    && clauses
+                        .iter()
+                        .any(|(occur, _)| *occur != Some(tantivy::query_grammar::Occur::Should));
+                let conjunctions = conjunctions + usize::from(conjunction);
+                pending.extend(
+                    clauses
+                        .iter()
+                        .map(|(_, child)| (child, depth + 1, conjunctions)),
+                );
+            }
+            UserInputAst::Boost(child, _) => pending.push((child, depth + 1, conjunctions)),
+            UserInputAst::Leaf(_) => {}
+        }
+    }
+    false
+}
+
 /// Parses text with Tantivy's query grammar and reports a panic inside it as a
 /// syntax error, which callers already handle like any other text the grammar
 /// rejects. The known triggers are answered without calling the grammar: a panic
@@ -260,9 +329,13 @@ fn parse_user_input(
     if has_sign_before_bare_star(text) || nests_too_deeply(text) {
         return Err(syntax_error());
     }
-    std::panic::catch_unwind(|| tantivy::query_grammar::parse_query(text))
+    let ast = std::panic::catch_unwind(|| tantivy::query_grammar::parse_query(text))
         .map_err(|_| syntax_error())?
-        .map_err(|_| syntax_error())
+        .map_err(|_| syntax_error())?;
+    if is_too_deep(&ast) {
+        return Err(syntax_error());
+    }
+    Ok(ast)
 }
 
 /// Whether the grammar read `label: *` as an exists clause. No text field of the

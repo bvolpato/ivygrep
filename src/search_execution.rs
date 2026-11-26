@@ -949,10 +949,16 @@ fn exact_substring_hits(
     Ok(files
         .into_iter()
         .flat_map(|file| {
-            let score = file.total_score;
-            file.hits
-                .into_iter()
-                .map(move |hit| SearchHit { score, ..hit })
+            // A merge of several workspaces orders hits by score, so further hits
+            // of a file follow the first hit of each file.
+            file.hits.into_iter().enumerate().map(move |(index, hit)| {
+                let score = if index == 0 {
+                    file.total_score
+                } else {
+                    file.total_score * 1e-6
+                };
+                SearchHit { score, ..hit }
+            })
         })
         .collect())
 }

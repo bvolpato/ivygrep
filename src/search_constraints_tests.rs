@@ -1267,6 +1267,13 @@ fn deeply_nested_queries_do_not_overflow_the_stack() {
             format!("{negations}(login ").repeat(8),
             ")".repeat(8)
         ),
+        // The grammar reads these closing parentheses as text.
+        format!("{}login", "(\")\" ".repeat(260)),
+        format!("{}login{}", "(\")\" OR ".repeat(260), ")".repeat(260)),
+        format!("{}login{}", "(')' AND ".repeat(260), ")".repeat(260)),
+        format!("{}login{}", "(page\\) AND ".repeat(60), ")".repeat(60)),
+        // Not a phrase, so these closing parentheses are text only to the check.
+        format!("5\" {}login", "(\")\" ".repeat(260)),
     ] {
         hybrid_search_outcome(&workspace, &query, None, &SearchOptions::default()).unwrap();
     }
@@ -1276,6 +1283,10 @@ fn deeply_nested_queries_do_not_overflow_the_stack() {
         ("login NOT (NOT (NOT (invoice)))", true),
         ("login NOT (NOT (NOT (NOT invoice)))", false),
         ("login NOT (-NOT (-NOT (-NOT invoice)))", false),
+        (
+            "\"login\" NOT \"a(\" NOT \"b(\" NOT \"c(\" NOT \"d(\" NOT \"e(\" NOT \"f(\" NOT \"g(\"",
+            true,
+        ),
     ] {
         match hybrid_search(&workspace, query, None, &SearchOptions::default()) {
             Ok(hits) => assert!(accepted && !hits.is_empty(), "{query:?}: {hits:?}"),
