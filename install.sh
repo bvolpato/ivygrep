@@ -125,13 +125,13 @@ missing_cuda_libraries() {
 
 # Prints why a release asset cannot be used, or nothing when it exists.
 asset_problem() {
-    if ! status="$(curl -sSI -o /dev/null -w '%{http_code}' "$base_url/$1")"; then
+    if ! http_status="$(curl -sSI -o /dev/null -w '%{http_code}' "$base_url/$1")"; then
         echo "not reachable"
         return
     fi
-    case "$status" in
+    case "$http_status" in
         404 | 410) echo "not available" ;;
-        4?? | 5??) echo "not reachable (HTTP $status)" ;;
+        4?? | 5??) echo "not reachable (HTTP $http_status)" ;;
     esac
 }
 
