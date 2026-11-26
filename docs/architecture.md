@@ -110,7 +110,12 @@ to mode `0700` because stored chunks can contain private source text.
 
 Git worktrees share a repository identifier. A secondary worktree records the
 main worktree's index directory as its base and stores only divergent state in
-its own index directory.
+its own index directory. A submodule and a `--separate-git-dir` clone have a
+`.git` file too, but their Git directory has no `commondir`, so they are main
+checkouts. The index of a parent repository holds the sources of its submodules
+too, so a file of a submodule can be in two indexes. A linked worktree has no base when its repository has no main
+checkout that Git can name: a bare repository, a submodule, or a
+`--separate-git-dir` clone.
 
 A checkout nested inside a Git workspace is a workspace of its own, as it is
 for Git and for `Workspace::resolve`. The file walker, the request-local path
@@ -151,7 +156,10 @@ the appropriate stores before local queries use them.
 1. Resolve workspace and acquire its index lock.
 2. Inspect index health and stored format version.
 3. Walk indexable files while applying Git ignore rules unless explicitly
-   disabled.
+   disabled. As in Git, `.gitignore` and `info/exclude` rules stop at the root of
+   a repository, which includes a submodule inside the workspace. `.ignore` files
+   apply from every directory above the workspace. Above a plain directory, all
+   of these rules apply.
 4. Build a flat Merkle snapshot of relative paths and file fingerprints.
 5. Send files through a bounded scanner/chunker producer.
 6. Parse supported languages with Tree-sitter or a bounded text fallback. The
@@ -191,7 +199,7 @@ Watcher events use a targeted refresh only when path-level reconciliation is
 safe. New directories, ignore-file changes, uncertain Git state, and similar
 cases fall back to a full walk. A clean Git workspace whose recorded repository
 state still matches can return without scanning every file. The fingerprint
-includes ancestor `.ignore`/`.gitignore` controls. Reuse is disabled when
+includes ancestor `.ignore` controls. Reuse is disabled when
 independent ignore rules whitelist files Git may ignore, or when assume-unchanged
 flags or present skip-worktree files prevent Git status from observing source
 edits. Those cases use the normal Merkle walk, including during base reuse.

@@ -95,6 +95,9 @@ use batch_budget::{BatchBudget, Reservation};
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
 const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
 const INDEXED_SKIP_GITIGNORE_FILE: &str = ".indexed_skip_gitignore";
+/// The rules that select source files. Version 2 stops `.gitignore` rules at
+/// the root of a repository.
+const SOURCE_RULES_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingSummary {
@@ -529,9 +532,20 @@ pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
 }
 
 pub(crate) fn indexed_skip_gitignore(workspace: &Workspace) -> Option<bool> {
-    fs::read_to_string(workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE))
-        .ok()
-        .and_then(|value| value.trim().parse::<bool>().ok())
+    read_indexed_filter(workspace)?.0.parse().ok()
+}
+
+pub(crate) fn indexed_with_current_source_rules(workspace: &Workspace) -> bool {
+    read_indexed_filter(workspace)
+        .is_some_and(|(_, version)| version == SOURCE_RULES_VERSION.to_string())
+}
+
+/// The ignore mode and the source rules version of the last complete index
+/// run. Version 1 recorded the mode only.
+fn read_indexed_filter(workspace: &Workspace) -> Option<(String, String)> {
+    let value = fs::read_to_string(workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE)).ok()?;
+    let mut fields = value.split_whitespace().map(str::to_string);
+    Some((fields.next()?, fields.next().unwrap_or_default()))
 }
 
 pub(crate) fn workspace_index_matches_skip_gitignore(
@@ -544,7 +558,7 @@ pub(crate) fn workspace_index_matches_skip_gitignore(
 fn record_indexed_skip_gitignore(workspace: &Workspace, skip_gitignore: bool) -> Result<()> {
     fs::write(
         workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE),
-        skip_gitignore.to_string(),
+        format!("{skip_gitignore} {SOURCE_RULES_VERSION}"),
     )?;
     Ok(())
 }
@@ -576,6 +590,20 @@ pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
 fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
     if !workspace.index_dir.exists() {
         return Ok(());
+    }
+    // A Git directory is not a checkout, so no workspace reads it as its base.
+    if let Some(base) = crate::index_gc::read_base_ref(&workspace.index_dir)
+        && crate::workspace::is_git_dir(&base.base_workspace_root)
+    {
+        let mut git_dir_index = workspace.clone();
+        git_dir_index.index_dir = crate::config::indexes_root()?
+            .join(crate::workspace::workspace_id(&base.base_workspace_root));
+        if let Err(error) = remove_workspace_index(&git_dir_index) {
+            tracing::warn!(
+                "failed to remove index {}: {error:#}",
+                git_dir_index.index_dir.display()
+            );
+        }
     }
     let _job_lock = jobs::lock_job_ledger(workspace)?;
     for entry in fs::read_dir(&workspace.index_dir)? {

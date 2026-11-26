@@ -11933,6 +11933,22 @@ mod tests {
 
     #[test]
     #[serial]
+    fn watch_events_skip_git_rules_above_a_repository() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("repository");
+        for directory in ["objects", "refs"] {
+            std::fs::create_dir_all(root.join(".git").join(directory)).unwrap();
+        }
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(parent.path().join(".gitignore"), "*\n").unwrap();
+        let workspace = Workspace::resolve(&root).unwrap();
+        assert!(WatchEventFilter::new(&workspace).path_should_reindex(&root.join("new.rs")));
+    }
+
+    #[test]
+    #[serial]
     fn watch_event_filter_ignores_nested_ivygrep_storage() {
         let repo = tempdir().unwrap();
         let home = repo.path().join("local-state");

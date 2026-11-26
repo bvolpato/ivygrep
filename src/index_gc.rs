@@ -178,12 +178,12 @@ fn read_missing_since(marker: &Path) -> Option<u64> {
     fs::read_to_string(marker).ok()?.trim().parse().ok()
 }
 
-struct BaseRef {
+pub(crate) struct BaseRef {
     base_index_dir: PathBuf,
-    base_workspace_root: PathBuf,
+    pub(crate) base_workspace_root: PathBuf,
 }
 
-fn read_base_ref(index_dir: &Path) -> Option<BaseRef> {
+pub(crate) fn read_base_ref(index_dir: &Path) -> Option<BaseRef> {
     let raw = fs::read(index_dir.join("base_ref.json")).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
     Some(BaseRef {

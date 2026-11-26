@@ -10,7 +10,8 @@ use ignore::WalkBuilder;
 /// - Shows hidden files (but skips `.git` repository/worktree metadata)
 /// - Skips linked worktrees and clones nested in a Git workspace; submodules stay
 /// - Respects `.gitignore`, `.git/info/exclude`, global gitignore, and `.ignore` (unless skip_gitignore is true)
-/// - Does not require a git repository
+/// - Does not require a git repository. The root of one bounds `.gitignore` and
+///   `info/exclude` as in Git. `.ignore` files above the root always apply
 /// - Does not follow symlinks
 pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     source_walker_scoped(root, skip_gitignore, None)
@@ -56,7 +57,9 @@ pub(crate) fn source_ignore_builder(
     walker.git_exclude(!skip_gitignore);
     walker.git_global(!skip_gitignore);
     walker.ignore(!skip_gitignore);
-    walker.require_git(false);
+    // The walker stops `.gitignore` rules at a repository root only in this
+    // mode. Without it, a plain directory keeps its own and inherited rules.
+    walker.require_git(crate::workspace::is_git_workspace_root(root));
     if !skip_gitignore
         && let Some(exclude) = exclude
         && exclude != root.join(".git/info/exclude")
@@ -437,6 +440,46 @@ mod tests {
         assert!(files.contains("clone/lib.rs"));
         assert!(files.contains("detached/lib.rs"));
         assert!(files.contains(".claude/worktrees/agent/main.rs"));
+    }
+
+    #[test]
+    fn git_rules_stop_at_the_repository_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "*\n").unwrap();
+        std::fs::write(tmp.path().join(".ignore"), "hidden.rs\n").unwrap();
+        let repo = tmp.path().join("repo");
+        write_git_dir(&repo.join(".git"), false);
+        std::fs::write(repo.join(".gitignore"), ".worktrees/**\n").unwrap();
+        let worktree = repo.join(".worktrees/agent");
+        let worktree_git_dir = repo.join(".git/worktrees/agent");
+        write_git_dir(&worktree_git_dir, true);
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )
+        .unwrap();
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+
+        for (root, applies_outer_git_rules) in [(&repo, false), (&worktree, false), (&plain, true)]
+        {
+            std::fs::write(root.join("visible.rs"), "fn visible() {}\n").unwrap();
+            std::fs::write(root.join("hidden.rs"), "fn hidden() {}\n").unwrap();
+            let files = collect_files(root, false);
+            let mut matcher = SourcePathMatcher::new(root, false);
+            for (path, allowed) in [
+                ("visible.rs", !applies_outer_git_rules),
+                ("hidden.rs", false),
+            ] {
+                assert_eq!(files.contains(path), allowed, "{root:?} {path}");
+                assert_eq!(
+                    matcher.allows(Path::new(path)).unwrap(),
+                    allowed,
+                    "{root:?} {path}"
+                );
+            }
+        }
     }
 
     #[test]

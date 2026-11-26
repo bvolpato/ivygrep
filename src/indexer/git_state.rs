@@ -467,8 +467,8 @@ fn git_ignore_controls(
     }
     for directory in root.ancestors() {
         controls.insert(directory.join(".ignore"), true);
-        controls.insert(directory.join(".gitignore"), directory != root);
     }
+    controls.insert(root.join(".gitignore"), false);
 
     // `--directory` keeps Git out of ignored directories. The walker does not
     // enter them either, so their ignore files cannot change what is indexed.
