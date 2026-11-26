@@ -12405,6 +12405,36 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
+    fn exact_symbol_preview_skips_annotation_arguments() {
+        for (path, language, symbol, content, line) in [
+            (
+                "api.py",
+                "python",
+                "create_transfer",
+                "@router.post(\n    \"/transfers\",\n    status_code=201,\n)\nasync def create_transfer(body):\n    return body\n",
+                5,
+            ),
+            (
+                "shell.ts",
+                "typescript",
+                "AppShell",
+                "@Component({\n  selector: \"x-app\",\n})\nexport class AppShell {}\n",
+                4,
+            ),
+        ] {
+            let lines = line_spans(content);
+            let mut chunk = make_test_chunk(symbol, path, content, "Class");
+            chunk.language = language.to_string();
+            let query = PresentationQuery::new(symbol);
+            assert_eq!(
+                find_focus_line(&chunk, &query, content, &lines),
+                line,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn exact_symbol_preview_centers_the_definition_after_documentation() {
         let content =
             "/**\n * Create an Axios instance.\n */\nclass Axios {\n  constructor() {}\n}\n";

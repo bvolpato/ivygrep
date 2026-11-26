@@ -316,6 +316,13 @@ module-level JavaScript and TypeScript function bindings, and module-level Rust
 `macro_rules!` macros register symbols. A macro declared inside a function stays
 in that function's chunk and does not register a definition.
 
+Format v31 rebuilds once so a C or C++ type mention such as `struct node *next`
+no longer registers a definition or gets its own chunk; `typedef` and `using`
+names at file or namespace scope and C++ unions register symbols; several
+definitions on one line all register; Python module text and imports, and C++
+destructors and operators, register none; and `.h` files with C++ syntax use the
+C++ grammar. They keep the language name `c`.
+
 ## Search pipeline
 
 Search omits a file immediately when the contained workspace reader returns
@@ -636,8 +643,9 @@ enclosing `owner` (class, impl, struct, module, or Go receiver); language and
 kind are read from the joined chunk row, and a `chunk_key` index keeps file
 removal proportional to the file's own symbols. Names come
 from the Tree-sitter capture at chunk time; the line heuristic is only a
-fallback for languages without a grammar, and continuation windows never
-register symbols. Qualified lookups (`Owner.method`, `Owner::method`,
+fallback for languages without a grammar and for module-level code whose query
+does not capture every definition, such as Rust structs. Continuation windows
+never register symbols. Qualified lookups (`Owner.method`, `Owner::method`,
 `Owner#method`, `Owner->method`) filter by owner, preferring exact-case matches
 and falling back to the bare name; reference and caller scans are restricted
 to the languages that define the symbol. Adding these columns bumped the index
