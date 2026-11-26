@@ -4,6 +4,13 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- A file without read permission no longer fails an index run and no longer makes the workspace unsearchable. ivygrep skips the file with a warning, keeps the chunks that the index has for it, and tries again on the next run. This changes the rule of v1.3.1, where a permission error failed the update. Other I/O errors, a file replaced by a symlink, and a missing workspace root still fail the update, but a failure before the first commit now leaves the index queryable.
+- `ig --add` finds sources that Git status cannot report as changed: the files of a submodule after `git submodule update --init` or `deinit`, a tracked directory that gets or loses its own `.git` entry, and a tracked file that was missing only while the first scan ran. The clean-checkout shortcut kept the older index until the next commit.
+- `ig --add` and `ig --add --force` rebuild an index whose `workspace.json` or `index_incarnation` file is damaged. They stopped with a JSON or UTF-8 error.
+- `ig --doctor` and searches no longer rebuild the index of a directory whose only text files are larger than 16 MiB.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.

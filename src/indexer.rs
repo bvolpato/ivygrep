@@ -102,6 +102,8 @@ pub struct IndexingSummary {
     pub indexed_files: usize,
     pub deleted_files: usize,
     pub total_chunks: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     #[serde(default)]
     pub phase_timings: IndexingPhaseTimings,
 }
@@ -264,17 +266,23 @@ fn source_batch_len(files: &crate::workspace_file::RootHandle, paths: &[(PathBuf
     count
 }
 
+/// Files that the scan listed and the index run did not read.
+#[derive(Debug, Default)]
+struct SkippedSources {
+    vanished: Vec<PathBuf>,
+    unreadable: Vec<PathBuf>,
+}
+
 struct IndexBatchProducer {
     receiver: Option<std::sync::mpsc::Receiver<Result<IndexedFileBatch>>>,
-    // The thread returns the files that vanished before it read them.
-    handle: Option<std::thread::JoinHandle<Vec<PathBuf>>>,
+    handle: Option<std::thread::JoinHandle<SkippedSources>>,
     budget: Arc<BatchBudget>,
 }
 
 impl IndexBatchProducer {
     fn new(
         receiver: std::sync::mpsc::Receiver<Result<IndexedFileBatch>>,
-        handle: std::thread::JoinHandle<Vec<PathBuf>>,
+        handle: std::thread::JoinHandle<SkippedSources>,
         budget: Arc<BatchBudget>,
     ) -> Self {
         Self {
@@ -296,15 +304,14 @@ impl IndexBatchProducer {
         }
     }
 
-    /// Returns the files that vanished after the scan listed them.
-    fn finish(mut self) -> Result<Vec<PathBuf>> {
+    fn finish(mut self) -> Result<SkippedSources> {
         self.budget.stop();
         drop(self.receiver.take());
         match self.handle.take() {
             Some(handle) => handle
                 .join()
                 .map_err(|_| anyhow::anyhow!("index batch producer thread panicked")),
-            None => Ok(Vec::new()),
+            None => Ok(SkippedSources::default()),
         }
     }
 }
@@ -337,7 +344,7 @@ fn spawn_index_batch_producer(
     let _ = fs::write(&progress_path, format!("0/{total}"));
     let handle = std::thread::spawn(move || {
         let _background = use_background_pool.then(background_indexing);
-        let vanished = std::sync::Mutex::new(Vec::new());
+        let skipped = std::sync::Mutex::new(SkippedSources::default());
         let mut remaining = diff_paths.as_slice();
         'batches: while !remaining.is_empty() {
             // Each batch validates the root again. Its size probes and file
@@ -385,8 +392,14 @@ fn spawn_index_batch_producer(
                                     && crate::workspace_file::validate_root(&root).is_ok() =>
                             {
                                 progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                vanished.lock().unwrap().push(rel_path.clone());
+                                skipped.lock().unwrap().vanished.push(rel_path.clone());
                                 return Ok(empty_incremental_file(rel_path));
+                            }
+                            // The stores keep the chunks of the last read.
+                            Err(error) if crate::merkle::is_unreadable_file(&abs_path, &error) => {
+                                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                skipped.lock().unwrap().unreadable.push(rel_path.clone());
+                                return Ok(None);
                             }
                             Err(error) => {
                                 return Err(anyhow::Error::new(error).context(format!(
@@ -518,7 +531,7 @@ fn spawn_index_batch_producer(
                 }
             }
         }
-        vanished.into_inner().unwrap()
+        skipped.into_inner().unwrap()
     });
 
     IndexBatchProducer::new(receiver, handle, budget)
@@ -828,6 +841,7 @@ fn index_workspace_with_options_and_store_replacement(
             indexed_files: 0,
             deleted_files: 0,
             total_chunks: count_chunks(&workspace.sqlite_path())?,
+            warning: None,
             phase_timings: IndexingPhaseTimings {
                 discovery_ms: indexing_started.elapsed().as_secs_f64() * 1_000.0,
                 ..Default::default()
@@ -882,7 +896,7 @@ fn index_workspace_with_options_and_store_replacement(
         }
     });
 
-    let mut source_vanished = false;
+    let mut sources_skipped = false;
     let result = retry_transient_tantivy_writes(|| {
         // SQLite may have committed before Tantivy or the snapshot failed.
         // If inputs change before a retry, replaying their old Merkle diff can
@@ -896,7 +910,7 @@ fn index_workspace_with_options_and_store_replacement(
             skip_gitignore,
             reset_worktree_overlay || (incomplete && workspace.is_worktree()),
             rebuild_main || (incomplete && !workspace.is_worktree()),
-            &mut source_vanished,
+            &mut sources_skipped,
             before_store_replacement,
         )
     });
@@ -912,11 +926,11 @@ fn index_workspace_with_options_and_store_replacement(
     if result.is_ok() && tracks_reusable_base_state {
         #[cfg(test)]
         git_state::test_support::before_record(&workspace.root);
-        // The index holds no chunks for a file that vanished during the run,
+        // The index does not hold the content of a file that the run skipped,
         // even if the checkout is clean again. Do not record it as current.
         record_indexed_git_state(
             workspace,
-            clean_git_checkout.as_ref().filter(|_| !source_vanished),
+            clean_git_checkout.as_ref().filter(|_| !sources_skipped),
         );
     }
 
@@ -1040,8 +1054,8 @@ fn index_workspace_inner(
     skip_gitignore: bool,
     reset_worktree_overlay: bool,
     rebuild_main: bool,
-    // Set if a source file vanished after the scan listed it.
-    source_vanished: &mut bool,
+    // Set if the run did not read a source file that the scan listed.
+    sources_skipped: &mut bool,
     before_store_replacement: &mut dyn FnMut(&Workspace),
 ) -> Result<IndexingSummary> {
     let index_started = std::time::Instant::now();
@@ -1082,6 +1096,7 @@ fn index_workspace_inner(
             indexed_files: 0,
             deleted_files: 0,
             total_chunks: count_chunks(&workspace.sqlite_path())?,
+            warning: None,
             phase_timings: IndexingPhaseTimings {
                 discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
                 ..Default::default()
@@ -1283,6 +1298,7 @@ fn index_workspace_inner(
     // Save the Merkle snapshot only after every store commits. An earlier
     // snapshot could claim that files exist in a partial index after a crash.
     let mut pending_base_ref = None;
+    let mut unreadable_files = Vec::new();
     let (mut diff, mut pending_snapshot, clear_overlay_paths) =
         if let Some((diff, snapshot, base_ref)) = overlay_mode {
             pending_base_ref = Some(base_ref);
@@ -1291,7 +1307,8 @@ fn index_workspace_inner(
             // Incremental update to existing overlay
             let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
             let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-            let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+            let mut new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+            unreadable_files = new.keep_unreadable(&old, &workspace.root);
             let mut d = old.diff(&new);
             let mut clear_overlay_paths = Vec::new();
 
@@ -1347,6 +1364,7 @@ fn index_workspace_inner(
                     indexed_files: 0,
                     deleted_files: 0,
                     total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                    warning: warn_unreadable_files(workspace, &unreadable_files),
                     phase_timings: IndexingPhaseTimings {
                         discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
                         ..Default::default()
@@ -1372,7 +1390,8 @@ fn index_workspace_inner(
                 (old, diff)
             } else {
                 let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-                let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+                let mut new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+                unreadable_files = new.keep_unreadable(&old, &workspace.root);
                 let diff = old.diff(&new);
                 (new, diff)
             };
@@ -1386,6 +1405,7 @@ fn index_workspace_inner(
                     indexed_files: 0,
                     deleted_files: 0,
                     total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                    warning: warn_unreadable_files(workspace, &unreadable_files),
                     phase_timings: IndexingPhaseTimings {
                         discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
                         ..Default::default()
@@ -1400,21 +1420,13 @@ fn index_workspace_inner(
     let use_overlay =
         initializing_overlay || workspace.has_overlay() || workspace.base_ref_path().exists();
     let is_fresh_index = initializing_overlay || rebuild_main || !workspace_is_indexed(workspace);
-    if !is_fresh_index {
-        // Leave this marker on every failed/aborted incremental publication.
-        // Fresh builds already isolate writes in staging. No-op scans return
-        // above without touching this marker or any index stores.
-        fs::write(
-            workspace.indexing_incomplete_path(),
-            b"publication pending\n",
-        )?;
-    }
     if !use_overlay && is_fresh_index {
         // A snapshot can outlive another store or an interrupted recovery.
         // Never use its incremental delta to populate a fresh store. Ordinary
         // initial indexing already performed a full walk and has no old file.
         if workspace.merkle_snapshot_path().exists() {
             pending_snapshot = Some(MerkleSnapshot::build(&workspace.root, skip_gitignore)?);
+            unreadable_files.clear();
         }
         diff = MerkleSnapshot::empty().diff(
             pending_snapshot
@@ -1456,6 +1468,24 @@ fn index_workspace_inner(
         current_snapshot.as_deref(),
         builds_from_scratch,
     )?;
+
+    // The marker precedes the first commit of an incremental run and stays after
+    // a failed or aborted publication. A run that fails earlier leaves the stores
+    // as they are. Fresh builds isolate their writes in staging.
+    let publication_begun = std::cell::Cell::new(is_fresh_index);
+    let begin_publication = |reads_remain: bool| -> Result<()> {
+        if publication_begun.replace(true) {
+            return Ok(());
+        }
+        if reads_remain {
+            ensure_sources_open(workspace, &diff)?;
+        }
+        fs::write(
+            workspace.indexing_incomplete_path(),
+            b"publication pending\n",
+        )?;
+        Ok(())
+    };
 
     let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     let persist_started = std::time::Instant::now();
@@ -1568,6 +1598,7 @@ fn index_workspace_inner(
                 if let Some(stats) = &mut incremental_stats {
                     stats.checkpoint(&tx)?;
                 }
+                begin_publication(true)?;
                 commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
                 if !is_fresh_index {
                     writer.commit()?;
@@ -1576,6 +1607,9 @@ fn index_workspace_inner(
             }
         };
     }
+
+    // Base paths that this run hides for the first time.
+    let mut new_tombstones = HashSet::new();
 
     // Overlay state shadows only paths backed by the base index. Clear paths
     // that have returned to base content or were removed after being overlay-only.
@@ -1629,11 +1663,13 @@ fn index_workspace_inner(
         // Insert before chunking so a base file replaced by empty/binary
         // content is still hidden even though it produces no overlay chunks.
         for (rel_path, _) in &diff.added_or_modified {
-            if path_exists_in_base(rel_path) {
-                tx.execute(
+            if path_exists_in_base(rel_path)
+                && tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
                     params![index_path_string(rel_path)],
-                )?;
+                )? > 0
+            {
+                new_tombstones.insert(rel_path.clone());
             }
         }
     } else {
@@ -1786,6 +1822,7 @@ fn index_workspace_inner(
                 if let Some(stats) = &mut incremental_stats {
                     persist_or_stop!(stats.checkpoint(&tx));
                 }
+                persist_or_stop!(begin_publication(true));
                 persist_or_stop!(commit_with_vector_tombstones(tx, &mut vector_tombstones));
                 if !is_fresh_index {
                     persist_or_stop!(writer.commit());
@@ -1797,13 +1834,14 @@ fn index_workspace_inner(
         }
     }
 
-    let vanished_files = producer.finish()?;
-    // The stores hold no chunks for a file that vanished after the scan. Its
+    let skipped = producer.finish()?;
+    // The stores do not hold the content of a file that the run skipped. Its
     // snapshot hash must not claim that the file is indexed.
-    *source_vanished = !vanished_files.is_empty();
     let pending_snapshot = pending_snapshot.map(|mut snapshot| {
-        if *source_vanished {
-            Arc::make_mut(&mut snapshot).mark_vanished(&vanished_files);
+        if !skipped.vanished.is_empty() || !skipped.unreadable.is_empty() {
+            let snapshot = Arc::make_mut(&mut snapshot);
+            snapshot.mark_vanished(&skipped.vanished);
+            snapshot.mark_unreadable(&skipped.unreadable);
         }
         snapshot
     });
@@ -1823,6 +1861,22 @@ fn index_workspace_inner(
     let secondary_indexes_started = Instant::now();
     persist_statements.flush_symbols()?;
     drop(persist_statements);
+    if !initializing_overlay {
+        // An unreadable file keeps what the index shows for it: here, the
+        // chunks that the worktree inherits from its base.
+        for rel_path in &skipped.unreadable {
+            if new_tombstones.contains(rel_path) {
+                tx.execute(
+                    "DELETE FROM tombstones WHERE file_path = ?1",
+                    params![index_path_string(rel_path)],
+                )?;
+            }
+        }
+    }
+    unreadable_files.extend(skipped.unreadable);
+    unreadable_files.sort();
+    unreadable_files.dedup();
+    *sources_skipped = !skipped.vanished.is_empty() || !unreadable_files.is_empty();
     if defer_secondary_indexes {
         create_secondary_indexes(&tx)?;
     }
@@ -1857,6 +1911,7 @@ fn index_workspace_inner(
     )?;
 
     let sqlite_commit_started = Instant::now();
+    begin_publication(false)?;
     commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
     let sqlite_commit_ms = sqlite_commit_started.elapsed().as_secs_f64() * 1_000.0;
 
@@ -1923,6 +1978,7 @@ fn index_workspace_inner(
         indexed_files: touched_files.len(),
         deleted_files: diff.deleted.len(),
         total_chunks,
+        warning: warn_unreadable_files(workspace, &unreadable_files),
         phase_timings: IndexingPhaseTimings {
             discovery_ms,
             persist_ms,
@@ -1936,6 +1992,44 @@ fn index_workspace_inner(
             metadata_ms,
         },
     })
+}
+
+/// Finds sources that fail to open before a large update commits a part of its
+/// changes. A failed read after that commit needs a rebuild.
+fn ensure_sources_open(workspace: &Workspace, diff: &MerkleDiff) -> Result<()> {
+    let files = crate::workspace_file::RootHandle::new(&workspace.root);
+    for (rel_path, _) in &diff.added_or_modified {
+        let path = workspace.root.join(rel_path);
+        let opened = files.open(rel_path).map(drop);
+        #[cfg(test)]
+        let opened =
+            crate::merkle::test_support::check(crate::merkle::test_support::Stage::Index, &path)
+                .and(opened);
+        if let Err(error) = opened
+            && error.kind() != std::io::ErrorKind::NotFound
+            && !crate::merkle::is_unreadable_file(&path, &error)
+        {
+            return Err(anyhow::Error::new(error)
+                .context(format!("failed reading source file {}", path.display())));
+        }
+    }
+    Ok(())
+}
+
+/// Reports the files that the run could not read on standard error, which a
+/// daemon redirects to its log.
+fn warn_unreadable_files(workspace: &Workspace, unreadable: &[PathBuf]) -> Option<String> {
+    let first = unreadable.first()?;
+    let warning = format!(
+        "skipped {} without read permission, first: {}",
+        match unreadable.len() {
+            1 => "1 file".to_string(),
+            count => format!("{count} files"),
+        },
+        workspace.root.join(first).display()
+    );
+    eprintln!("warning: {warning}");
+    Some(warning)
 }
 
 fn initial_overlay_diff(
@@ -5199,7 +5293,7 @@ mod tests {
                     .is_err(),
                 "receiver drop must cancel blocked producer send"
             );
-            Vec::new()
+            SkippedSources::default()
         });
 
         drop(IndexBatchProducer::new(
@@ -5277,7 +5371,7 @@ mod tests {
                 format!("{error:#}").contains("listed.rs"),
                 "unexpected producer error: {error:#}"
             );
-            assert!(producer.finish().unwrap().is_empty());
+            assert!(producer.finish().unwrap().vanished.is_empty());
         }
     }
 
@@ -5307,7 +5401,7 @@ mod tests {
         assert_eq!(batch.files.len(), 2);
         assert!(batch.files.iter().all(|file| file.chunks.is_empty()));
         drop(batch);
-        let mut vanished = producer.finish().unwrap();
+        let mut vanished = producer.finish().unwrap().vanished;
         vanished.sort();
         assert_eq!(vanished, deleted);
     }
