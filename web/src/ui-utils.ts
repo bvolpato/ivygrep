@@ -60,6 +60,20 @@ export function relativeWithin(path: string, root: string): string {
   return path.slice(root.length).replace(/^[/\\]+/, "");
 }
 
+/**
+ * Workspace and scope for a requested path. A workspace can be nested in
+ * another one, and only its own index holds its files.
+ */
+export function workspaceForPath(
+  workspaces: { root: string }[],
+  path: string
+): { root: string; scope: string } | undefined {
+  const roots = workspaces.map((ws) => ws.root).filter((root) => isWithin(path, root));
+  if (!roots.length) return undefined;
+  const root = roots.reduce((longest, candidate) => candidate.length > longest.length ? candidate : longest);
+  return { root, scope: relativeWithin(path, root) };
+}
+
 export function shortPath(path: string): string {
   const parts = pathText(path).split(/[\\/]/).filter(Boolean);
   return parts.slice(-2).join("/") || path;

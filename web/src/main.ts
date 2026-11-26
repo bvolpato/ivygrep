@@ -9,7 +9,7 @@ import {
   initialSelection,
   readBoot
 } from "./app-types";
-import { workspaceForPath, workspaceMeta } from "./workspace-status";
+import { workspaceMeta } from "./workspace-status";
 import type {
   ContextBundle,
   CopyFormat,
@@ -44,7 +44,8 @@ import {
   samePath,
   searchQuery,
   shortPath,
-  uniqueHits
+  uniqueHits,
+  workspaceForPath
 } from "./ui-utils";
 
 const logoUrl = new URL("./assets/ivygrep-icon.svg", import.meta.url).href;

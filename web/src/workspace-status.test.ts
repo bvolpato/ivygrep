@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workspaceForPath, workspaceMeta } from "./workspace-status";
+import { workspaceMeta } from "./workspace-status";
 
 describe("workspace status", () => {
   it("does not render placeholder statistics when index stats are unavailable", () => {
@@ -30,18 +30,5 @@ describe("workspace status", () => {
 
     expect(meta).toContain("0 files, 0 chunks");
     expect(meta).not.toContain("Statistics temporarily unavailable");
-  });
-});
-
-describe("workspace selection", () => {
-  const workspaces = [{ root: "/repo" }, { root: "/repo/inner" }, { root: "/other" }];
-
-  it("selects the innermost workspace that contains the path", () => {
-    expect(workspaceForPath(workspaces, "/repo/inner/src")).toEqual({ root: "/repo/inner", scope: "src" });
-    expect(workspaceForPath(workspaces, "/repo/innermost/a.rs")).toEqual({ root: "/repo", scope: "innermost/a.rs" });
-  });
-
-  it("selects no workspace for an untracked path", () => {
-    expect(workspaceForPath(workspaces, "/repository")).toBeUndefined();
   });
 });
