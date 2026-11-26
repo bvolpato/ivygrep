@@ -13,7 +13,7 @@ All notable changes to ivygrep are documented in this file.
 - Context packs are identical for the same task and index. The graph ranking added floating-point numbers in random order.
 - On a file system that ignores letter case or Unicode normalization, context packs use the stored spelling of a path. A PHP import such as `App\Models\Invoice` listed `app/Models/Invoice.php` twice under two names.
 - Context packs skip changed or named files that the indexer skips, such as binary and minified files, and read named files that are not valid UTF-8 as the indexer does.
-- Context items keep the indentation of their first line. Roles and reasons whose line is cut from an item are removed, and files that a test imports are not labeled as its tests.
+- Context items keep the indentation of their first line. Roles and reasons of symbols whose line is cut from an item are removed, and files that a test imports are not labeled as its tests.
 - A context pack closes a code fence that the task leaves open, so that the evidence stays outside the code block. A task with an uppercase `AND`, `OR`, or `NOT` that is not a valid Boolean expression is searched as text.
 - `ig context --since` reports that two histories have no merge base. The change list does not repeat a file that the working tree renamed, or report a deletion of a file that was only staged.
 
