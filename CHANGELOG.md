@@ -4,6 +4,12 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Literal search keeps leading and trailing spaces in the pattern, so `--literal 'if '` no longer matches `diff`.
+- A literal or regex pattern that spans lines returns an error that explains the limit, instead of no results. One trailing line break is ignored.
+- Regex context lines of UTF-16 files are decoded like the matching lines.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.

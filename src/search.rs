@@ -1033,9 +1033,16 @@ fn literal_search_candidates(
     if options.is_cancelled() {
         return Ok(None);
     }
-    let query = query_text.trim();
-    if query.is_empty() || options.bounded_limit() == Some(0) {
+    if query_text.trim().is_empty() || options.bounded_limit() == Some(0) {
         return Ok(None);
+    }
+    let query = without_final_line_break(query_text);
+    if query.contains('\n') {
+        anyhow::bail!(
+            "literal search matches within one line, but the query has {} lines. \
+             Search for one of its lines, or search without literal mode.",
+            query.lines().count()
+        );
     }
 
     let query_lower = fold_literal_case(query);
@@ -1053,6 +1060,13 @@ fn literal_search_candidates(
         return Ok(None);
     }
     Ok(Some(LiteralCandidates { query_lower, paths }))
+}
+
+/// A pasted line can end with its line break. It is not part of the pattern.
+pub(crate) fn without_final_line_break(pattern: &str) -> &str {
+    pattern
+        .strip_suffix('\n')
+        .map_or(pattern, |line| line.strip_suffix('\r').unwrap_or(line))
 }
 
 /// Case-insensitive literal matching folds each character independently.
@@ -7589,6 +7603,50 @@ mod tests {
             literal_search(&workspace, "calculate_sales_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_sales_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_keeps_spaces_and_rejects_line_breaks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("notes.txt"),
+            "diff the notes\n  if ready\n漢字 行\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let options = SearchOptions {
+            context: 0,
+            ..SearchOptions::default()
+        };
+        let lines = |query: &str| {
+            literal_search(&workspace, query, &options)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.preview)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines("if"), ["diff the notes", "  if ready"]);
+        for query in ["if ", " if", "  if ready\r\n"] {
+            assert_eq!(lines(query), ["  if ready"], "{query:?}");
+        }
+        assert!(lines(" \n").is_empty());
+
+        let error = literal_search(&workspace, "diff the notes\n  if ready", &options)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("within one line"), "{error}");
+        // A hybrid query without ASCII words runs the literal pass.
+        assert!(
+            hybrid_search(&workspace, "漢字\n行", Some(&model), &options)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

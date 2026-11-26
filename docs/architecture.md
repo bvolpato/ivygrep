@@ -612,6 +612,10 @@ Live source reads use `workspace_file.rs` to open regular files beneath the
 selected workspace without following child symlinks. Preview metadata and text
 come from the same opened file; unavailable live previews use indexed text.
 
+Literal and regex searches compare single lines. A pattern keeps its spaces and
+loses one trailing line break. A literal pattern with any other line break, or a
+regex whose every match needs one, returns an error.
+
 Literal and regex previews return lines up to 1 KiB unchanged. A longer line,
 such as a minified bundle or source map, keeps a 1 KiB window around its first
 match (context lines keep their start), cut on character boundaries and marked

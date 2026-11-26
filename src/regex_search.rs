@@ -159,6 +159,7 @@ pub fn regex_search_with_options(
     if max_hits == 0 {
         return Ok(Vec::new());
     }
+    let pattern = line_pattern(pattern)?;
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     // Try to use index-backed pre-filtering via literal extraction.
@@ -198,6 +199,7 @@ pub fn regex_file_name_search_with_options(
     if options.is_cancelled() || options.bounded_limit() == Some(0) {
         return Ok(Vec::new());
     }
+    let pattern = line_pattern(pattern)?;
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(true)
@@ -263,6 +265,32 @@ pub fn regex_file_name_search_with_options(
         groups.truncate(limit);
     }
     Ok(groups)
+}
+
+/// Files are searched one line at a time, so a pattern whose every match needs
+/// a line break cannot match. Report it instead of returning no results.
+fn line_pattern(pattern: &str) -> Result<&str> {
+    let pattern = crate::search::without_final_line_break(pattern);
+    if regex_syntax::parse(pattern).is_ok_and(|hir| requires_line_break(&hir)) {
+        anyhow::bail!(
+            "regex search matches within one line, but the pattern needs a line break. \
+             Search for one of its lines."
+        );
+    }
+    Ok(pattern)
+}
+
+fn requires_line_break(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Literal(literal) => literal.0.contains(&b'\n'),
+        HirKind::Repetition(repetition) => {
+            repetition.min > 0 && requires_line_break(&repetition.sub)
+        }
+        HirKind::Capture(capture) => requires_line_break(&capture.sub),
+        HirKind::Concat(expressions) => expressions.iter().any(requires_line_break),
+        HirKind::Alternation(expressions) => expressions.iter().all(requires_line_break),
+        HirKind::Empty | HirKind::Class(_) | HirKind::Look(_) => false,
+    }
 }
 
 fn required_literal_runs(pattern: &str) -> Option<Vec<String>> {
@@ -1017,6 +1045,19 @@ fn open_absolute_workspace_file(
     crate::workspace_file::open(root, path)
 }
 
+/// The searcher transcodes UTF-16 files that start with a byte order mark, so
+/// context lines must use the same text.
+fn context_text(bytes: Vec<u8>) -> String {
+    let decode = match bytes.get(..2) {
+        Some([0xff, 0xfe]) => u16::from_le_bytes,
+        Some([0xfe, 0xff]) => u16::from_be_bytes,
+        _ => return crate::workspace_file::lossy_string(bytes),
+    };
+    let (units, _) = bytes[2..].as_chunks::<2>();
+    let units = units.iter().map(|unit| decode(*unit)).collect::<Vec<_>>();
+    String::from_utf16_lossy(&units)
+}
+
 fn expand_regex_context_with_paths(
     hits: &mut [SearchHit],
     context: usize,
@@ -1059,7 +1100,7 @@ fn expand_regex_context_with_paths(
         if bytes_read as u64 > MAX_CONTEXT_FILE_BYTES {
             continue;
         }
-        let content = crate::workspace_file::lossy_string(bytes);
+        let content = context_text(bytes);
         let lines = content.lines().collect::<Vec<_>>();
         if lines.is_empty() {
             continue;
@@ -1219,6 +1260,41 @@ mod tests {
             assert_eq!(hits[0].start_line, 1, "indexed={indexed}");
             assert_eq!(hits[0].end_line, 3, "indexed={indexed}");
             assert!(hits[0].preview.contains("# footer"), "indexed={indexed}");
+        }
+    }
+
+    #[test]
+    fn line_pattern_rejects_patterns_that_need_a_line_break() {
+        for pattern in ["a\nb", r"a\nb", r"a\r?\nb", r"(a\n)+b", r"a\n|b\n", "a\n\n"] {
+            assert!(line_pattern(pattern).is_err(), "{pattern:?}");
+        }
+        for pattern in [r"a\n|b", r"a\n?b", r"a[\r\n]b", r"(?s)a.b", r"a\s+b", "a("] {
+            assert_eq!(line_pattern(pattern).unwrap(), pattern, "{pattern:?}");
+        }
+        assert_eq!(line_pattern("a\r\n").unwrap(), "a");
+    }
+
+    #[test]
+    #[serial]
+    fn regex_context_decodes_utf16_like_the_searcher() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        for encode in [u16::to_le_bytes as fn(u16) -> [u8; 2], u16::to_be_bytes] {
+            let bytes = "\u{feff}header\nutf16_marker\n"
+                .encode_utf16()
+                .flat_map(encode)
+                .collect::<Vec<_>>();
+            std::fs::write(tmp.path().join("wide.txt"), bytes).unwrap();
+            let options = SearchOptions {
+                context: 1,
+                ..SearchOptions::default()
+            };
+            let hits = regex_search_with_options(&workspace, "utf16_marker", &options).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!((hits[0].start_line, hits[0].end_line), (1, 2));
+            assert_eq!(hits[0].preview, "header\nutf16_marker");
         }
     }
 
