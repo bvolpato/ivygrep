@@ -1,11 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::merkle::{MerkleSnapshot, metadata_file_hash, normalized_indexable_content};
-use crate::workspace::{Workspace, index_path_string};
+use crate::merkle::{
+    MAX_INDEXABLE_FILE_BYTES, MerkleSnapshot, metadata_file_hash, normalized_indexable_content,
+};
+use crate::walker::SourcePathMatcher;
+use crate::workspace::{NestedCheckouts, Workspace, index_path_string};
 
 // Older certificates could accept working-file edits hidden by Git clean filters.
 const CLEAN_GIT_STATE_VERSION: &str = "indexed-sources-v2";
@@ -48,8 +51,9 @@ impl CleanGitCheckout {
         let converted_paths = converted_source_paths(root)?;
         let converted_state = converted_sources_state(root, &converted_paths)?;
         let state = format!(
-            "{head}\n{index_hash}\n{}\n{ignore_state}\n{CLEAN_GIT_STATE_VERSION}\n{converted_state}",
+            "{head}\n{index_hash}\n{}\n{ignore_state}\n{CLEAN_GIT_STATE_VERSION}\n{converted_state}\n{}",
             git_sparse_checkout_state(root, config.as_ref()),
+            tracked_sources_state(root, &tracked_records),
         );
         Some(Self {
             state,
@@ -85,23 +89,77 @@ impl CleanGitCheckout {
     /// Git unchanged, and a tracked edit/read/restore changes source metadata.
     fn matches_indexed_sources(&self, workspace: &Workspace, snapshot: &MerkleSnapshot) -> bool {
         // Clean reuse needs no membership set. Build it only to certify an index.
-        let Some(tracked_paths) = self
-            .tracked_records
-            .split(|byte| *byte == 0)
-            .filter(|record| !record.is_empty())
-            .map(|record| {
-                let relative = Path::new(std::str::from_utf8(record.get(2..)?).ok()?);
-                Some(index_path_string(relative))
-            })
-            .collect::<Option<BTreeSet<_>>>()
+        let Some(tracked) = tracked_paths(&self.tracked_records)
+            .map(|record| record.map(|(tag, path)| (index_path_string(path), tag)))
+            .collect::<Option<BTreeMap<_, _>>>()
         else {
             return false;
         };
         snapshot.files.iter().all(|(path, hash)| {
-            tracked_paths.contains(path)
+            tracked.contains_key(path)
                 && MerkleSnapshot::path_matches_metadata_snapshot(&workspace.root.join(path), hash)
-        })
+        }) && !misses_tracked_source(workspace, snapshot, &tracked)
     }
+}
+
+/// Whether a tracked file is absent from `snapshot` although the walker reads
+/// it. A file that is missing only during the walk leaves Git status clean.
+fn misses_tracked_source(
+    workspace: &Workspace,
+    snapshot: &MerkleSnapshot,
+    tracked: &BTreeMap<String, u8>,
+) -> bool {
+    let mut matcher = None;
+    tracked
+        .iter()
+        // A sparse checkout leaves out the files with this tag.
+        .filter(|(path, tag)| **tag != b'S' && !snapshot.files.contains_key(*path))
+        .any(|(path, _)| {
+            fs::symlink_metadata(workspace.root.join(path)).map_or(true, |metadata| {
+                metadata.is_file() && metadata.len() <= MAX_INDEXABLE_FILE_BYTES
+            }) && matcher
+                .get_or_insert_with(|| {
+                    let skip_gitignore =
+                        super::indexed_skip_gitignore(workspace).unwrap_or_default();
+                    SourcePathMatcher::new(&workspace.root, skip_gitignore)
+                })
+                .allows(Path::new(path))
+                .unwrap_or(true)
+        })
+}
+
+/// Tags and paths in the output of `git ls-files -z -v`. `None` for a path that
+/// is not UTF-8.
+fn tracked_paths(records: &[u8]) -> impl Iterator<Item = Option<(u8, &Path)>> {
+    records
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let path = std::str::from_utf8(record.get(2..)?).ok()?;
+            Some((record[0], Path::new(path)))
+        })
+}
+
+/// Tracked paths, and the directories among them that are separate checkouts.
+/// Neither HEAD nor the Git index shows that a submodule was initialized or
+/// that a tracked directory got or lost its own `.git` entry.
+fn tracked_sources_state(root: &Path, records: &[u8]) -> String {
+    let mut hash = xxhash_rust::xxh3::Xxh3::new();
+    hash.update(records);
+    let nested_checkouts = NestedCheckouts::new(root);
+    let mut seen = HashSet::new();
+    for (_, path) in tracked_paths(records).flatten() {
+        for directory in path.ancestors().skip(1) {
+            if directory.as_os_str().is_empty() || !seen.insert(directory) {
+                break;
+            }
+            if nested_checkouts.is_separate_checkout(root, &root.join(directory)) {
+                hash.update(directory.as_os_str().as_encoded_bytes());
+                hash.update(b"\0");
+            }
+        }
+    }
+    format!("{:032x}", hash.digest128())
 }
 
 pub(super) fn indexed_git_state_path(workspace: &Workspace) -> PathBuf {
@@ -612,7 +670,13 @@ fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
     let same_sparse_checkout = indexed_state.lines().nth(2) == current_state.lines().nth(2);
     let same_ignore_state = indexed_state.lines().nth(3) == current_state.lines().nth(3);
     let same_converted_sources = indexed_state.lines().nth(5) == current_state.lines().nth(5);
-    if same_head && same_sparse_checkout && same_ignore_state && same_converted_sources {
+    let same_tracked_sources = indexed_state.lines().nth(6) == current_state.lines().nth(6);
+    if same_head
+        && same_sparse_checkout
+        && same_ignore_state
+        && same_converted_sources
+        && same_tracked_sources
+    {
         BaseIndexCheckoutState::MetadataChanged(Box::new(checkout))
     } else {
         BaseIndexCheckoutState::Stale
@@ -627,7 +691,7 @@ pub(super) mod test_support {
 
     struct SourceChange {
         path: PathBuf,
-        indexed_contents: Vec<u8>,
+        indexed_contents: Option<Vec<u8>>,
         restored_contents: Option<Vec<u8>>,
     }
 
@@ -642,16 +706,16 @@ pub(super) mod test_support {
         }
     }
 
-    /// Change one source after clean checkout capture, then restore its
-    /// original contents or absence just before the clean marker is recorded.
+    /// Change or remove one source after clean checkout capture, then restore
+    /// its original contents or absence just before the clean marker is recorded.
     pub(crate) fn transient_source(
         root: &Path,
         path: &Path,
-        indexed_contents: &[u8],
+        indexed_contents: Option<&[u8]>,
     ) -> TransientSourceChange {
         let change = SourceChange {
             path: path.to_path_buf(),
-            indexed_contents: indexed_contents.to_vec(),
+            indexed_contents: indexed_contents.map(<[u8]>::to_vec),
             restored_contents: std::fs::read(path).ok(),
         };
         assert!(
@@ -666,7 +730,10 @@ pub(super) mod test_support {
 
     pub(crate) fn after_capture(root: &Path) {
         if let Some(change) = CHANGES.lock().unwrap().get(root) {
-            std::fs::write(&change.path, &change.indexed_contents).unwrap();
+            match &change.indexed_contents {
+                Some(contents) => std::fs::write(&change.path, contents).unwrap(),
+                None => std::fs::remove_file(&change.path).unwrap(),
+            }
         }
     }
 

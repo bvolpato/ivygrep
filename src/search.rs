@@ -6207,6 +6207,7 @@ fn is_test_path(path: &str) -> bool {
         || path.starts_with("selftests/")
         // File-level signals (naming conventions across languages)
         || path.contains("_test.")    // Go, Rust: foo_test.go, foo_test.rs
+        || path.contains("_tests.")   // Rust: foo_tests.rs
         || path.contains(".test.")    // JS/TS: foo.test.ts, foo.test.js
         || path.contains("_spec.")    // Ruby, JS: foo_spec.rb, foo.spec.ts
         || path.contains(".spec.")    // JS/TS: foo.spec.ts
@@ -10109,6 +10110,7 @@ export function registerCommands(p: Plugin) {
         // Filename conventions
         assert!(is_test_path("src/handler_test.go"));
         assert!(is_test_path("src/handler_test.rs"));
+        assert!(is_test_path("src/handler_tests.rs"));
         assert!(is_test_path("src/Button.test.tsx"));
         assert!(is_test_path("src/user_spec.rb"));
         assert!(is_test_path("src/handler.spec.ts"));

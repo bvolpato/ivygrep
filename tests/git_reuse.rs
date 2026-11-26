@@ -599,3 +599,74 @@ fn git_reuse_observes_edits_hidden_by_submodule_ignore_settings() {
         assert_found(&workspace, "updated_submodule_marker", true);
     }
 }
+
+#[test]
+#[serial]
+fn git_reuse_observes_submodule_initialization() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let fixture = tempdir().unwrap();
+    let top = fixture.path();
+    for name in ["upstream", "origin"] {
+        fs::create_dir(top.join(name)).unwrap();
+        git(&top.join(name), &["init", "-b", "main"]);
+        fs::write(
+            top.join(name).join("lib.rs"),
+            format!("pub fn {name}_marker() {{}}\n"),
+        )
+        .unwrap();
+        git(&top.join(name), &["add", "."]);
+        git(&top.join(name), &["commit", "-m", "initial"]);
+    }
+    let allow_file = "protocol.file.allow=always";
+    git(
+        &top.join("origin"),
+        &["-c", allow_file, "submodule", "add", "../upstream", "sub"],
+    );
+    git(&top.join("origin"), &["commit", "-m", "submodule"]);
+    git(top, &["clone", "origin", "clone"]);
+    let root = top.join("clone");
+    let workspace = Workspace::resolve(&root).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "upstream_marker", false);
+
+    git(&root, &["-c", allow_file, "submodule", "update", "--init"]);
+    assert_clean(&root);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "upstream_marker", true);
+
+    git(&root, &["submodule", "deinit", "-f", "sub"]);
+    assert_clean(&root);
+    let summary = index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(summary.deleted_files, 1);
+    assert_found(&workspace, "origin_marker", true);
+}
+
+#[test]
+#[serial]
+fn git_reuse_observes_a_git_entry_in_a_tracked_directory() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    let nested = root.path().join("vendor/nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("lib.rs"), "pub fn nested_marker() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "nested_marker", true);
+
+    git(&nested, &["init", "-b", "main"]);
+    assert_clean(root.path());
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "nested_marker", false);
+
+    fs::remove_dir_all(nested.join(".git")).unwrap();
+    assert_clean(root.path());
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "nested_marker", true);
+}
