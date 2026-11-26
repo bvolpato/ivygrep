@@ -212,6 +212,9 @@ const MAX_QUERY_NESTING: usize = 6;
 /// Most levels of a parsed query. A level of [`MAX_QUERY_NESTING`] can be a
 /// disjunction of conjunctions with a boost.
 const MAX_AST_DEPTH: usize = 64;
+/// Most `(` and `NOT` in text for Tantivy's grammar, which recurses for each one
+/// that stays open. The grammar decides what closes a group.
+const MAX_QUERY_OPENINGS: usize = 200;
 
 /// Whether open groups and `NOT` runs of `text` add up to more than
 /// [`MAX_QUERY_NESTING`] levels. An unclosed `:(` on each line of a chat log is
@@ -326,7 +329,8 @@ fn parse_user_input(
     text: &str,
 ) -> std::result::Result<UserInputAst, tantivy::query::QueryParserError> {
     let syntax_error = || tantivy::query::QueryParserError::SyntaxError(text.to_string());
-    if has_sign_before_bare_star(text) || nests_too_deeply(text) {
+    let openings = text.matches('(').count() + text.matches("NOT").count();
+    if has_sign_before_bare_star(text) || openings > MAX_QUERY_OPENINGS || nests_too_deeply(text) {
         return Err(syntax_error());
     }
     let ast = std::panic::catch_unwind(|| tantivy::query_grammar::parse_query(text))

@@ -1274,6 +1274,8 @@ fn deeply_nested_queries_do_not_overflow_the_stack() {
         format!("{}login{}", "(page\\) AND ".repeat(60), ")".repeat(60)),
         // Not a phrase, so these closing parentheses are text only to the check.
         format!("5\" {}login", "(\")\" ".repeat(260)),
+        format!("{}login", "(/)/ ".repeat(300)),
+        format!("login b\" \"{}page \"z\"", "(".repeat(500)),
     ] {
         hybrid_search_outcome(&workspace, &query, None, &SearchOptions::default()).unwrap();
     }
