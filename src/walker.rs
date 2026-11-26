@@ -108,8 +108,9 @@ fn repository_boundary(dir: &Path) -> Option<bool> {
         .then(|| crate::workspace::is_git_workspace_root(dir))
 }
 
-/// `info/exclude` of a checkout whose Git directory is elsewhere, such as a
-/// submodule. The `ignore` crate does not read it.
+/// `info/exclude` with rules of a checkout whose Git directory is elsewhere,
+/// such as a submodule. The `ignore` crate does not read it. The template of Git
+/// has only comments.
 fn submodule_exclude(dir: &Path) -> Option<PathBuf> {
     let marker = dir.join(".git");
     if !marker.is_file() {
@@ -117,7 +118,13 @@ fn submodule_exclude(dir: &Path) -> Option<PathBuf> {
     }
     crate::workspace::git_dir_from_marker(dir, &marker)
         .map(|git_dir| git_dir.join("info/exclude"))
-        .filter(|exclude| exclude.is_file())
+        .filter(|exclude| {
+            std::fs::read(exclude).is_ok_and(|rules| {
+                rules
+                    .split(|byte| *byte == b'\n')
+                    .any(|rule| !rule.trim_ascii().is_empty() && !rule.starts_with(b"#"))
+            })
+        })
 }
 
 /// Git rules that the `ignore` crate does not apply. It stops Git rules at a
@@ -134,8 +141,8 @@ struct EnclosingGitRules {
     boundaries: HashMap<PathBuf, Option<bool>>,
     /// The `submodule_exclude` of each repository below `root`.
     excludes: HashMap<PathBuf, Option<PathBuf>>,
-    /// For each enclosing repository.
-    matchers: HashMap<PathBuf, ignore::IncrementalIgnore>,
+    /// For each enclosing repository, and whether a directory stops its rules.
+    matchers: HashMap<(PathBuf, bool), ignore::IncrementalIgnore>,
 }
 
 impl EnclosingGitRules {
@@ -181,10 +188,12 @@ impl EnclosingGitRules {
         }
         let matcher = self
             .matchers
-            .entry(repository.to_path_buf())
+            .entry((repository.to_path_buf(), stops_early))
             .or_insert_with(|| {
                 let mut walker = source_ignore_builder(&self.root.join(repository), false, exclude);
-                walker.require_git(false).parents(false);
+                if stops_early {
+                    walker.require_git(false).parents(false);
+                }
                 incremental_ignore(&walker)
             });
         Some(matcher.matched_with_errors(rel.strip_prefix(repository).ok()?, is_dir))
@@ -644,6 +653,7 @@ mod tests {
         file(".git/info/exclude".into(), "excluded.rs\n");
         file(".git/modules/sub/info/exclude".into(), "local-secret.rs\n");
         file(".gitignore".into(), "*.env\n");
+        file(".ignore".into(), "!kept.log\n");
         // A submodule has rules of its own.
         let submodule = |path: &str| {
             let git_dir = root.join(".git/modules").join(path);
@@ -688,6 +698,8 @@ mod tests {
         paths.push(("local-secret.rs".into(), true));
         paths.push(("sub/local-secret.rs".into(), false));
         paths.push(("sub/deep/local-secret.rs".into(), false));
+        paths.push(("sub/kept.log".into(), true));
+        paths.push(("sub/dropped.log".into(), false));
         paths.push(("jj/sub/secret.env".into(), true));
         paths.push(("jj/sub/debug.log".into(), false));
         for (path, _) in &paths {
