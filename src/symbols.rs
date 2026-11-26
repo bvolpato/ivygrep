@@ -243,6 +243,30 @@ fn search_symbols_in_index(
 
     workspace.ensure_current_index_format()?;
     let query = parse_symbol_query(name);
+    let lookup =
+        |query| search_definitions(workspace, search_context, query, options, &path_matcher);
+    // A Clojure name such as `string->int` contains the C and PHP member arrow.
+    // With another case, the query is for a member.
+    if query.owner.is_some() && candidate_name.contains("->") {
+        let mut hits = lookup(SymbolQuery {
+            name: candidate_name,
+            owner: None,
+        })?;
+        hits.retain(|hit| hit.preview.contains(candidate_name));
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+    }
+    lookup(query)
+}
+
+fn search_definitions(
+    workspace: &Workspace,
+    search_context: Option<&SearchContext>,
+    query: SymbolQuery<'_>,
+    options: &SearchOptions,
+    path_matcher: &PathGlobMatcher,
+) -> Result<Vec<SearchHit>> {
     let query_normalized = normalize_symbol(query.name);
     let primary_sqlite = if workspace.has_overlay() {
         workspace.overlay_sqlite_path()
@@ -256,7 +280,7 @@ fn search_symbols_in_index(
             &query,
             &query_normalized,
             options,
-            &path_matcher,
+            path_matcher,
             None,
             &files,
         )
@@ -281,7 +305,7 @@ fn search_symbols_in_index(
                     &query,
                     &query_normalized,
                     options,
-                    &path_matcher,
+                    path_matcher,
                     Some(&shadowed_paths),
                     &files,
                 )
@@ -1832,7 +1856,12 @@ fn language_definition_name<'a>(line: &'a str, language: &str) -> Option<Option<
         )
         .expect("valid Clojure regex")
     });
+    static R_HANDLER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:condition|error|interrupt|message|warning)\s*=").expect("valid R regex")
+    });
     let (pattern, exclusive) = match language.to_ascii_lowercase().as_str() {
+        // `tryCatch` arguments.
+        "r" if R_HANDLER.is_match(line.trim()) => return Some(None),
         "r" => (&*R, true),
         "clojure" => (&*CLOJURE, true),
         // Classes keep the generic scan.
@@ -2290,6 +2319,7 @@ mod tests {
                 &["order", "print.order"],
             ),
             ("r", "lapply(x, FUN = function(i) {", &[]),
+            ("r", "error = function(e) {", &[]),
             ("r", "result <- function_call(x)", &[]),
             ("powershell", "function Get-Stock {", &["Get-Stock"]),
             (

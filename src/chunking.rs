@@ -989,7 +989,9 @@ fn grammar_language<'a>(rel_path: &Path, language: &'a str, text: &str) -> &'a s
     {
         return language;
     }
-    if text.lines().map(str::trim).any(is_cpp_header_line) {
+    // Prose such as `namespace pollution` in a comment is not C++.
+    let mut code = crate::text::code_line_ranges(text, language);
+    if code.any(|range| is_cpp_header_line(&text[range])) {
         "cpp"
     } else if text.lines().map(str::trim).any(|line| {
         // Doxygen has commands named `@interface`, `@protocol`, and `@class`.
@@ -2616,7 +2618,7 @@ fn tree_sitter_query(
                 OBJC_HEADER_QUERY,
                 tree_sitter_objc::LANGUAGE,
                 concat!(
-                    "(class_interface) @class (protocol_declaration) @class (method_declaration) @fn (function_definition) @fn (struct_specifier body: (_)) @class (enum_specifier body: (_)) @class ",
+                    "(class_interface) @class (protocol_declaration) @class (method_declaration) @fn (function_definition) @fn (struct_specifier body: (_)) @class (enum_specifier body: (_)) @class (union_specifier body: (_)) @class ",
                     file_scope_alias_query!("(type_definition)"),
                 )
             )
@@ -3486,12 +3488,13 @@ mod tests {
     fn headers_use_the_grammar_of_their_language() {
         for (source, expected) in [
             (
-                "#import <Foundation/Foundation.h>\n\n@interface Greeter : NSObject\n- (void)greetPerson:(NSString *)who;\n@end\n\n@protocol GreeterDelegate <NSObject>\n- (void)didGreet;\n@end\n",
+                "#import <Foundation/Foundation.h>\n\n@interface Greeter : NSObject\n- (void)greetPerson:(NSString *)who;\n@end\n\n@protocol GreeterDelegate <NSObject>\n- (void)didGreet;\n@end\n\nunion Reading { int count; float ratio; };\n",
                 &[
                     ("Greeter", None),
                     ("greetPerson", Some("Greeter")),
                     ("GreeterDelegate", None),
                     ("didGreet", Some("GreeterDelegate")),
+                    ("Reading", None),
                 ][..],
             ),
             (
@@ -3505,6 +3508,10 @@ mod tests {
             (
                 "class Widget;\nenum class Shade { Light, Dark };\ninline int width(const Widget &widget) { return 1; }\n",
                 &[("Shade", None), ("width", None)],
+            ),
+            (
+                "/*\n class that is not for public use;\n namespace pollution\n*/\n@interface Meter : NSObject\n@end\n",
+                &[("Meter", None)],
             ),
             // Doxygen commands do not make a header Objective-C or C++.
             (
