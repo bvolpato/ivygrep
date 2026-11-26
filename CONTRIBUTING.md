@@ -149,6 +149,9 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m http.server 8765 --directory docs
 ```
 
+The homepage demo contains recorded output. To record it again, follow the
+instructions in `scripts/record_site_demo.py`. Do not edit the demo blocks by hand.
+
 Open `http://127.0.0.1:8765/` and inspect desktop/mobile layout, console errors,
 and changed links. Stop server afterward.
 
