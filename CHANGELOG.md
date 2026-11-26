@@ -25,7 +25,7 @@ All notable changes to ivygrep are documented in this file.
 - Identical Web results are shown once, so arrow keys and Pin reach every result. The Enter key of an input method no longer starts a search.
 - The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
 - Malformed Web requests get a 400 or 431 response instead of a closed connection.
-- Literal search keeps leading and trailing spaces in the pattern, so `--literal 'if '` no longer matches `diff`.
+- Literal search keeps leading and trailing spaces in the pattern, also in the Web UI, so `--literal 'if '` no longer matches `diff`.
 - The CLI and MCP warn that a literal or regex pattern that needs a line break has no results, because both modes search one line at a time. One trailing line break is ignored.
 - Regex context lines of UTF-16 files are decoded like the matching lines.
 

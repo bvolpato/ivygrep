@@ -47,9 +47,10 @@ export function uniqueHits<T extends { file_path: string; start_line: number; en
   });
 }
 
-/** Spaces are part of a regex pattern. Pasted line breaks at its ends are not. */
+/** Spaces are part of a literal or regex pattern. Pasted line breaks at its ends are not. */
 export function searchQuery(mode: string, value: string): string {
-  return mode === "regex" ? value.replace(/^[\r\n]+|[\r\n]+$/g, "") : value.trim();
+  const isPattern = mode === "literal" || mode === "regex";
+  return isPattern ? value.replace(/^[\r\n]+|[\r\n]+$/g, "") : value.trim();
 }
 
 export function isWithin(path: string, root: string): boolean {
