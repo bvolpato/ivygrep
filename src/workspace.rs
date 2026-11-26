@@ -1617,8 +1617,10 @@ fn comparable_git_path(path: &Path) -> PathBuf {
 }
 
 fn git_dir_from_marker(dir: &Path, marker: &Path) -> Option<PathBuf> {
-    let contents = fs::read_to_string(marker).ok()?;
-    let raw_git_dir = PathBuf::from(contents.trim().strip_prefix("gitdir:")?.trim());
+    // The path can have bytes that are not UTF-8.
+    let contents = fs::read(marker).ok()?;
+    let raw_git_dir =
+        path_from_git_output(contents.trim_ascii().strip_prefix(b"gitdir:")?.trim_ascii())?;
     Some(if raw_git_dir.is_absolute() {
         raw_git_dir
     } else {
