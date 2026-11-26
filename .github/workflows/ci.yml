@@ -194,7 +194,15 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $env:IVYGREP_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "ivygrep-installer"
-          & ./install.ps1
+          # "irm | iex" runs the installer in the scope of the user's session.
+          $ErrorActionPreference = "Continue"
+          Get-Content -Raw ./install.ps1 | Invoke-Expression
+          if ($ErrorActionPreference -ne "Continue") {
+            throw "install.ps1 changed ErrorActionPreference to $ErrorActionPreference"
+          }
+          $ErrorActionPreference = "Stop"
+          # This read fails when the installer leaves strict mode on.
+          $null = $ivygrepUnsetVariable
           & (Join-Path $env:IVYGREP_INSTALL_DIR "ig.exe") --version
 
       - name: Upgrade PowerShell installer over running daemon
