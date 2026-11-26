@@ -613,7 +613,14 @@ impl Workspace {
         match fs::read_to_string(self.index_incarnation_path()) {
             Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
             Ok(_) => Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+                ) =>
+            {
+                Ok(None)
+            }
             Err(error) => Err(error).context("read index incarnation"),
         }
     }
@@ -1123,6 +1130,15 @@ impl Workspace {
         Ok(Some(parsed))
     }
 
+    /// Metadata that an index run may replace: `None` also for a damaged file,
+    /// but not for a file that it cannot read.
+    pub(crate) fn read_undamaged_metadata(&self) -> Result<Option<WorkspaceMetadata>> {
+        match self.read_metadata() {
+            Err(error) if error.is::<serde_json::Error>() => Ok(None),
+            result => result,
+        }
+    }
+
     pub fn vector_key_count(&self) -> u64 {
         read_sqlite_vector_key_count(&self.index_dir)
     }
@@ -1166,6 +1182,15 @@ impl Workspace {
 
     pub fn index_health(&self) -> WorkspaceIndexHealth {
         self.index_health_with_options(true)
+    }
+
+    /// [`Self::quick_index_health`] without its side effect: that check removes
+    /// the PID file of a crashed index run, which the repair still needs to see.
+    pub(crate) fn looks_queryable(&self) -> bool {
+        !matches!(
+            legacy_pid_status(&self.indexing_pid_path(), false),
+            LegacyPidStatus::Stale
+        ) && self.quick_index_health().is_queryable()
     }
 
     fn index_health_with_options(&self, verify_stores: bool) -> WorkspaceIndexHealth {
@@ -2442,7 +2467,11 @@ fn read_sqlite_file_paths(sqlite_path: &Path) -> Result<BTreeSet<String>> {
 
 fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
     for entry in source_walker(root, skip_gitignore).build().flatten() {
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file())
+            || entry
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() > crate::merkle::MAX_INDEXABLE_FILE_BYTES)
+        {
             continue;
         }
         // Snapshot walks skip non-UTF-8 names; counting them here would mark an

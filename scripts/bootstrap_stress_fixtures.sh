@@ -32,6 +32,8 @@ download_text_blob() {
   for url in "$@"; do
     echo "[download] ${url} -> ${destination}"
     rm -f "${tmp_file}"
+    # curl waits for a long Retry-After unless --retry-max-time limits it. curl 8.14
+    # and later then exits 0 without a file.
     if curl \
       --fail \
       --silent \
@@ -39,11 +41,12 @@ download_text_blob() {
       --location \
       --retry 5 \
       --retry-delay 2 \
+      --retry-max-time 60 \
       --retry-all-errors \
       --connect-timeout 15 \
       --max-time 180 \
       "${url}" \
-      -o "${tmp_file}"; then
+      -o "${tmp_file}" && [[ -s "${tmp_file}" ]]; then
       tr -d '\r' < "${tmp_file}" > "${destination}"
       rm -f "${tmp_file}"
       return

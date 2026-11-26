@@ -4,8 +4,12 @@ pub use unix::*;
 #[cfg(not(unix))]
 pub use windows::*;
 
+fn daemon_lock_path() -> anyhow::Result<std::path::PathBuf> {
+    Ok(crate::config::app_home()?.join("daemon.lock"))
+}
+
 fn open_daemon_lock() -> anyhow::Result<std::fs::File> {
-    let path = crate::config::app_home()?.join("daemon.lock");
+    let path = daemon_lock_path()?;
     Ok(std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -45,6 +49,31 @@ pub fn acquire_daemon_lock() -> anyhow::Result<Option<std::fs::File>> {
         }
     }
     Ok(None)
+}
+
+/// Whether the lock file of the app home is still the one that `lock` holds.
+/// It is not after the app home was deleted, even if it exists again.
+pub fn is_current_daemon_lock(lock: &std::fs::File) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(held) = lock.metadata() else {
+            return true;
+        };
+        let Ok(path) = daemon_lock_path() else {
+            return true;
+        };
+        match std::fs::metadata(path) {
+            Ok(current) => (held.dev(), held.ino()) == (current.dev(), current.ino()),
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+    // Windows does not delete a file that another handle keeps open.
+    #[cfg(not(unix))]
+    {
+        let _ = lock;
+        true
+    }
 }
 
 /// Remove a stale daemon endpoint only after proving no daemon owns the

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -13,8 +13,10 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::daemon::DaemonState;
+use crate::path_glob::parse_glob_csv;
 use crate::protocol::{
-    BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
+    BUILD_VERSION, DaemonRequest, DaemonResponse, LiteralSearchOutput, MAX_HITS_PER_FILE,
+    SearchHit, group_hits_by_file,
 };
 use crate::workspace::{Workspace, list_workspace_metadata};
 
@@ -26,6 +28,7 @@ const HTTP_CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Most unread input discarded while waiting for the client to close.
 const MAX_HTTP_CLOSE_DRAIN_BYTES: usize = 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_TREE_ENTRIES: usize = 500;
 const DEFAULT_SEARCH_LIMIT: usize = 50;
 const SECURITY_HEADERS: &str = concat!(
     "Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'\r\n",
@@ -53,8 +56,18 @@ struct HttpRequest {
     headers: HashMap<String, String>,
 }
 
+enum ReadRequest {
+    Received(HttpRequest),
+    /// The client closed the connection without sending a request.
+    Closed,
+    Rejected {
+        status: &'static str,
+        error: String,
+    },
+}
+
 enum TimedHttpRequest {
-    Received(Option<HttpRequest>),
+    Read(ReadRequest),
     TimedOut,
 }
 
@@ -195,8 +208,11 @@ async fn respond(
     auth: WebAuth,
 ) -> Result<()> {
     let request = match read_http_request_with_timeout(stream, HTTP_HEADER_READ_TIMEOUT).await? {
-        TimedHttpRequest::Received(Some(request)) => request,
-        TimedHttpRequest::Received(None) => return Ok(()),
+        TimedHttpRequest::Read(ReadRequest::Received(request)) => request,
+        TimedHttpRequest::Read(ReadRequest::Closed) => return Ok(()),
+        TimedHttpRequest::Read(ReadRequest::Rejected { status, error }) => {
+            return write_json(stream, status, &json!({"error": error})).await;
+        }
         TimedHttpRequest::TimedOut => {
             return write_json(
                 stream,
@@ -206,7 +222,17 @@ async fn respond(
             .await;
         }
     };
-    let (path, params) = parse_target(&request.target)?;
+    let (path, params) = match parse_target(&request.target) {
+        Ok(target) => target,
+        Err(err) => {
+            return write_json(
+                stream,
+                "400 Bad Request",
+                &json!({"error": format!("malformed request target: {err}")}),
+            )
+            .await;
+        }
+    };
     if !valid_host(&request, auth.exposed) {
         return write_json(
             stream,
@@ -360,25 +386,28 @@ async fn read_http_request_with_timeout(
     timeout: Duration,
 ) -> Result<TimedHttpRequest> {
     match tokio::time::timeout(timeout, read_http_request(stream)).await {
-        Ok(request) => Ok(TimedHttpRequest::Received(request?)),
+        Ok(request) => Ok(TimedHttpRequest::Read(request?)),
         Err(_) => Ok(TimedHttpRequest::TimedOut),
     }
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
+async fn read_http_request(stream: &mut TcpStream) -> Result<ReadRequest> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
             if buf.is_empty() {
-                return Ok(None);
+                return Ok(ReadRequest::Closed);
             }
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
         if buf.len() > MAX_HTTP_HEADER_BYTES {
-            bail!("HTTP headers exceed {MAX_HTTP_HEADER_BYTES} bytes");
+            return Ok(ReadRequest::Rejected {
+                status: "431 Request Header Fields Too Large",
+                error: format!("HTTP headers exceed {MAX_HTTP_HEADER_BYTES} bytes"),
+            });
         }
         if buf.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
@@ -390,8 +419,19 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>
         .position(|window| window == b"\r\n\r\n")
         .map(|index| index + 4)
         .unwrap_or(buf.len());
-    let text =
-        std::str::from_utf8(&buf[..header_end]).context("HTTP request headers are not UTF-8")?;
+    Ok(match parse_http_request(&buf[..header_end]) {
+        Ok(request) => ReadRequest::Received(request),
+        Err(err) => ReadRequest::Rejected {
+            status: "400 Bad Request",
+            error: err.to_string(),
+        },
+    })
+}
+
+fn parse_http_request(bytes: &[u8]) -> Result<HttpRequest> {
+    // Header values can hold other encodings. A cookie from another service on
+    // this host must not block the request.
+    let text = String::from_utf8_lossy(bytes);
     let mut lines = text.lines();
     let request_line = lines
         .next()
@@ -425,11 +465,11 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>
             })
             .or_insert_with(|| value.to_string());
     }
-    Ok(Some(HttpRequest {
+    Ok(HttpRequest {
         method,
         target,
         headers,
-    }))
+    })
 }
 
 /// Loopback listeners accept only loopback Host names (DNS-rebinding guard);
@@ -472,10 +512,13 @@ fn authority_host(authority: &str) -> Option<&str> {
 }
 
 fn valid_api_origin(request: &HttpRequest) -> bool {
+    // Another port of this host is `same-site`. A page there gets the session
+    // cookie on its requests, and a plain GET from it has no Origin. A typed
+    // address is `none`, also after a redirect from another origin.
     if request
         .headers
         .get("sec-fetch-site")
-        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
+        .is_some_and(|value| value != "same-origin")
     {
         return false;
     }
@@ -620,15 +663,12 @@ fn parse_bool_param(params: &HashMap<String, Vec<String>>, key: &str) -> bool {
     matches!(param(params, key), Some("1" | "true" | "yes"))
 }
 
-fn csv_param(params: &HashMap<String, Vec<String>>, key: &str) -> Vec<String> {
+fn glob_params(params: &HashMap<String, Vec<String>>, key: &str) -> Vec<String> {
     params
         .get(key)
         .into_iter()
         .flatten()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+        .flat_map(|value| parse_glob_csv(Some(value)))
         .collect()
 }
 
@@ -642,20 +682,25 @@ fn build_search_request_for_path(
     params: &HashMap<String, Vec<String>>,
     path: Option<PathBuf>,
 ) -> Result<DaemonRequest> {
-    let query = param(params, "q").unwrap_or_default().trim().to_string();
+    let query = param(params, "q").unwrap_or_default();
+    // Spaces are part of a regex pattern.
+    let query = match param(params, "mode") {
+        Some("regex") => query.trim_matches(['\r', '\n']),
+        _ => query.trim(),
+    }
+    .to_string();
     if query.is_empty() {
         bail!("missing q");
     }
-    let limit = Some(parse_usize_param(params, "limit", DEFAULT_SEARCH_LIMIT).clamp(1, 500));
+    let limit = search_limit(params);
     let context = parse_usize_param(params, "context", 2).min(20);
     let type_filter = param(params, "type")
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
-    let include_globs = csv_param(params, "include");
-    let exclude_globs = csv_param(params, "exclude");
+    let include_globs = glob_params(params, "include");
+    let exclude_globs = glob_params(params, "exclude");
     let scope_path = param(params, "scope")
-        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     let scope_is_file = parse_bool_param(params, "scope_is_file");
@@ -665,10 +710,15 @@ fn build_search_request_for_path(
         "literal" => DaemonRequest::LiteralSearch {
             path,
             query,
-            limit,
+            limit: Some(limit),
             context,
             type_filter,
-            output: crate::protocol::LiteralSearchOutput::Hits,
+            // The previews of one workspace share `limit`, and each listed file
+            // gets at least one.
+            output: LiteralSearchOutput::FilesWithPreviews {
+                file_limit: limit,
+                hits_per_file: MAX_HITS_PER_FILE,
+            },
             include_globs,
             exclude_globs,
             scope_path,
@@ -678,7 +728,7 @@ fn build_search_request_for_path(
         "regex" => DaemonRequest::RegexSearch {
             path,
             pattern: query,
-            limit,
+            limit: Some(limit),
             file_name_only: false,
             context,
             type_filter,
@@ -691,7 +741,7 @@ fn build_search_request_for_path(
         _ => DaemonRequest::Search {
             path,
             query,
-            limit,
+            limit: Some(limit),
             context,
             type_filter,
             include_globs,
@@ -706,27 +756,102 @@ fn build_search_request_for_path(
     })
 }
 
-async fn execute_search(
-    state: DaemonState,
-    request: DaemonRequest,
-) -> Result<(Vec<SearchHit>, Vec<String>), String> {
-    match crate::daemon::handle_web_request(state, request).await {
-        DaemonResponse::SearchResults { hits, warnings } => Ok((hits, warnings)),
-        DaemonResponse::Error { message } => Err(message),
-        other => Err(format!("unexpected daemon response: {other:?}")),
+fn search_limit(params: &HashMap<String, Vec<String>>) -> usize {
+    parse_usize_param(params, "limit", DEFAULT_SEARCH_LIMIT).clamp(1, 500)
+}
+
+#[derive(Default)]
+struct WebResults {
+    hits: Vec<SearchHit>,
+    /// Matches of each file, also those that `hits` leaves out (literal mode).
+    match_counts: BTreeMap<PathBuf, usize>,
+    warnings: Vec<String>,
+}
+
+impl WebResults {
+    /// Keeps at most `limit` hits, and the first hit of each file before
+    /// further hits of any file.
+    fn limit_hits_by_file(&mut self, limit: usize) {
+        let mut files = HashSet::new();
+        let first_of_file: Vec<bool> = self
+            .hits
+            .iter()
+            .map(|hit| files.insert(&hit.file_path))
+            .collect();
+        let mut remaining_files = limit.min(files.len());
+        let mut remaining_hits = limit - remaining_files;
+        let mut first_of_file = first_of_file.into_iter();
+        self.hits.retain(|_| {
+            let remaining = if first_of_file.next().unwrap() {
+                &mut remaining_files
+            } else {
+                &mut remaining_hits
+            };
+            let keep = *remaining > 0;
+            *remaining = remaining.saturating_sub(1);
+            keep
+        });
+    }
+
+    /// Matches of each listed file that `hits` leaves out.
+    fn more_hits(&self) -> BTreeMap<&Path, usize> {
+        let mut more = BTreeMap::new();
+        for hit in &self.hits {
+            let path = hit.file_path.as_path();
+            if let Some(matches) = self.match_counts.get(path) {
+                let left = more.entry(path).or_insert(*matches);
+                *left = left.saturating_sub(1);
+            }
+        }
+        more.retain(|_, left| *left > 0);
+        more
+    }
+
+    fn to_value(&self, started: Instant, flat: bool) -> Value {
+        let mut value = json!({
+            "hits": self.hits,
+            "warnings": self.warnings,
+            "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0
+        });
+        let more_hits = self.more_hits();
+        if !more_hits.is_empty() {
+            value["more_hits_in_file"] = json!(more_hits);
+        }
+        if !flat {
+            let mut groups = group_hits_by_file(&self.hits, None);
+            for group in &mut groups {
+                if let Some(more) = more_hits.get(group.file_path.as_path()) {
+                    group.hit_count += more;
+                    group.more_hits_in_file = *more;
+                }
+            }
+            value["groups"] = json!(groups);
+        }
+        value
     }
 }
 
-fn search_value(hits: &[SearchHit], warnings: &[String], started: Instant, flat: bool) -> Value {
-    let mut value = json!({
-        "hits": hits,
-        "warnings": warnings,
-        "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0
-    });
-    if !flat {
-        value["groups"] = json!(group_hits_by_file(hits, None));
+async fn execute_search(state: DaemonState, request: DaemonRequest) -> Result<WebResults, String> {
+    match crate::daemon::handle_web_request(state, request).await {
+        DaemonResponse::SearchResults { hits, warnings } => Ok(WebResults {
+            hits,
+            warnings,
+            ..Default::default()
+        }),
+        DaemonResponse::LiteralFiles { files, warnings } => {
+            let mut results = WebResults {
+                warnings,
+                ..Default::default()
+            };
+            for file in files {
+                results.match_counts.insert(file.file_path, file.hit_count);
+                results.hits.extend(file.hits);
+            }
+            Ok(results)
+        }
+        DaemonResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected daemon response: {other:?}")),
     }
-    value
 }
 
 fn search_error(message: String, flat: bool) -> Value {
@@ -754,7 +879,10 @@ pub(crate) async fn run_search(state: DaemonState, params: &HashMap<String, Vec<
         Err(err) => return search_error(err.to_string(), flat),
     };
     match execute_search(state, request).await {
-        Ok((hits, warnings)) => search_value(&hits, &warnings, started, flat),
+        Ok(mut results) => {
+            results.limit_hits_by_file(search_limit(params));
+            results.to_value(started, flat)
+        }
         Err(message) => search_error(message, flat),
     }
 }
@@ -767,7 +895,7 @@ fn resolve_context_workspace(
         .filter(|workspace| !workspace.is_empty() && *workspace != "__all__")
         .context("select one workspace for context mode")?;
     let workspace = Workspace::resolve_tracked(Path::new(selected))?;
-    let scope = match param(params, "scope").map(str::trim) {
+    let scope = match param(params, "scope") {
         None | Some("") => None,
         Some(scope) => workspace.scope_within_root(Path::new(scope))?,
     };
@@ -808,8 +936,8 @@ async fn build_context_pack(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string),
-        include_globs: csv_param(params, "include"),
-        exclude_globs: csv_param(params, "exclude"),
+        include_globs: glob_params(params, "include"),
+        exclude_globs: glob_params(params, "exclude"),
         scope_filter,
         skip_gitignore,
         force_neural: false,
@@ -900,7 +1028,8 @@ async fn write_all_workspace_search_stream(
     }
 
     let started = Instant::now();
-    let limit = parse_usize_param(params, "limit", DEFAULT_SEARCH_LIMIT).clamp(1, 500);
+    let limit = search_limit(params);
+    let literal = param(params, "mode") == Some("literal");
     let roots = tracked_roots()?;
     let total = roots.len();
     write_sse(
@@ -910,7 +1039,12 @@ async fn write_all_workspace_search_stream(
     )
     .await?;
     if total == 0 {
-        write_sse(stream, "results", &search_value(&[], &[], started, flat)).await?;
+        write_sse(
+            stream,
+            "results",
+            &WebResults::default().to_value(started, flat),
+        )
+        .await?;
         return write_sse(
             stream,
             "done",
@@ -926,17 +1060,16 @@ async fn write_all_workspace_search_stream(
         tasks.spawn(async move {
             let request = build_search_request_for_path(&params, Some(root.clone()))
                 .map_err(|err| (root.clone(), err.to_string()))?;
-            let (hits, warnings) = execute_search(state, request)
+            let results = execute_search(state, request)
                 .await
                 .map_err(|err| (root.clone(), err))?;
-            Ok::<_, (PathBuf, String)>((root, hits, warnings))
+            Ok::<_, (PathBuf, String)>((root, results))
         });
     }
 
     let mut finished = 0usize;
-    let mut all_hits = Vec::<SearchHit>::new();
+    let mut all = WebResults::default();
     let mut errors = Vec::<String>::new();
-    let mut warnings = Vec::<String>::new();
     loop {
         // Returning drops the task set, which aborts and cancels the
         // remaining per-workspace searches.
@@ -948,40 +1081,49 @@ async fn write_all_workspace_search_stream(
         };
         finished += 1;
         match result {
-            Ok(Ok((root, mut hits, workspace_warnings))) => {
-                for hit in &mut hits {
+            Ok(Ok((root, mut results))) => {
+                for hit in &mut results.hits {
                     hit.file_path = root.join(&hit.file_path);
                 }
-                all_hits.append(&mut hits);
+                // Overlapping workspaces return the same literal file.
+                results
+                    .hits
+                    .retain(|hit| !all.match_counts.contains_key(&hit.file_path));
+                all.hits.append(&mut results.hits);
+                for (path, matches) in results.match_counts {
+                    all.match_counts.insert(root.join(path), matches);
+                }
                 // A warning about how the query was read repeats per workspace.
-                for warning in workspace_warnings {
-                    if !warnings.contains(&warning) {
-                        warnings.push(warning);
+                for warning in results.warnings {
+                    if !all.warnings.contains(&warning) {
+                        all.warnings.push(warning);
                     }
                 }
             }
             Ok(Err((root, err))) => {
                 let message = format!("{}: {err}", root.display());
                 errors.push(message.clone());
-                warnings.push(message);
+                all.warnings.push(message);
             }
             Err(err) => {
                 let message = err.to_string();
                 errors.push(message.clone());
-                warnings.push(message);
+                all.warnings.push(message);
             }
         }
-        all_hits.sort_by(|left, right| {
+        all.hits.sort_by(|left, right| {
             right
                 .score
                 .total_cmp(&left.score)
                 .then_with(|| left.file_path.cmp(&right.file_path))
                 .then_with(|| left.start_line.cmp(&right.start_line))
         });
-        if all_hits.len() > limit {
-            all_hits.truncate(limit);
+        if literal {
+            all.limit_hits_by_file(limit);
+        } else {
+            all.hits.truncate(limit);
         }
-        let mut value = search_value(&all_hits, &warnings, started, flat);
+        let mut value = all.to_value(started, flat);
         if let Some(object) = value.as_object_mut() {
             object.insert("finished".to_string(), json!(finished));
             object.insert("total".to_string(), json!(total));
@@ -1054,16 +1196,12 @@ fn tracked_roots() -> Result<Vec<PathBuf>> {
     Ok(roots.into_values().collect())
 }
 
-fn resolve_tracked_path(
-    params: &HashMap<String, Vec<String>>,
-    require_dir: bool,
-) -> Result<(PathBuf, PathBuf)> {
+fn resolve_tracked_path(params: &HashMap<String, Vec<String>>) -> Result<(PathBuf, PathBuf)> {
     let workspace_param = param(params, "workspace")
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "__all__");
     let path = Path::new(
         param(params, "path")
-            .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("."),
     );
@@ -1081,17 +1219,19 @@ fn resolve_tracked_path(
     };
     let workspace = Workspace::resolve_tracked(&root)?;
     let canonical = workspace.canonical_member(path)?;
-    if require_dir && !canonical.is_dir() {
-        bail!("path is not a directory");
-    }
-    if !require_dir && !canonical.is_file() {
-        bail!("path is not a file");
-    }
     Ok((workspace.root, canonical))
 }
 
+fn resolve_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<(PathBuf, PathBuf)> {
+    let (root, path) = resolve_tracked_path(params)?;
+    if !path.is_file() {
+        bail!("path is not a file");
+    }
+    Ok((root, path))
+}
+
 fn read_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
-    let (root, path) = resolve_tracked_path(params, false)?;
+    let (root, path) = resolve_tracked_file(params)?;
     let mut file = crate::workspace_file::open(&root, &path)?;
     let mut limited = (&mut file).take(MAX_FILE_BYTES + 1);
     let mut bytes = Vec::new();
@@ -1114,7 +1254,7 @@ fn read_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
 }
 
 fn open_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
-    let (_, path) = resolve_tracked_path(params, false)?;
+    let (_, path) = resolve_tracked_file(params)?;
     let line = parse_usize_param(params, "line", 1).max(1);
     let column = param(params, "column")
         .and_then(|value| value.parse::<usize>().ok())
@@ -1133,7 +1273,12 @@ fn open_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
 }
 
 fn read_tracked_tree(params: &HashMap<String, Vec<String>>) -> Result<Value> {
-    let (root, path) = resolve_tracked_path(params, true)?;
+    let (root, mut path) = resolve_tracked_path(params)?;
+    // A search scope can be a file. List the folder that contains it.
+    let is_file = path.is_file();
+    if is_file {
+        path.pop();
+    }
     let mut entries = std::fs::read_dir(&path)?
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
@@ -1143,7 +1288,8 @@ fn read_tracked_tree(params: &HashMap<String, Vec<String>>) -> Result<Value> {
             let name = path.file_name()?.to_string_lossy().into_owned();
             Some(json!({
                 "name": name,
-                "path": rel,
+                // JSON cannot carry a name that is not UTF-8.
+                "path": rel.to_string_lossy(),
                 "is_dir": file_type.is_dir()
             }))
         })
@@ -1157,12 +1303,15 @@ fn read_tracked_tree(params: &HashMap<String, Vec<String>>) -> Result<Value> {
                 .cmp(&b.get("name").and_then(Value::as_str))
         })
     });
-    entries.truncate(500);
+    let total = entries.len();
+    entries.truncate(MAX_TREE_ENTRIES);
     let rel = path.strip_prefix(&root).unwrap_or(&path);
     Ok(json!({
         "workspace": root,
         "path": rel,
-        "entries": entries
+        "is_file": is_file,
+        "entries": entries,
+        "total": total
     }))
 }
 
@@ -1331,12 +1480,11 @@ mod tests {
 
     #[test]
     fn search_payload_reports_partial_workspace_warnings() {
-        let value = search_value(
-            &[],
-            &["search failed for /tmp/stale".to_string()],
-            Instant::now(),
-            false,
-        );
+        let value = WebResults {
+            warnings: vec!["search failed for /tmp/stale".to_string()],
+            ..Default::default()
+        }
+        .to_value(Instant::now(), false);
         assert_eq!(value["warnings"], json!(["search failed for /tmp/stale"]));
     }
 
@@ -1434,6 +1582,29 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         assert!(response.contains("needle"), "{response}");
         finish(handler).await;
+    }
+
+    #[tokio::test]
+    async fn malformed_requests_get_an_error_response() {
+        let oversized = "x".repeat(MAX_HTTP_HEADER_BYTES + 1);
+        for (request, status) in [
+            ("GET /?q=50% HTTP/1.1\r\n\r\n".to_string(), "400"),
+            ("GARBAGE\r\n\r\n".to_string(), "400"),
+            (format!("GET / HTTP/1.1\r\nX: {oversized}\r\n\r\n"), "431"),
+        ] {
+            let (mut client, server, addr) = connected_pair().await;
+            let state = crate::daemon::test_state_with_cpu_permits(1);
+            let auth = WebAuth::for_listener(addr);
+            let handler = tokio::spawn(handle_connection(server, state, test_config(addr), auth));
+            client.write_all(request.as_bytes()).await.unwrap();
+            let response = read_until_eof(&mut client).await;
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{response}"
+            );
+            drop(client);
+            finish(handler).await;
+        }
     }
 
     #[tokio::test]
@@ -1570,6 +1741,118 @@ mod tests {
         percent_encode(&workspace.root.display().to_string())
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn literal_search_keeps_every_file_beside_a_dense_one() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("dense.txt"), "needle here\n".repeat(600)).unwrap();
+        for index in 0..6 {
+            std::fs::write(first.join(format!("small{index}.txt")), "needle\n").unwrap();
+        }
+        std::fs::write(second.join("list.txt"), "needle\n".repeat(30)).unwrap();
+        std::fs::write(second.join("small.txt"), "needle\n").unwrap();
+        let first = register_test_workspace(&first);
+        register_test_workspace(&second);
+        // This workspace contains the files of the other two.
+        register_test_workspace(root.path());
+        let state = crate::daemon::test_state_with_cpu_permits(1);
+        let params = |workspace: &str, limit: usize| {
+            parse_target(&format!(
+                "/?q=needle&mode=literal&limit={limit}&workspace={workspace}"
+            ))
+            .unwrap()
+            .1
+        };
+
+        for limit in [5, 50] {
+            let (mut client, mut server, _) = connected_pair().await;
+            let (stream_state, stream_params) = (state.clone(), params("__all__", limit));
+            let stream = tokio::spawn(async move {
+                write_search_stream(&mut server, stream_state, &stream_params).await
+            });
+            let mut body = String::new();
+            client.read_to_string(&mut body).await.unwrap();
+            stream.await.unwrap().unwrap();
+            let streamed = body
+                .rsplit("\n\n")
+                .find_map(|event| event.strip_prefix("event: results\ndata: "))
+                .unwrap();
+            let one = run_search(state.clone(), &params(&first, limit)).await;
+            let all = run_search(state.clone(), &params("__all__", limit)).await;
+            for (value, file_count) in [
+                (one, 7),
+                (all, 9),
+                (serde_json::from_str(streamed).unwrap(), 9),
+            ] {
+                assert_eq!(value["hits"].as_array().unwrap().len(), limit, "{value:#}");
+                let groups = value["groups"].as_array().unwrap();
+                assert_eq!(groups.len(), file_count.min(limit), "{value:#}");
+                let more_hits = value["more_hits_in_file"].as_object().unwrap();
+                for group in groups {
+                    let path = group["file_path"].as_str().unwrap();
+                    let matches = match Path::new(path).file_name().unwrap().to_str().unwrap() {
+                        "dense.txt" => 600,
+                        "list.txt" => 30,
+                        _ => 1,
+                    };
+                    assert_eq!(group["hit_count"], matches, "{path}");
+                    let hits = group["hits"].as_array().unwrap();
+                    let ranges = hits
+                        .iter()
+                        .map(|hit| (hit["start_line"].as_u64(), hit["end_line"].as_u64()))
+                        .collect::<HashSet<_>>();
+                    assert_eq!(ranges.len(), hits.len(), "{path}: {ranges:?}");
+                    let more = more_hits.get(path).map_or(0, |more| more.as_u64().unwrap());
+                    assert_eq!(more, matches - hits.len() as u64, "{path}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tree_lists_the_folder_of_a_file_scope_and_counts_hidden_entries() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        for index in 0..=MAX_TREE_ENTRIES {
+            std::fs::write(src.join(format!("f{index}.txt")), "x\n").unwrap();
+        }
+        #[cfg(unix)]
+        std::fs::write(src.join(" spaced "), "spaced\n").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::fs::write(src.join(std::ffi::OsStr::from_bytes(b" \xff.txt")), "x\n").unwrap();
+        }
+        let workspace = register_test_workspace(root.path());
+        let params = |path: &str| {
+            parse_target(&format!("/?workspace={workspace}&path={path}"))
+                .unwrap()
+                .1
+        };
+
+        let tree = read_tracked_tree(&params("src/f1.txt")).unwrap();
+        assert_eq!(tree["path"], "src");
+        assert_eq!(tree["is_file"], true);
+        assert_eq!(tree["entries"].as_array().unwrap().len(), MAX_TREE_ENTRIES);
+        let created = std::fs::read_dir(&src).unwrap().count();
+        assert_eq!(tree["total"], created);
+        #[cfg(unix)]
+        assert_eq!(
+            read_tracked_file(&params("src/%20spaced%20")).unwrap()["text"],
+            "spaced\n"
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn context_scopes_stay_in_the_selected_non_git_workspace() {
@@ -1578,12 +1861,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("src")).unwrap();
         std::fs::write(root.path().join("src/lib.rs"), "fn marker() {}\n").unwrap();
+        std::fs::write(root.path().join(" spaced.rs"), "fn spaced() {}\n").unwrap();
         let registered = register_test_workspace(root.path());
         let resolve = |scope: &str| {
             let (_, params) = parse_target(&format!("/?workspace={registered}&scope={scope}"))?;
             resolve_context_workspace(&params)
         };
-        for (path, is_file) in [("src", false), ("src/lib.rs", true)] {
+        for (path, is_file) in [("src", false), ("src/lib.rs", true), (" spaced.rs", true)] {
             let (workspace, scope) = resolve(path).unwrap();
             assert_eq!(workspace.root, root.path().canonicalize().unwrap());
             let scope = scope.unwrap();
@@ -1665,6 +1949,19 @@ mod tests {
             method: "GET".to_string(),
             target: "/api/status".to_string(),
             headers: HashMap::from([(name.to_string(), value)]),
+        }
+    }
+
+    #[test]
+    fn api_requests_from_other_origins_are_rejected() {
+        for (site, allowed) in [
+            ("same-origin", true),
+            ("none", false),
+            ("same-site", false),
+            ("cross-site", false),
+        ] {
+            let request = request_with_header("sec-fetch-site", site.to_string());
+            assert_eq!(valid_api_origin(&request), allowed, "{site}");
         }
     }
 
@@ -1769,6 +2066,28 @@ mod tests {
         assert_eq!(path, Some(PathBuf::from("/tmp/repo")));
         assert_eq!(query, "needle");
     }
+
+    #[test]
+    fn search_request_keeps_glob_commas_and_spaces() {
+        let (_, params) = parse_target(
+            "/api/search?q=foo%20&mode=regex&include=**/*.%7Brs,ts%7D,src/**&scope=%20dir%20",
+        )
+        .unwrap();
+        let request = build_search_request(&params).unwrap();
+        let DaemonRequest::RegexSearch {
+            pattern,
+            include_globs,
+            scope_path,
+            ..
+        } = request
+        else {
+            panic!("expected regex request");
+        };
+        assert_eq!(pattern, "foo ");
+        assert_eq!(scope_path, Some(PathBuf::from(" dir ")));
+        assert_eq!(include_globs, ["**/*.{rs,ts}", "src/**"]);
+    }
+
     #[test]
     fn regex_search_request_forwards_type_and_context() {
         let (_, params) =
