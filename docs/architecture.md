@@ -903,8 +903,7 @@ statistics. If that lock is unavailable, it keeps workspace identity and job
 progress and sets `statistics_unavailable`. CLI JSON omits those statistics;
 MCP returns `null` counts and readiness. Text and Web status show that statistics
 are temporarily unavailable instead of interpreting placeholders as an empty
-index or complete coverage. Coverage leaves out stored vectors whose removal is
-pending, so an edited workspace reads as complete only after enhancement.
+index or complete coverage.
 
 A worker process renews its job record from its start, also while a guard holds
 it back or it waits for a place. The record names the lane, the PID, and the

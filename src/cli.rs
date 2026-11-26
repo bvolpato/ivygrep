@@ -972,7 +972,7 @@ async fn run_status(json: bool) -> Result<()> {
                 } else if ws.enhancing_stalled {
                     println!(
                         "{prefix}  Search: {} (run `ig --doctor` or retry a query)",
-                        "⚠ stalled neural upgrade".red().bold()
+                        "⚠ stalled enhancement".red().bold()
                     );
                 } else if !ws.statistics_unavailable && ws.has_neural_vectors {
                     let pct = format!("{:.0}%", ws.neural_coverage_percent);

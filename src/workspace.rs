@@ -470,12 +470,7 @@ impl Workspace {
         let Some(identity) = self.neural_model_identity() else {
             return 0;
         };
-        vector_store_size(&path, identity.dimensions)
-            .unwrap_or(0)
-            .saturating_sub(pending_vector_removals(
-                &self.neural_tombstones_path(),
-                &self.neural_tombstones_processing_path(),
-            ))
+        vector_store_size(&path, identity.dimensions).unwrap_or(0)
     }
 
     pub fn hash_vector_count(&self) -> u64 {
@@ -483,12 +478,7 @@ impl Workspace {
         if !path.exists() {
             return 0;
         }
-        vector_store_size(&path, crate::EMBEDDING_DIMENSIONS)
-            .unwrap_or(0)
-            .saturating_sub(pending_vector_removals(
-                &self.hash_tombstones_path(),
-                &self.hash_tombstones_processing_path(),
-            ))
+        vector_store_size(&path, crate::EMBEDDING_DIMENSIONS).unwrap_or(0)
     }
 
     pub fn hash_coverage_percent(&self) -> f64 {
@@ -1870,12 +1860,6 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             read_sqlite_counts(&index_dir)
         };
         let index_size_bytes = dir_size_bytes(&index_dir);
-        let removals = |journal: &str| {
-            pending_vector_removals(
-                &index_dir.join(journal),
-                &index_dir.join(format!("{journal}.processing")),
-            )
-        };
         let (index_components, compaction, vector_key_count, hash_vector_count) =
             if statistics_unavailable {
                 (
@@ -1893,8 +1877,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                         &hash_vector_store_path(&index_dir),
                         crate::EMBEDDING_DIMENSIONS,
                     )
-                    .unwrap_or(0)
-                    .saturating_sub(removals(".hash_tombstones")),
+                    .unwrap_or(0),
                 )
             };
         let hash_coverage_percent = if statistics_unavailable {
@@ -1911,17 +1894,12 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             });
         let neural_dimensions = persisted_or_configured_neural_dimensions(neural_model.as_ref());
         let neural_path = index_dir.join("vectors_neural.usearch");
-        let stored_neural_vectors = if !statistics_unavailable && neural_path.exists() {
+        let neural_vector_count = if !statistics_unavailable && neural_path.exists() {
             vector_store_size(&neural_path, neural_dimensions).unwrap_or(0)
         } else {
             0
         };
-        let has_neural_vectors = stored_neural_vectors > 0;
-        let neural_vector_count = if has_neural_vectors {
-            stored_neural_vectors.saturating_sub(removals(".neural_tombstones"))
-        } else {
-            0
-        };
+        let has_neural_vectors = neural_vector_count > 0;
         let neural_coverage_percent = if statistics_unavailable {
             0.0
         } else if vector_key_count > 0 {
@@ -2519,17 +2497,6 @@ fn neural_store_has_vectors(index_dir: &Path) -> bool {
     .is_ok_and(|count| count > 0)
 }
 
-/// Stored vectors of removed text that enhancement has not dropped yet. They
-/// count in the store and cover nothing in the index.
-fn pending_vector_removals(pending: &Path, processing: &Path) -> u64 {
-    let mut keys = std::collections::HashSet::new();
-    for journal in [processing, pending] {
-        let journal = fs::read_to_string(journal).unwrap_or_default();
-        keys.extend(journal.lines().filter_map(|key| key.parse::<u64>().ok()));
-    }
-    keys.len() as u64
-}
-
 fn vector_store_size(path: &Path, dimensions: usize) -> Option<u64> {
     crate::vector_store::VectorStore::read_count(path, dimensions).ok()
 }
@@ -2791,35 +2758,6 @@ mod tests {
             );
         }
         assert_eq!(update("idle", None), None);
-    }
-
-    #[test]
-    #[serial]
-    fn vectors_of_removed_text_do_not_count_as_coverage() {
-        let (_home, root, workspace) = indexed_status_workspace();
-        let model = crate::embedding::create_hash_model();
-        crate::indexer::enhance_workspace_hash(&workspace, model.as_ref()).unwrap();
-        let coverage = || {
-            let status = list_workspaces().unwrap().pop().unwrap();
-            assert_eq!(status.hash_vector_count, workspace.hash_vector_count());
-            assert_eq!(
-                status.hash_coverage_percent,
-                workspace.hash_coverage_percent()
-            );
-            status.hash_coverage_percent
-        };
-        assert_eq!(coverage(), 100.0);
-
-        fs::write(
-            root.path().join("first.rs"),
-            "pub fn replaced_status_marker() {}\n",
-        )
-        .unwrap();
-        crate::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
-        assert_eq!(coverage(), 50.0);
-
-        crate::indexer::enhance_workspace_hash(&workspace, model.as_ref()).unwrap();
-        assert_eq!(coverage(), 100.0);
     }
 
     #[cfg(unix)]

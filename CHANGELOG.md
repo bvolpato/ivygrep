@@ -11,7 +11,6 @@ All notable changes to ivygrep are documented in this file.
 - `ig --add --force`, `ig --rm`, and other index removals no longer fail with `Directory not empty` or `No such file or directory` while another process reads or updates the index.
 - An `--all-indices` search warns about each workspace that it skips because the index of that workspace is not complete. During a rebuild it returned no results without a message.
 - `ig --status` reports the error when the updates of a live watcher fail. It reported `configured + live`.
-- Hash and neural coverage no longer count vectors of text that was removed or replaced.
 - `ig --doctor` reports a burst of watcher events only while events wait. The finding stayed until the daemon restarted.
 - A query warns when the path of the daemon socket is too long for a Unix socket. Only `daemon.log` named the reason why no daemon and no watcher ran.
 
