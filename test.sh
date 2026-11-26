@@ -281,7 +281,11 @@ if ((do_web)); then
 fi
 
 if [[ "$mode" == "stress" ]]; then
-  cmd=(cargo test ${profile_flags[@]+"${profile_flags[@]}"} --test stress_harness "${cargo_flags[@]}" ${extra_args[@]+"${extra_args[@]}"} -- --ignored --nocapture --test-threads 1)
+  # The test harness rejects a repeated option.
+  stress_args=(--ignored)
+  [[ " ${test_args[*]-} " == *" --nocapture "* ]] || stress_args+=(--nocapture)
+  [[ " ${test_args[*]-} " == *" --test-threads "* ]] || stress_args+=(--test-threads 1)
+  cmd=(cargo test ${profile_flags[@]+"${profile_flags[@]}"} --test stress_harness "${cargo_flags[@]}" ${extra_args[@]+"${extra_args[@]}"} ${filter[@]+"${filter[@]}"} -- "${stress_args[@]}" ${test_args[@]+"${test_args[@]}"})
 else
   cmd=(cargo test ${profile_flags[@]+"${profile_flags[@]}"} "${scope_flags[@]}" "${cargo_flags[@]}" ${extra_args[@]+"${extra_args[@]}"} ${filter[@]+"${filter[@]}"})
   if ((${#test_args[@]})); then
