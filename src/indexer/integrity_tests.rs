@@ -235,6 +235,53 @@ fn unreadable_file_keeps_its_chunks_until_it_is_readable_again() {
     assert_eq!((found("locked_after"), found("locked_before")), (1, 0));
 }
 
+/// A walk without the rules of an ignore file lists the files that they hide.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn unreadable_ignore_file_fails_the_run_and_keeps_the_index() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let rules = root.path().join(".gitignore");
+    fs::write(&rules, "hidden.rs\n").unwrap();
+    fs::write(root.path().join("hidden.rs"), "pub fn hidden() {}\n").unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept() {}\n").unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+    let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+
+    fs::set_permissions(&rules, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&rules).is_ok() {
+        return; // Privileged users can bypass Unix permission bits.
+    }
+    for path in [None, Some(".gitignore"), Some("hidden.rs")] {
+        let result = match path {
+            None => index_workspace(&workspace, &model),
+            Some(path) => {
+                index_workspace_paths_for_watcher(&workspace, &model, &[PathBuf::from(path)])
+            }
+        };
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains(".gitignore"), "{error}");
+        assert!(workspace.quick_index_health().is_queryable());
+        assert_eq!(chunk_count(&workspace, "hidden.rs"), 0);
+        assert_eq!(
+            fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+    }
+
+    fs::set_permissions(&rules, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept_after() {}\n").unwrap();
+    index_workspace(&workspace, &model).unwrap();
+    assert_eq!(chunk_count(&workspace, "hidden.rs"), 0);
+    assert_eq!(chunk_count(&workspace, "kept.rs"), 1);
+}
+
 #[test]
 #[serial]
 fn failed_read_leaves_the_index_queryable() {

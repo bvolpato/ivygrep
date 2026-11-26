@@ -192,9 +192,11 @@ run. The index keeps the chunks that it has for the file, the run warns with the
 number of such files and the first path, and the snapshot records the file as
 unreadable. Each later run that scans the workspace tries to read it again. Until
 then, the clean-checkout marker is not written. A new or rebuilt worktree overlay
-cannot compare such a file with the base, so it hides the base file. An unreadable
-directory, any other I/O error, a file replaced by a symlink, and a missing
-workspace root still fail the run.
+cannot compare such a file with the base, so it hides the base file. If a scan
+lists a `.gitignore` or `.ignore` file that ivygrep has no permission to read, the
+run fails, because the scan ran without its rules. An unreadable directory, any
+other I/O error, a file replaced by a symlink, and a missing workspace root also
+fail the run.
 
 Watcher events use a targeted refresh only when path-level reconciliation is
 safe. New directories, ignore-file changes, uncertain Git state, and similar

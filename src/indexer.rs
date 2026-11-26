@@ -5375,6 +5375,46 @@ mod tests {
         }
     }
 
+    /// The walk applied the rules of an ignore file that is unreadable now.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn index_batch_producer_fails_on_an_unreadable_ignore_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let (_index, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        for (name, fails) in [
+            ("locked.rs", false),
+            (".gitignore", true),
+            (".ignore", true),
+        ] {
+            let path = workspace.root.join(name);
+            fs::write(&path, "hidden.rs\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+            if fs::read(&path).is_ok() {
+                return; // Privileged users can bypass Unix permission bits.
+            }
+            let diff = MerkleDiff {
+                added_or_modified: vec![(PathBuf::from(name), false)],
+                deleted: Vec::new(),
+            };
+            assert_eq!(ensure_sources_open(&workspace, &diff).is_err(), fails);
+            let producer =
+                spawn_index_batch_producer(&workspace, &diff, None, &fields, false, false);
+            assert_eq!(
+                producer.recv().is_some_and(|batch| batch.is_err()),
+                fails,
+                "{name}"
+            );
+            assert_eq!(producer.finish().unwrap().unreadable.is_empty(), fails);
+        }
+    }
+
     #[test]
     #[serial]
     fn index_batch_producer_treats_a_deleted_source_as_removed() {

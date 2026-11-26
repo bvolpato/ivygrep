@@ -23,10 +23,18 @@ const UNREADABLE_FILE_HASH: &str = "unreadable";
 
 /// Whether `error` means that this process may not read the regular file at
 /// `path`. A contained read that rejects an unsafe path has no OS error code.
+/// An ignore file does not count: without its rules, the index would hold the
+/// files that it hides.
 pub(crate) fn is_unreadable_file(path: &Path, error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::PermissionDenied
         && error.raw_os_error().is_some()
+        && !is_ignore_file(path)
         && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+fn is_ignore_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == ".gitignore" || name == ".ignore")
 }
 
 pub(crate) fn normalized_indexable_content<'a>(path: &Path, bytes: &'a [u8]) -> Cow<'a, [u8]> {
@@ -354,6 +362,17 @@ impl MerkleSnapshot {
                         );
                     }
                 };
+                // The walker reports no error for an ignore file that it cannot
+                // open, and walks without its rules.
+                if is_ignore_file(path)
+                    && let Err(error) = fs::File::open(path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return fail(
+                        anyhow::Error::new(error)
+                            .context(format!("failed reading source file {}", path.display())),
+                    );
+                }
                 if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
                     return ignore::WalkState::Continue;
                 }
@@ -506,11 +525,7 @@ impl MerkleSnapshot {
             if rel_path.to_str().is_none() {
                 continue;
             }
-            if rel_path.as_os_str().is_empty()
-                || rel_path
-                    .file_name()
-                    .is_some_and(|name| name == ".gitignore" || name == ".ignore")
-            {
+            if rel_path.as_os_str().is_empty() || is_ignore_file(rel_path) {
                 return Ok(None);
             }
 
@@ -951,6 +966,30 @@ mod tests {
         let unreadable = MerkleSnapshot::build_content_based(dir.path(), false).unwrap();
         assert_eq!(unreadable.files["kept.rs"], readable.files["kept.rs"]);
         assert_eq!(unreadable.files["locked.rs"], "unreadable-0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_ignore_file_aborts_snapshot_build() {
+        for name in [".gitignore", ".ignore"] {
+            let dir = tempdir().unwrap();
+            fs::create_dir(dir.path().join("nested")).unwrap();
+            fs::write(dir.path().join("nested/hidden.rs"), "fn hidden() {}\n").unwrap();
+            let rules = dir.path().join("nested").join(name);
+            fs::write(&rules, "hidden.rs\n").unwrap();
+            let _restore = RestorePermissions::revoke(&rules);
+            if fs::read(&rules).is_ok() {
+                return; // Privileged users can bypass Unix permission bits.
+            }
+            for content_based in [false, true] {
+                for skip_gitignore in [false, true] {
+                    let error =
+                        MerkleSnapshot::build_inner(dir.path(), content_based, skip_gitignore)
+                            .unwrap_err();
+                    assert!(format!("{error:#}").contains(name), "{error:#}");
+                }
+            }
+        }
     }
 
     #[cfg(unix)]

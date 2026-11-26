@@ -1099,6 +1099,15 @@ impl Workspace {
         Ok(Some(parsed))
     }
 
+    /// Metadata that an index run may replace: `None` also for a damaged file,
+    /// but not for a file that it cannot read.
+    pub(crate) fn read_undamaged_metadata(&self) -> Result<Option<WorkspaceMetadata>> {
+        match self.read_metadata() {
+            Err(error) if error.is::<serde_json::Error>() => Ok(None),
+            result => result,
+        }
+    }
+
     pub fn vector_key_count(&self) -> u64 {
         read_sqlite_vector_key_count(&self.index_dir)
     }

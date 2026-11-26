@@ -110,6 +110,35 @@ fn add_rebuilds_an_index_with_damaged_workspace_files() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn add_keeps_workspace_metadata_that_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    fs::write(root.path().join("source.rs"), "pub fn kept() {}\n").unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(ivygrep::EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+    let path = workspace.metadata_path();
+    let before = fs::read(&path).unwrap();
+    let allow = |mode| fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    allow(0o000);
+    if fs::read(&path).is_ok() {
+        return; // Privileged users can bypass Unix permission bits.
+    }
+
+    command(root.path(), home.path())
+        .args(["--add", ".", "--no-watch", "--hash"])
+        .assert()
+        .failure();
+    allow(0o600);
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
 #[test]
 #[serial]
 fn a_directory_of_oversized_files_has_a_healthy_empty_index() {

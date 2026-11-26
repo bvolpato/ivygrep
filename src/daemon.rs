@@ -4135,8 +4135,7 @@ async fn run_index_request(
             index_state.clear_watcher_failure(&index_workspace_target.id);
         }
         let mut metadata = index_workspace_target
-            .read_metadata()
-            .unwrap_or_default()
+            .read_undamaged_metadata()?
             .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
                 id: index_workspace_target.id.clone(),
                 root: index_workspace_target.root.clone(),
