@@ -866,9 +866,8 @@ section {
   margin-top: 2.2rem;
 }
 
-.notes-2 p,
-.notes-3 p {
-  margin-top: 0.4rem;
+.notes-2 p {
+  margin-top: 0.7rem;
   color: var(--ink-soft);
 }
 
