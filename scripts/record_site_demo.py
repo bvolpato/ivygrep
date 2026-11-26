@@ -21,6 +21,7 @@ import html
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,9 +63,10 @@ def keyword_count(keyword: str, repo: Path) -> dict[str, int]:
 
 
 def search(ig: str, question: str, repo: Path) -> list[dict]:
-    command = [ig, "--json", "-n", str(RESULT_FILES), "-C", str(PREVIEW_CONTEXT), question]
+    # No -n: it changes the search depth, and the page shows the command without it.
+    command = [ig, "--json", "-C", str(PREVIEW_CONTEXT), question]
     results = []
-    for entry in json.loads(run(command, repo)):
+    for entry in json.loads(run(command, repo))[:RESULT_FILES]:
         hit = entry["hits"][0]
         results.append(
             {
@@ -99,7 +101,7 @@ def render_source(result: dict) -> str:
             f"<span{row}><i>{result['start'] + offset}</i>"
             f"<code{code}>{esc(line) or ' '}</code></span>"
         )
-    return f'<pre class="src">{"".join(rows)}</pre>'
+    return f'<pre class="src" tabindex="0">{"".join(rows)}</pre>'
 
 
 def render_searches(data: dict) -> str:
@@ -135,7 +137,7 @@ def render_searches(data: dict) -> str:
         f'<div role="tablist" aria-label="Questions" aria-orientation="vertical">{"".join(tabs)}</div></div>\n'
         f'<div class="answer">{"".join(panels)}</div>\n'
         "</div>\n"
-        f'<p class="caption">Recorded, unedited output from ig {data["ig"]} on '
+        f'<p class="caption">Recorded results from ig {data["ig"]} on '
         f'<a href="https://github.com/{data["repo"]}/tree/{data["commit"]}">{data["repo"]} {esc(data["tag"])}</a>. '
         "The keyword line is what ripgrep finds for the word you would probably try first. "
         "Use each tool for what it is good at.</p>"
@@ -181,7 +183,7 @@ def render_packs(data: dict) -> str:
             f'<div data-budget="{budget}"{hidden}>\n'
             f'<div class="meter" aria-hidden="true">{meter}</div>\n'
             f'<p class="pack-sum">{current["used_tokens"]:,} of {budget:,} estimated tokens. '
-            f"{len(current['items'])} items from {files} files.</p>\n"
+            f"{len(current['items'])} items from {files} {'file' if files == 1 else 'files'}.</p>\n"
             f'<ul class="vine">{render_items(current, previous)}</ul>\n</div>'
         )
         previous = {
@@ -222,6 +224,9 @@ def main() -> None:
     args = parser.parse_args()
 
     repo = args.repo.resolve()
+    # The first query can run before the daemon has loaded the model.
+    search(args.ig, QUESTIONS[0][0], repo)
+    time.sleep(5)
     data = {
         "ig": run([args.ig, "--version"], repo).split()[1],
         "repo": "BurntSushi/ripgrep",
