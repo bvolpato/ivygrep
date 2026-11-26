@@ -121,11 +121,39 @@ test("a URL restores its scope, and an untracked path is not searched elsewhere"
   await expect(page.locator("#results .file-path").first()).toContainText(`${projectRoot}/src/web.ts`);
   await page.reload();
   await expect(page.locator("#results .file-path").first()).toContainText(`${projectRoot}/src/web.ts`);
-  await expect(page.locator("#workspaces .workspace.active")).toContainText("All indices");
+  const activeWorkspace = page.locator("#workspaces .workspace.active");
+  await expect(activeWorkspace).toContainText("All indices");
 
   await page.goto(`/?${query}&workspace=/not/tracked`);
   await expect(page.locator("#summary")).toHaveText("/not/tracked is not tracked.");
   await expect(page.locator("#results .hit")).toHaveCount(0);
+
+  // `ig --add` can track the path of `ig --web` after the page loads.
+  const otherRoot = projectRoot.replace(/project$/, "other");
+  await page.route("**/api/status", async (route) => {
+    const response = await route.fetch();
+    const status = await response.json() as { workspaces: { root: string }[] };
+    status.workspaces = status.workspaces.filter((ws) => ws.root !== otherRoot);
+    await route.fulfill({ response, json: status });
+  });
+  await page.goto(`/?workspace=${encodeURIComponent(otherRoot)}`);
+  await expect(activeWorkspace).toContainText("All indices");
+  await page.unroute("**/api/status");
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(activeWorkspace).toContainText("other");
+});
+
+test("a search that reached its deadline shows partial results", async ({ page }) => {
+  await page.goto(sessionEntryPath());
+  await expect(page.locator("#workspaces .workspace").filter({ hasText: "project" })).toBeVisible();
+  const results = JSON.stringify({ hits: [], warnings: ["search deadline of 60s exceeded; returning partial results"] });
+  await page.route("**/api/search/stream?*", (route) => route.fulfill({
+    contentType: "text/event-stream",
+    body: `event: results\ndata: ${results}\n\nevent: done\ndata: {"ok":true}\n\n`
+  }));
+  await page.locator("#query").fill("slow query");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.locator(".search-warnings strong")).toHaveText("Partial results");
 });
 
 test("the viewer keeps source text and the results keep their workspace", async ({ page, context }) => {

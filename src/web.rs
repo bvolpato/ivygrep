@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -513,11 +513,12 @@ fn authority_host(authority: &str) -> Option<&str> {
 
 fn valid_api_origin(request: &HttpRequest) -> bool {
     // Another port of this host is `same-site`. A page there gets the session
-    // cookie on its requests, and a plain GET from it has no Origin.
+    // cookie on its requests, and a plain GET from it has no Origin. A typed
+    // address is `none`, also after a redirect from another origin.
     if request
         .headers
         .get("sec-fetch-site")
-        .is_some_and(|value| !matches!(value.as_str(), "same-origin" | "none"))
+        .is_some_and(|value| value != "same-origin")
     {
         return false;
     }
@@ -700,7 +701,6 @@ fn build_search_request_for_path(
     let include_globs = glob_params(params, "include");
     let exclude_globs = glob_params(params, "exclude");
     let scope_path = param(params, "scope")
-        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     let scope_is_file = parse_bool_param(params, "scope_is_file");
@@ -713,7 +713,8 @@ fn build_search_request_for_path(
             limit: Some(limit),
             context,
             type_filter,
-            // Previews share `limit`, and every matching file gets at least one.
+            // The previews of one workspace share `limit`, and each listed file
+            // gets at least one.
             output: LiteralSearchOutput::FilesWithPreviews {
                 file_limit: limit,
                 hits_per_file: MAX_HITS_PER_FILE,
@@ -762,25 +763,64 @@ fn search_limit(params: &HashMap<String, Vec<String>>) -> usize {
 #[derive(Default)]
 struct WebResults {
     hits: Vec<SearchHit>,
-    /// Matches of a listed file that `hits` leaves out (literal mode).
-    more_hits: BTreeMap<PathBuf, usize>,
+    /// Matches of each file, also those that `hits` leaves out (literal mode).
+    match_counts: BTreeMap<PathBuf, usize>,
     warnings: Vec<String>,
 }
 
 impl WebResults {
+    /// Keeps at most `limit` hits, and the first hit of each file before
+    /// further hits of any file.
+    fn limit_hits_by_file(&mut self, limit: usize) {
+        let mut files = HashSet::new();
+        let first_of_file: Vec<bool> = self
+            .hits
+            .iter()
+            .map(|hit| files.insert(&hit.file_path))
+            .collect();
+        let mut remaining_files = limit.min(files.len());
+        let mut remaining_hits = limit - remaining_files;
+        let mut first_of_file = first_of_file.into_iter();
+        self.hits.retain(|_| {
+            let remaining = if first_of_file.next().unwrap() {
+                &mut remaining_files
+            } else {
+                &mut remaining_hits
+            };
+            let keep = *remaining > 0;
+            *remaining = remaining.saturating_sub(1);
+            keep
+        });
+    }
+
+    /// Matches of each listed file that `hits` leaves out.
+    fn more_hits(&self) -> BTreeMap<&Path, usize> {
+        let mut more = BTreeMap::new();
+        for hit in &self.hits {
+            let path = hit.file_path.as_path();
+            if let Some(matches) = self.match_counts.get(path) {
+                let left = more.entry(path).or_insert(*matches);
+                *left = left.saturating_sub(1);
+            }
+        }
+        more.retain(|_, left| *left > 0);
+        more
+    }
+
     fn to_value(&self, started: Instant, flat: bool) -> Value {
         let mut value = json!({
             "hits": self.hits,
             "warnings": self.warnings,
             "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0
         });
-        if !self.more_hits.is_empty() {
-            value["more_hits_in_file"] = json!(self.more_hits);
+        let more_hits = self.more_hits();
+        if !more_hits.is_empty() {
+            value["more_hits_in_file"] = json!(more_hits);
         }
         if !flat {
             let mut groups = group_hits_by_file(&self.hits, None);
             for group in &mut groups {
-                if let Some(more) = self.more_hits.get(&group.file_path) {
+                if let Some(more) = more_hits.get(group.file_path.as_path()) {
                     group.hit_count += more;
                     group.more_hits_in_file = *more;
                 }
@@ -804,11 +844,7 @@ async fn execute_search(state: DaemonState, request: DaemonRequest) -> Result<We
                 ..Default::default()
             };
             for file in files {
-                if file.more_hits_in_file > 0 && !file.hits.is_empty() {
-                    results
-                        .more_hits
-                        .insert(file.file_path, file.more_hits_in_file);
-                }
+                results.match_counts.insert(file.file_path, file.hit_count);
                 results.hits.extend(file.hits);
             }
             Ok(results)
@@ -843,7 +879,10 @@ pub(crate) async fn run_search(state: DaemonState, params: &HashMap<String, Vec<
         Err(err) => return search_error(err.to_string(), flat),
     };
     match execute_search(state, request).await {
-        Ok(results) => results.to_value(started, flat),
+        Ok(mut results) => {
+            results.limit_hits_by_file(search_limit(params));
+            results.to_value(started, flat)
+        }
         Err(message) => search_error(message, flat),
     }
 }
@@ -856,7 +895,7 @@ fn resolve_context_workspace(
         .filter(|workspace| !workspace.is_empty() && *workspace != "__all__")
         .context("select one workspace for context mode")?;
     let workspace = Workspace::resolve_tracked(Path::new(selected))?;
-    let scope = match param(params, "scope").map(str::trim) {
+    let scope = match param(params, "scope") {
         None | Some("") => None,
         Some(scope) => workspace.scope_within_root(Path::new(scope))?,
     };
@@ -990,6 +1029,7 @@ async fn write_all_workspace_search_stream(
 
     let started = Instant::now();
     let limit = search_limit(params);
+    let literal = param(params, "mode") == Some("literal");
     let roots = tracked_roots()?;
     let total = roots.len();
     write_sse(
@@ -1045,9 +1085,13 @@ async fn write_all_workspace_search_stream(
                 for hit in &mut results.hits {
                     hit.file_path = root.join(&hit.file_path);
                 }
+                // Overlapping workspaces return the same literal file.
+                results
+                    .hits
+                    .retain(|hit| !all.match_counts.contains_key(&hit.file_path));
                 all.hits.append(&mut results.hits);
-                for (path, more) in results.more_hits {
-                    all.more_hits.insert(root.join(path), more);
+                for (path, matches) in results.match_counts {
+                    all.match_counts.insert(root.join(path), matches);
                 }
                 // A warning about how the query was read repeats per workspace.
                 for warning in results.warnings {
@@ -1074,7 +1118,9 @@ async fn write_all_workspace_search_stream(
                 .then_with(|| left.file_path.cmp(&right.file_path))
                 .then_with(|| left.start_line.cmp(&right.start_line))
         });
-        if all.hits.len() > limit {
+        if literal {
+            all.limit_hits_by_file(limit);
+        } else {
             all.hits.truncate(limit);
         }
         let mut value = all.to_value(started, flat);
@@ -1701,33 +1747,72 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("dense.txt"), "needle here\n".repeat(600)).unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("dense.txt"), "needle here\n".repeat(600)).unwrap();
         for index in 0..6 {
-            std::fs::write(root.path().join(format!("small{index}.txt")), "needle\n").unwrap();
+            std::fs::write(first.join(format!("small{index}.txt")), "needle\n").unwrap();
         }
-        let workspace = register_test_workspace(root.path());
-        let (_, params) = parse_target(&format!(
-            "/?q=needle&mode=literal&limit=50&workspace={workspace}"
-        ))
-        .unwrap();
+        std::fs::write(second.join("list.txt"), "needle\n".repeat(30)).unwrap();
+        std::fs::write(second.join("small.txt"), "needle\n").unwrap();
+        let first = register_test_workspace(&first);
+        register_test_workspace(&second);
+        // This workspace contains the files of the other two.
+        register_test_workspace(root.path());
+        let state = crate::daemon::test_state_with_cpu_permits(1);
+        let params = |workspace: &str, limit: usize| {
+            parse_target(&format!(
+                "/?q=needle&mode=literal&limit={limit}&workspace={workspace}"
+            ))
+            .unwrap()
+            .1
+        };
 
-        let value = run_search(crate::daemon::test_state_with_cpu_permits(1), &params).await;
-        let hits = value["hits"].as_array().unwrap();
-        let files = hits
-            .iter()
-            .map(|hit| hit["file_path"].as_str().unwrap())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(files.len(), 7, "{files:?}");
-        assert!(hits.len() <= 50, "{}", hits.len());
-        let dense_hits = hits
-            .iter()
-            .filter(|hit| hit["file_path"] == "dense.txt")
-            .count();
-        assert_eq!(
-            value["more_hits_in_file"],
-            json!({"dense.txt": 600 - dense_hits})
-        );
-        assert_eq!(value["groups"][0]["hit_count"], 600);
+        for limit in [5, 50] {
+            let (mut client, mut server, _) = connected_pair().await;
+            let (stream_state, stream_params) = (state.clone(), params("__all__", limit));
+            let stream = tokio::spawn(async move {
+                write_search_stream(&mut server, stream_state, &stream_params).await
+            });
+            let mut body = String::new();
+            client.read_to_string(&mut body).await.unwrap();
+            stream.await.unwrap().unwrap();
+            let streamed = body
+                .rsplit("\n\n")
+                .find_map(|event| event.strip_prefix("event: results\ndata: "))
+                .unwrap();
+            let one = run_search(state.clone(), &params(&first, limit)).await;
+            let all = run_search(state.clone(), &params("__all__", limit)).await;
+            for (value, file_count) in [
+                (one, 7),
+                (all, 9),
+                (serde_json::from_str(streamed).unwrap(), 9),
+            ] {
+                assert_eq!(value["hits"].as_array().unwrap().len(), limit, "{value:#}");
+                let groups = value["groups"].as_array().unwrap();
+                assert_eq!(groups.len(), file_count.min(limit), "{value:#}");
+                let more_hits = value["more_hits_in_file"].as_object().unwrap();
+                for group in groups {
+                    let path = group["file_path"].as_str().unwrap();
+                    let matches = match Path::new(path).file_name().unwrap().to_str().unwrap() {
+                        "dense.txt" => 600,
+                        "list.txt" => 30,
+                        _ => 1,
+                    };
+                    assert_eq!(group["hit_count"], matches, "{path}");
+                    let hits = group["hits"].as_array().unwrap();
+                    let ranges = hits
+                        .iter()
+                        .map(|hit| (hit["start_line"].as_u64(), hit["end_line"].as_u64()))
+                        .collect::<HashSet<_>>();
+                    assert_eq!(ranges.len(), hits.len(), "{path}: {ranges:?}");
+                    let more = more_hits.get(path).map_or(0, |more| more.as_u64().unwrap());
+                    assert_eq!(more, matches - hits.len() as u64, "{path}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1776,12 +1861,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("src")).unwrap();
         std::fs::write(root.path().join("src/lib.rs"), "fn marker() {}\n").unwrap();
+        std::fs::write(root.path().join(" spaced.rs"), "fn spaced() {}\n").unwrap();
         let registered = register_test_workspace(root.path());
         let resolve = |scope: &str| {
             let (_, params) = parse_target(&format!("/?workspace={registered}&scope={scope}"))?;
             resolve_context_workspace(&params)
         };
-        for (path, is_file) in [("src", false), ("src/lib.rs", true)] {
+        for (path, is_file) in [("src", false), ("src/lib.rs", true), (" spaced.rs", true)] {
             let (workspace, scope) = resolve(path).unwrap();
             assert_eq!(workspace.root, root.path().canonicalize().unwrap());
             let scope = scope.unwrap();
@@ -1870,7 +1956,7 @@ mod tests {
     fn api_requests_from_other_origins_are_rejected() {
         for (site, allowed) in [
             ("same-origin", true),
-            ("none", true),
+            ("none", false),
             ("same-site", false),
             ("cross-site", false),
         ] {
@@ -1982,20 +2068,23 @@ mod tests {
     }
 
     #[test]
-    fn search_request_keeps_glob_commas_and_regex_spaces() {
-        let (_, params) =
-            parse_target("/api/search?q=foo%20&mode=regex&include=**/*.%7Brs,ts%7D,src/**")
-                .unwrap();
+    fn search_request_keeps_glob_commas_and_spaces() {
+        let (_, params) = parse_target(
+            "/api/search?q=foo%20&mode=regex&include=**/*.%7Brs,ts%7D,src/**&scope=%20dir%20",
+        )
+        .unwrap();
         let request = build_search_request(&params).unwrap();
         let DaemonRequest::RegexSearch {
             pattern,
             include_globs,
+            scope_path,
             ..
         } = request
         else {
             panic!("expected regex request");
         };
         assert_eq!(pattern, "foo ");
+        assert_eq!(scope_path, Some(PathBuf::from(" dir ")));
         assert_eq!(include_globs, ["**/*.{rs,ts}", "src/**"]);
     }
 

@@ -1208,10 +1208,16 @@ Use the workspace root reported by `/api/status`. File paths and context scopes 
 Loopback is default. Every listener, loopback included, requires a generated
 per-daemon session token: any local user can reach a loopback port. API clients
 may send it as a bearer token. Loopback listeners accept only loopback Host
-names. API requests from another origin are rejected, also from another port of the
-same host. Content Security Policy, security headers, and request, header, file,
-and concurrency limits apply to every listener. Transport is still plain HTTP;
-remote use requires a trusted network or encrypted tunnel.
+names. An API request is rejected if it has a `Sec-Fetch-Site` header other than
+`same-origin`, or an `Origin` header that does not match Host. A browser that supports
+`Sec-Fetch-Site` sends it to a loopback listener, also for a page on another port of
+the same host. A request with neither header is accepted: scripts and older browsers
+send none, and browsers send `Sec-Fetch-Site` only to trustworthy URLs such as
+loopback. On a plain HTTP listener that is not loopback, a page on another port of the
+same host can therefore start a search with the session cookie. Content Security
+Policy, security headers, and request, header, file, and concurrency limits apply to
+every listener. Transport is still plain HTTP; remote use requires a trusted network
+or encrypted tunnel.
 
 `ig --web` prints the tokenized URL to its own stdout. To open a browser it
 writes an HTML redirect page to the app home's `browser/` directory and passes

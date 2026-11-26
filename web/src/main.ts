@@ -191,12 +191,16 @@ async function loadStatus(): Promise<void> {
 function resolveRequestedWorkspace(): void {
   if (!state.requestedWorkspace) return;
   const match = workspaceForPath(state.workspaces, state.requestedWorkspace);
-  if (match) {
-    state.workspace = match.root;
-    state.scope = match.scope;
-  }
-  // Keep an untracked path only to stop its search from using other workspaces.
-  if (match || !currentQuery()) state.requestedWorkspace = "";
+  // Refresh selects an untracked path after `ig --add`.
+  if (!match) return;
+  state.workspace = match.root;
+  state.scope = match.scope;
+  state.requestedWorkspace = "";
+}
+
+/** Requested path of a URL with a query, until it is tracked. Its search must not use other workspaces. */
+function untrackedSearchPath(): string {
+  return initial.query ? state.requestedWorkspace : "";
 }
 
 function renderWorkspaces(): void {
@@ -210,7 +214,7 @@ function renderWorkspaces(): void {
     if (!filter || haystack.includes(filter)) root.appendChild(workspaceButton(ws, label));
   }
   for (const button of root.querySelectorAll<HTMLButtonElement>(".workspace")) {
-    const active = !state.requestedWorkspace && button.dataset.workspace === state.workspace;
+    const active = !untrackedSearchPath() && button.dataset.workspace === state.workspace;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   }
@@ -339,13 +343,14 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     byId("results").innerHTML = '<div class="empty">Enter a query to search tracked workspaces.</div>';
     return;
   }
-  if (state.requestedWorkspace) {
+  const untracked = untrackedSearchPath();
+  if (untracked) {
     state.hits = [];
     state.contextPack = null;
     state.pinnedHitKeys.clear();
     updateCopyAvailability();
-    byId("summary").textContent = `${state.requestedWorkspace} is not tracked.`;
-    byId("results").innerHTML = `<div class="empty">To index this directory, run <code>ig --add "${escapeHtml(state.requestedWorkspace)}"</code> and select Refresh. To search other indexes, select them under Workspaces.</div>`;
+    byId("summary").textContent = `${untracked} is not tracked.`;
+    byId("results").innerHTML = '<div class="empty">To index this directory, run <code>ig --add .</code> in it and select Refresh. To search other indexes, select them under Workspaces.</div>';
     return;
   }
   if (byId<HTMLSelectElement>("mode").value === "context" && state.workspace === ALL_WORKSPACES) {
@@ -593,7 +598,8 @@ function renderContextPack(bundle: ContextBundle, elapsedMs: number, warnings: s
 
 function warningMarkup(warnings: string[] = []): string {
   if (!warnings.length) return "";
-  const title = state.searchErrors.length ? "Partial results" : "Warnings";
+  const partial = state.searchErrors.length > 0 || warnings.some((warning) => warning.includes("partial results"));
+  const title = partial ? "Partial results" : "Warnings";
   const details = warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
   return `<aside class="search-warnings" role="status" aria-live="polite"><strong>${title}</strong><ul>${details}</ul></aside>`;
 }
@@ -815,7 +821,7 @@ function syncUrlState(): void {
   const since = byId<HTMLInputElement>("since").value.trim();
   const budget = byId<HTMLInputElement>("budget").value.trim();
   if (query) params.set("q", query);
-  params.set("workspace", state.requestedWorkspace || scopedWorkspacePath());
+  params.set("workspace", untrackedSearchPath() || scopedWorkspacePath());
   if (mode !== "hybrid") params.set("mode", mode);
   if (limit !== DEFAULT_LIMIT) params.set("limit", String(limit));
   if (type) params.set("type", type);

@@ -9,7 +9,7 @@ All notable changes to ivygrep are documented in this file.
 - `ig --web QUERY FILE` runs the search. A scope that is a file, or a folder that no longer exists, stopped the page before its first search.
 - `ig --web` selects the innermost workspace that contains the path. A repository or worktree inside another tracked workspace opened the outer one and found nothing.
 - `ig --web QUERY PATH` reports a path that is not tracked and shows the `ig --add` command. It searched all other indexes without a notice.
-- Web literal search keeps every matching file beside a file with many matches and reports the matches it leaves out.
+- Web literal search keeps a hit of every matching file, up to the result limit, beside a file with many matches. It reports the matches it leaves out of listed files.
 - The Web include and exclude filters accept brace alternatives, character classes, and escaped commas. Regex queries keep leading and trailing spaces.
 - The Web UI renders files and Markdown code blocks named like object members, such as `constructor`. One of them emptied the result list or the viewer.
 - Code copied from the Web viewer or from a snippet no longer contains `Line N:` labels, and query highlighting no longer changes characters such as `<`.
@@ -18,12 +18,12 @@ All notable changes to ivygrep are documented in this file.
 - Links between workspace files in a Markdown preview open in the viewer. Other links open in a new tab.
 - The Web UI reports why a search failed, for example a lost session, and Refresh runs the query again. Warnings that do not mean partial results have their own title.
 - Identical Web results are shown once, so arrow keys and Pin reach every result. The Enter key of an input method no longer starts a search.
-- The Web explorer reports entries it does not list, opens files whose names start or end with a space, and lists folders that contain names that are not UTF-8.
+- The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
 - Malformed Web requests get a 400 or 431 response instead of a closed connection.
 
 ### Security
 
-- The Web API rejects requests from pages on another port of the same host. Such a page could start searches with the session cookie and add ignored files to an index. It could not read the results.
+- The Web API rejects requests with a `Sec-Fetch-Site` header other than `same-origin`. A page on another port of the same host, or a redirect, could start searches with the session cookie and add ignored files to an index. Older browsers, and all browsers on a plain HTTP address outside loopback, do not send this header, so the check does not cover them.
 - On macOS, the Web UI opens a file as text when no editor is configured. It used `open`, which runs files such as `.command` scripts.
 
 ## [1.3.6] - 2026-11-15
