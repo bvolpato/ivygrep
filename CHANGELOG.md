@@ -6,9 +6,34 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
+- The stress fixture download uses its next source when a server requests a long retry delay. Such a delay blocked the scheduled cross-platform run until its time limit, and `E2E Summary` now fails when a platform job is cancelled.
+- `install.sh` names an accelerator archive that it cannot reach instead of reporting it as not available. It also selects the Apple Silicon archive from a shell that runs under Rosetta.
+- `install.sh` reports another `ig` that comes first on `PATH`. It no longer asks to add a directory that is already on `PATH` when `IVYGREP_INSTALL_DIR` ends in `/`.
+- The PowerShell installer keeps its strict mode, error preference, functions, and variables out of the session that runs `irm ... | iex`.
+- `ig --web QUERY FILE` runs the search. A scope that is a file, or a folder that no longer exists, stopped the page before its first search.
+- `ig --web` selects the innermost workspace that contains the path. A repository or worktree inside another tracked workspace opened the outer one and found nothing.
+- `ig --web QUERY PATH` reports a path that is not tracked and shows the `ig --add` command. It searched all other indexes without a notice.
+- Web literal search keeps a hit of every matching file, up to the result limit, beside a file with many matches. It reports the matches it leaves out of listed files.
+- The Web include and exclude filters accept brace alternatives, character classes, and escaped commas. Regex queries keep leading and trailing spaces.
+- The Web UI renders files and Markdown code blocks named like object members, such as `constructor`. One of them emptied the result list or the viewer.
+- Code copied from the Web viewer or from a snippet no longer contains `Line N:` labels, and query highlighting no longer changes characters such as `<`.
+- A Web UI result opens the file in the workspace that produced it after a switch to another workspace. Copied JSON describes the search that produced the results.
+- The Web UI URL keeps "All indices" and an empty query after a reload.
+- Links between workspace files in a Markdown preview open in the viewer. Other links open in a new tab.
+- The Web UI reports why a search failed, for example a lost session, and Refresh runs the query again. Warnings that do not mean partial results have their own title.
+- Identical Web results are shown once, so arrow keys and Pin reach every result. The Enter key of an input method no longer starts a search.
+- The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
+- Malformed Web requests get a 400 or 431 response instead of a closed connection.
 - Literal search keeps leading and trailing spaces in the pattern, so `--literal 'if '` no longer matches `diff`.
 - The CLI and MCP warn that a literal or regex pattern that needs a line break has no results, because both modes search one line at a time. One trailing line break is ignored.
 - Regex context lines of UTF-16 files are decoded like the matching lines.
+
+### Security
+
+- `install.sh` compares SHA-256 digests directly. The `sha256sum -c` of macOS accepts an empty or malformed checksum file, so the installer could install an archive that it did not verify.
+- The Web API rejects requests with a `Sec-Fetch-Site` header other than `same-origin`. A page on another port of the same host, or a redirect, could start searches with the session cookie and add ignored files to an index. Older browsers, and all browsers on a plain HTTP address outside loopback, do not send this header, so the check does not cover them.
+- On macOS, the Web UI opens a file as text when no editor is configured. It used `open`, which runs files such as `.command` scripts.
 
 ## [1.3.6] - 2026-11-15
 

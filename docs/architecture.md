@@ -1117,7 +1117,7 @@ gets a structured version error from the `Version` probe and restarts it.
 
 Version 10 added file-oriented literal results. Version 11 adds the `hash_only` search option. An older client that omits it keeps automatic model selection. A hash-only request uses hash vectors even if the daemon has a neural model loaded, and it can request only hash vectors from the background queue.
 
-Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Earlier literal output modes retain their behavior.
+Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Web literal searches do the same. Earlier literal output modes retain their behavior.
 
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered
@@ -1213,9 +1213,16 @@ Use the workspace root reported by `/api/status`. File paths and context scopes 
 Loopback is default. Every listener, loopback included, requires a generated
 per-daemon session token: any local user can reach a loopback port. API clients
 may send it as a bearer token. Loopback listeners accept only loopback Host
-names. Content Security Policy, security headers, and request, header, file,
-and concurrency limits apply to every listener. Transport is still plain HTTP;
-remote use requires a trusted network or encrypted tunnel.
+names. An API request is rejected if it has a `Sec-Fetch-Site` header other than
+`same-origin`, or an `Origin` header that does not match Host. A browser that supports
+`Sec-Fetch-Site` sends it to a loopback listener, also for a page on another port of
+the same host. A request with neither header is accepted: scripts and older browsers
+send none, and browsers send `Sec-Fetch-Site` only to trustworthy URLs such as
+loopback. On a plain HTTP listener that is not loopback, a page on another port of the
+same host can therefore start a search with the session cookie. Content Security
+Policy, security headers, and request, header, file, and concurrency limits apply to
+every listener. Transport is still plain HTTP; remote use requires a trusted network
+or encrypted tunnel.
 
 `ig --web` prints the tokenized URL to its own stdout. To open a browser it
 writes an HTML redirect page to the app home's `browser/` directory and passes
