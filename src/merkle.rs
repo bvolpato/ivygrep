@@ -12,8 +12,6 @@ use crate::chunking::is_indexable_file;
 use crate::walker::is_ignore_pattern_warning;
 use crate::workspace::index_path_string;
 
-use std::io::IsTerminal;
-
 const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// Replaces the metadata hash of a file that vanished before it was indexed.
 /// A metadata hash is hexadecimal, so no file on disk has this hash.
@@ -259,7 +257,7 @@ impl MerkleSnapshot {
 
         let walker = crate::walker::source_walker(root, skip_gitignore);
 
-        let show_progress = std::io::stderr().is_terminal();
+        let show_progress = crate::indexer::progress_on_terminal();
         let scanned = AtomicUsize::new(0);
 
         // Each worker thread collects entries into its own buffer with zero

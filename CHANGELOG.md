@@ -4,6 +4,19 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `ig --interactive` repeats the search when a first background index completes, and shows an indexing status until then. The indexer no longer prints progress over the screen.
+- The TUI searches again after you change a query and undo the change while its search runs.
+- The TUI file view reaches the end of files with wrapped lines or more than 65,535 lines, and opens with the hit on the screen. The selected snippet stays visible below wrapped snippets.
+- TUI previews keep the indentation and columns of lines that contain tabs.
+- A click in a scrolled TUI file list selects the clicked file.
+- Enter in the TUI search box moves to the result list when the results of a new query arrive.
+- `ig --interactive` in an indexed linked worktree does not index the worktree again at each start.
+- `ig --interactive` rejects `--literal`, `--regex`, `--symbol`, `--refs`, `--callers`, `--lexical-only`, and `--json`. It ignored these flags before.
+- `ig --interactive` without a terminal reports the cause, writes nothing to stdout, and does not start an index.
+- The TUI marks failed actions as failures, and its search box scrolls to the cursor of a long query.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.

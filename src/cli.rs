@@ -141,7 +141,11 @@ pub struct Cli {
     pub yes: bool,
 
     /// Launch the interactive terminal UI.
-    #[arg(long = "interactive", visible_alias = "ui")]
+    #[arg(
+        long = "interactive",
+        visible_alias = "ui",
+        conflicts_with_all = ["literal", "regex", "symbol", "refs", "callers", "lexical_only", "json"]
+    )]
     pub ui: bool,
 
     /// Fast exact-match search backed by the index. Bounded searches show up to

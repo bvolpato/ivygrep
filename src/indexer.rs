@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -95,6 +96,25 @@ use batch_budget::{BatchBudget, Reservation};
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
 const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
 const INDEXED_SKIP_GITIGNORE_FILE: &str = ".indexed_skip_gitignore";
+
+static PROGRESS_OUTPUT: AtomicBool = AtomicBool::new(true);
+
+/// Stop progress output on stderr. A full-screen UI owns the terminal.
+pub(crate) fn disable_progress_output() {
+    PROGRESS_OUTPUT.store(false, Ordering::Relaxed);
+}
+
+pub(crate) fn progress_on_terminal() -> bool {
+    PROGRESS_OUTPUT.load(Ordering::Relaxed) && std::io::stderr().is_terminal()
+}
+
+macro_rules! progress_line {
+    ($($message:tt)*) => {
+        if PROGRESS_OUTPUT.load(Ordering::Relaxed) {
+            eprintln!($($message)*);
+        }
+    };
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingSummary {
@@ -1124,7 +1144,7 @@ fn index_workspace_inner(
                 base_ws.ensure_dirs()?;
                 base_ws.write_metadata(&base_meta)?;
                 if base_sqlite.exists() {
-                    eprintln!("  ⚡ enabling ignored files in base index before overlay...");
+                    progress_line!("  ⚡ enabling ignored files in base index before overlay...");
                     if let Err(err) = index_workspace_with_store_replacement(
                         &base_ws,
                         embedding_model,
@@ -1154,7 +1174,9 @@ fn index_workspace_inner(
             && let Some(main_root) = workspace.main_worktree_root()
             && let Ok(base_ws) = crate::workspace::Workspace::resolve(&main_root)
         {
-            eprintln!("  ⚡ base index format incompatible — rebuilding base before overlay...");
+            progress_line!(
+                "  ⚡ base index format incompatible — rebuilding base before overlay..."
+            );
             let _ = index_workspace_with_options_and_store_replacement(
                 &base_ws,
                 embedding_model,
@@ -1171,7 +1193,9 @@ fn index_workspace_inner(
             && (!workspace.has_overlay() || recreate_overlay)
             && let Some(main_root) = workspace.main_worktree_root()
         {
-            eprintln!("  ⚡ base workspace is not indexed, running full base indexing first...");
+            progress_line!(
+                "  ⚡ base workspace is not indexed, running full base indexing first..."
+            );
             let base_workspace = crate::workspace::Workspace::resolve(&main_root)?;
             let _ = index_workspace_with_options_and_store_replacement(
                 &base_workspace,
@@ -1182,14 +1206,14 @@ fn index_workspace_inner(
                 before_store_replacement,
             )?;
             base_refreshed = true;
-            eprintln!("  ⚡ base indexing complete, proceeding with overlay...");
+            progress_line!("  ⚡ base indexing complete, proceeding with overlay...");
         }
 
         if base_sqlite.exists()
             && base_merkle.exists()
             && (!workspace.has_overlay() || recreate_overlay)
         {
-            eprintln!("  ⚡ creating worktree overlay (no copy)...");
+            progress_line!("  ⚡ creating worktree overlay (no copy)...");
             let _ = fs::write(workspace.indexing_progress_path(), "building overlay");
 
             // Publish the base reference with the completed overlay, never
@@ -1237,7 +1261,7 @@ fn index_workspace_inner(
             let diff = initial_overlay_diff(&main_root, &indexed_base, &old, &new);
             captured_base_snapshot = Some(indexed_base);
 
-            eprintln!(
+            progress_line!(
                 "  ⚡ overlay delta: {} added/modified, {} deleted",
                 diff.added_or_modified.len(),
                 diff.deleted.len()
@@ -1654,7 +1678,7 @@ fn index_workspace_inner(
     }
 
     let total = diff.added_or_modified.len();
-    let show_progress = total > 0 && std::io::stderr().is_terminal();
+    let show_progress = total > 0 && progress_on_terminal();
 
     let t0 = std::time::Instant::now();
     let mut total_chunks_processed = 0;

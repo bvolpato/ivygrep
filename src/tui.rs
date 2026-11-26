@@ -1,4 +1,4 @@
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    Terminal,
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -40,12 +40,30 @@ use crate::workspace::{Workspace, WorkspaceScope};
 
 const TUI_DEFAULT_LIMIT: usize = 100;
 const FLASH_DURATION: Duration = Duration::from_secs(3);
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+const INDEXING_STATUS: &str = "Indexing in background… search results may be partial";
+const TAB_WIDTH: usize = 4;
+/// Rows of context above the hit when the file view opens.
+const FILE_VIEW_CONTEXT_ROWS: usize = 4;
 const MIN_SPLIT_PERCENT: u16 = 15;
 const MAX_SPLIT_PERCENT: u16 = 70;
 const DEFAULT_SPLIT_PERCENT: u16 = 35;
 
-/// Pre-rendered file view: (path, highlighted range, rendered lines).
-type FileViewCache = (PathBuf, Option<(usize, usize)>, Vec<Line<'static>>);
+/// Pre-rendered file view.
+struct FileViewCache {
+    path: PathBuf,
+    hl_range: Option<(usize, usize)>,
+    lines: Vec<Line<'static>>,
+    /// Panel width that `row_starts` was calculated for.
+    width: u16,
+    row_starts: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlashKind {
+    Success,
+    Failure,
+}
 
 // ---------------------------------------------------------------------------
 // Interaction modes
@@ -150,14 +168,16 @@ struct App {
 
     // -- view --
     mode: Mode,
-    file_view_scroll: u16,
+    /// Top screen row of the file view, counted with wrapped lines.
+    file_view_scroll: usize,
     file_view_cache: Option<FileViewCache>,
 
     // -- search lifecycle --
     is_searching: bool,
     pending_search: bool,
     transition_after_search: bool,
-    last_query: String,
+    /// Query of the last search, or `None` if that search was cancelled.
+    last_query: Option<String>,
     debounce_timer: Option<Instant>,
     cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     active_search_id: Option<uuid::Uuid>,
@@ -172,9 +192,11 @@ struct App {
 
     // -- ui chrome --
     status_message: Option<String>,
-    flash: Option<(String, Instant)>,
+    flash: Option<(FlashKind, String, Instant)>,
 
     // -- bg indexing progress --
+    /// Result of the background index. `None` if no index build is active.
+    index_rx: Option<std::sync::mpsc::Receiver<Result<()>>>,
     bg_indexing_active: bool,
     last_bg_check: Instant,
 
@@ -200,7 +222,9 @@ impl App {
             None => std::env::current_dir()?,
         };
         let (workspace, scope_filter) = crate::cli::resolve_query_workspace(&cli, &query_path)?;
-        let bg_status = prepare_workspace_for_tui(&cli, &workspace, &runtime)?;
+        let needs_index = workspace_needs_index(&cli, &workspace)?;
+        require_terminal()?;
+        let index_rx = needs_index.then(|| start_background_index(&cli, &workspace, &runtime));
 
         Ok(Self {
             input: Input::default().with_value(cli.query.clone().unwrap_or_default()),
@@ -214,7 +238,7 @@ impl App {
             is_searching: false,
             pending_search: false,
             transition_after_search: false,
-            last_query: String::new(),
+            last_query: Some(String::new()),
             debounce_timer: Some(Instant::now()),
             cancel_token: None,
             active_search_id: None,
@@ -225,11 +249,15 @@ impl App {
             scope_filter,
             search_rx: None,
             status_message: Some(
-                bg_status
-                    .clone()
-                    .unwrap_or_else(|| "Type to search".to_string()),
+                if needs_index {
+                    INDEXING_STATUS
+                } else {
+                    "Type to search"
+                }
+                .to_string(),
             ),
-            bg_indexing_active: bg_status.is_some(),
+            index_rx,
+            bg_indexing_active: needs_index,
             last_bg_check: Instant::now(),
             flash: None,
             ps: SyntaxSet::load_defaults_newlines(),
@@ -319,14 +347,18 @@ impl App {
     }
 
     fn flash(&mut self, msg: impl Into<String>) {
-        self.flash = Some((msg.into(), Instant::now()));
+        self.flash = Some((FlashKind::Success, msg.into(), Instant::now()));
     }
 
-    fn active_flash(&self) -> Option<&str> {
+    fn flash_error(&mut self, msg: impl Into<String>) {
+        self.flash = Some((FlashKind::Failure, msg.into(), Instant::now()));
+    }
+
+    fn active_flash(&self) -> Option<(FlashKind, &str)> {
         self.flash
             .as_ref()
-            .filter(|(_, t)| t.elapsed() < FLASH_DURATION)
-            .map(|(msg, _)| msg.as_str())
+            .filter(|(_, _, t)| t.elapsed() < FLASH_DURATION)
+            .map(|(kind, msg, _)| (*kind, msg.as_str()))
     }
 
     /// Load file content for the FileView mode.
@@ -342,7 +374,7 @@ impl App {
             if self
                 .file_view_cache
                 .as_ref()
-                .is_some_and(|(p, hl, _)| p == &abs && hl == &hl_range)
+                .is_some_and(|cache| cache.path == abs && cache.hl_range == hl_range)
             {
                 return;
             }
@@ -362,8 +394,47 @@ impl App {
             };
 
             let lines = render_file_view_lines(&content, &abs, hl_range, &self.ps, &self.ts);
-            self.file_view_cache = Some((abs, hl_range, lines));
+            self.file_view_cache = Some(FileViewCache {
+                path: abs,
+                hl_range,
+                lines,
+                width: 0,
+                row_starts: Vec::new(),
+            });
         }
+    }
+
+    /// Calculate the screen rows of the file view for a panel width. The line
+    /// at the top of the panel stays there if the width changes.
+    fn layout_file_view(&mut self, width: u16) {
+        let Some(cache) = &mut self.file_view_cache else {
+            return;
+        };
+        if cache.width == width && !cache.row_starts.is_empty() {
+            return;
+        }
+        let row_starts = wrapped_row_starts(&cache.lines, width);
+        if !cache.row_starts.is_empty() {
+            let (line, _) = line_at_row(&cache.row_starts, self.file_view_scroll);
+            self.file_view_scroll = row_starts[line];
+        }
+        cache.width = width;
+        cache.row_starts = row_starts;
+    }
+
+    /// Open the file view with the selected snippet in view.
+    fn open_file_view(&mut self) {
+        self.ensure_file_view_cache();
+        let panel = Block::bordered().inner(self.right_panel_rect);
+        self.layout_file_view(panel.width);
+        if let Some(line) = self.selected_snippet().map(|hit| hit.start_line)
+            && let Some(cache) = &self.file_view_cache
+        {
+            let line = line.clamp(1, cache.lines.len().max(1)) - 1;
+            let context = FILE_VIEW_CONTEXT_ROWS.min(usize::from(panel.height) / 4);
+            self.file_view_scroll = cache.row_starts[line].saturating_sub(context);
+        }
+        self.mode = Mode::FileView;
     }
 
     /// Reset to clean search state (when input is cleared).
@@ -379,8 +450,66 @@ impl App {
 
     // -- search --
 
-    /// Cancel local and daemon work for any in-flight search.
+    /// Search for the text in the input box. The UI draws "Searching…" first.
+    fn queue_search(&mut self) {
+        self.last_query = Some(self.input.value().to_string());
+        self.status_message = Some("Searching…".to_string());
+        self.pending_search = true;
+        self.debounce_timer = None;
+    }
+
+    /// Queue a search if the query changed and the user stopped typing.
+    fn queue_debounced_search(&mut self) {
+        if self
+            .debounce_timer
+            .is_some_and(|timer| timer.elapsed() >= SEARCH_DEBOUNCE)
+        {
+            if self.last_query.as_deref() != Some(self.input.value()) {
+                self.queue_search();
+            }
+            self.debounce_timer = None;
+        }
+    }
+
+    /// Queue a search for Enter in the input box and move to its results.
+    fn submit_query(&mut self) {
+        if self.input.value().is_empty() {
+            self.transition_after_search = false;
+            return;
+        }
+        // Results of this query stay usable while the search runs again.
+        if !self.is_searching
+            && !self.grouped_files.is_empty()
+            && self.last_query.as_deref() == Some(self.input.value())
+        {
+            self.mode = Mode::FileList;
+        }
+        self.queue_search();
+        self.transition_after_search = true;
+    }
+
+    /// Apply a key to the input box.
+    fn edit_query(&mut self, key: event::KeyEvent) {
+        let prev = self.input.value().to_string();
+        self.input.handle_event(&Event::Key(key));
+        if prev != self.input.value() {
+            // Cancel any in-flight search — the query just changed.
+            if self.is_searching {
+                self.cancel_search();
+            }
+            self.debounce_timer = Some(Instant::now());
+        }
+    }
+
+    /// Cancel the in-flight search. The same query can start a search again.
     fn cancel_search(&mut self) {
+        self.stop_search();
+        self.last_query = None;
+        self.transition_after_search = false;
+    }
+
+    /// Stop local and daemon work for any in-flight search.
+    fn stop_search(&mut self) {
         self.cleanup_tasks.retain(|task| !task.is_finished());
         if let Some(token) = self.cancel_token.take() {
             token.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -403,7 +532,7 @@ impl App {
     }
 
     async fn shutdown(&mut self) {
-        self.cancel_search();
+        self.stop_search();
         for task in std::mem::take(&mut self.cleanup_tasks) {
             let _ = task.await;
         }
@@ -455,7 +584,12 @@ impl App {
             }
             Err(err) => {
                 self.reset_results();
-                self.status_message = Some(format!("Search failed: {err:#}"));
+                // The search runs again when the index is complete.
+                self.status_message = Some(if self.index_rx.is_some() {
+                    INDEXING_STATUS.to_string()
+                } else {
+                    format!("Search failed: {err:#}")
+                });
             }
         }
         if self.transition_after_search {
@@ -467,11 +601,12 @@ impl App {
     }
 
     fn trigger_search(&mut self) {
-        // Cancel any previous search first.
-        self.cancel_search();
+        // Stop any previous search first.
+        self.stop_search();
 
         let q = self.input.value().trim().to_string();
         if q.is_empty() {
+            self.transition_after_search = false;
             self.reset_results();
             return;
         }
@@ -559,6 +694,42 @@ impl App {
         });
         self.search_task = Some(task);
     }
+
+    /// Check for the end of the background index.
+    fn poll_background_index(&mut self) {
+        // A new search replaces the file that an open snippet or file belongs to.
+        if !matches!(self.mode, Mode::Search | Mode::FileList) {
+            return;
+        }
+        let Some(rx) = &self.index_rx else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("the indexing thread stopped"))
+            }
+        };
+        self.finish_background_index(result);
+    }
+
+    fn finish_background_index(&mut self, result: Result<()>) {
+        self.index_rx = None;
+        match result {
+            Ok(()) if self.input.value().trim().is_empty() => {
+                self.status_message = Some("Index complete".to_string());
+            }
+            // The search of this query saw an incomplete index.
+            Ok(()) if self.last_query.as_deref() == Some(self.input.value()) => {
+                self.queue_search();
+            }
+            Ok(()) => {}
+            Err(error) => {
+                self.status_message = Some(format!("Indexing failed: {error:#}"));
+            }
+        }
+    }
 }
 
 fn local_search_detached(
@@ -635,19 +806,12 @@ fn local_search_model(
 
 // Workspace preparation
 
-/// Kick off indexing if needed, but **never** block the TUI launch.
-///
-/// Returns an optional status message to show in the TUI while indexing
-/// proceeds in the background.
-fn prepare_workspace_for_tui(
-    cli: &Cli,
-    workspace: &Workspace,
-    runtime: &tokio::runtime::Handle,
-) -> Result<Option<String>> {
+/// Check whether the workspace needs an index build, and ask before a broad one.
+fn workspace_needs_index(cli: &Cli, workspace: &Workspace) -> Result<bool> {
     if cli.all_indices {
         crate::cli::confirm_broad_all(cli.skip_gitignore, cli.yes)?;
         if !cli.skip_gitignore {
-            return Ok(None);
+            return Ok(false);
         }
     }
     // Fast existence-only check: avoids opening SQLite (which can block for
@@ -658,32 +822,50 @@ fn prepare_workspace_for_tui(
         .is_some_and(|m| m.last_indexed_at_unix.is_some());
     if cli.all_indices && !metadata_present {
         // Do not add the current directory to an all-index search.
-        return Ok(None);
+        return Ok(false);
     }
     let needs_reindex_for_gitignore =
         cli.skip_gitignore && !metadata.is_some_and(|m| m.skip_gitignore);
-    let artifacts_exist = workspace.sqlite_path().exists()
-        && workspace.tantivy_dir().exists()
-        && workspace.vector_path().exists();
-    let looks_indexed = metadata_present && artifacts_exist;
+    let stores = if workspace.has_overlay() || workspace.base_ref_path().exists() {
+        [
+            workspace.overlay_sqlite_path(),
+            workspace.overlay_tantivy_dir(),
+            workspace.overlay_vector_path(),
+        ]
+    } else {
+        [
+            workspace.sqlite_path(),
+            workspace.tantivy_dir(),
+            workspace.vector_path(),
+        ]
+    };
+    let looks_indexed = metadata_present && stores.iter().all(|store| store.exists());
 
     if looks_indexed && !needs_reindex_for_gitignore {
-        return Ok(None);
+        return Ok(false);
     }
 
     // The terminal is not in raw mode yet, so the question can be asked here.
     if !cli.all_indices {
         crate::cli::confirm_broad_index(&workspace.root, cli.yes)?;
     }
+    Ok(true)
+}
 
-    // Not indexed — fire-and-forget: kick off indexing in the background
-    // and let the TUI launch immediately.  trigger_search() already falls
-    // back to local search if the daemon isn't ready yet.
+/// Index in the background, so that the TUI launches immediately.
+/// trigger_search() already falls back to local search if the daemon isn't
+/// ready yet.
+fn start_background_index(
+    cli: &Cli,
+    workspace: &Workspace,
+    runtime: &tokio::runtime::Handle,
+) -> std::sync::mpsc::Receiver<Result<()>> {
     let root = workspace.root.clone();
     let watch = !cli.no_watch;
     let skip_gitignore = cli.skip_gitignore;
     let ws = workspace.clone();
     let rt = runtime.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let request = DaemonRequest::Index {
             path: root,
@@ -693,24 +875,27 @@ fn prepare_workspace_for_tui(
         let daemon_result = rt.block_on(async {
             daemon::request(&request, watch, None::<fn(String, usize, usize)>).await
         });
-        if matches!(daemon_result, Ok(None)) {
-            // No daemon — index locally in this background thread.
-            if skip_gitignore
-                && let Ok(Some(mut meta)) = ws.read_metadata()
-                && !meta.skip_gitignore
-            {
-                meta.skip_gitignore = true;
-                let _ = ws.ensure_dirs();
-                let _ = ws.write_metadata(&meta);
+        let result = match daemon_result {
+            Ok(Some(DaemonResponse::Error { message })) => Err(anyhow::anyhow!(message)),
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => {
+                // No daemon — index locally in this background thread.
+                if skip_gitignore
+                    && let Ok(Some(mut meta)) = ws.read_metadata()
+                    && !meta.skip_gitignore
+                {
+                    meta.skip_gitignore = true;
+                    let _ = ws.ensure_dirs();
+                    let _ = ws.write_metadata(&meta);
+                }
+                let model = crate::embedding::create_hash_model();
+                crate::indexer::index_workspace(&ws, model.as_ref()).map(|_| ())
             }
-            let model = crate::embedding::create_hash_model();
-            let _ = crate::indexer::index_workspace(&ws, model.as_ref());
-        }
+            Err(error) => Err(error),
+        };
+        let _ = done_tx.send(result);
     });
-
-    Ok(Some(
-        "Indexing in background… search results may be partial".to_string(),
-    ))
+    done_rx
 }
 
 fn tui_limit(cli: &Cli) -> Option<usize> {
@@ -771,6 +956,14 @@ fn build_search_request(
 // ---------------------------------------------------------------------------
 // Terminal session RAII
 // ---------------------------------------------------------------------------
+
+fn require_terminal() -> Result<()> {
+    // The event reader can use the controlling terminal if stdin is redirected.
+    if !stdout().is_terminal() || event::poll(Duration::ZERO).is_err() {
+        bail!("--interactive needs a terminal");
+    }
+    Ok(())
+}
 
 struct TerminalSession {
     raw_mode_enabled: bool,
@@ -877,6 +1070,75 @@ fn hint_line(pairs: &[(&'static str, &'static str)]) -> Line<'static> {
 // Snippet rendering for the right panel
 // ---------------------------------------------------------------------------
 
+/// Convert one highlighted source line. ratatui drops control characters, so
+/// tabs become spaces.
+fn source_spans(ranges: &[(SynStyle, &str)], background: Option<Color>) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(ranges.len());
+    let mut column = 0;
+    for (syn_style, text) in ranges {
+        let mut style = syn_to_ratatui(*syn_style);
+        if let Some(background) = background {
+            style = style.bg(background);
+        }
+        let mut expanded = String::with_capacity(text.len());
+        for (index, part) in text.trim_end_matches(['\r', '\n']).split('\t').enumerate() {
+            if index > 0 {
+                let padding = TAB_WIDTH - column % TAB_WIDTH;
+                expanded.extend(std::iter::repeat_n(' ', padding));
+                column += padding;
+            }
+            expanded.push_str(part);
+            column += Span::raw(part).width();
+        }
+        if !expanded.is_empty() {
+            spans.push(Span::styled(expanded, style));
+        }
+    }
+    spans
+}
+
+/// Screen row of each line in a panel of this width, then the number of rows.
+fn wrapped_row_starts(lines: &[Line<'static>], width: u16) -> Vec<usize> {
+    let mut row_starts = Vec::with_capacity(lines.len() + 1);
+    let mut row = 0;
+    row_starts.push(row);
+    for line in lines {
+        // A character never uses more columns than bytes.
+        let max_columns: usize = line.iter().map(|span| span.content.len()).sum();
+        row += if max_columns <= usize::from(width) {
+            1
+        } else {
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                .clamp(1, usize::from(u16::MAX))
+        };
+        row_starts.push(row);
+    }
+    row_starts
+}
+
+/// Line at a screen row, and the number of its rows above that row.
+fn line_at_row(row_starts: &[usize], row: usize) -> (usize, usize) {
+    let line = row_starts.partition_point(|&start| start <= row) - 1;
+    (line, row - row_starts[line])
+}
+
+/// Paragraph that starts at a screen row. It contains only the lines that fit
+/// in the panel: `Paragraph::scroll` cannot address more than `u16::MAX` rows.
+fn paragraph_from_row(
+    lines: &[Line<'static>],
+    row_starts: &[usize],
+    row: usize,
+    height: u16,
+) -> Paragraph<'static> {
+    let (first, hidden_rows) = line_at_row(row_starts, row);
+    let last = lines.len().min(first + usize::from(height));
+    Paragraph::new(lines.get(first..last).unwrap_or_default().to_vec())
+        .scroll((hidden_rows as u16, 0))
+        .wrap(Wrap { trim: false })
+}
+
 /// Build syntax-highlighted lines for all snippets of the current file.
 /// Returns the lines and the start-line offset of each snippet inside the vec.
 fn render_snippet_lines(
@@ -934,17 +1196,7 @@ fn render_snippet_lines(
 
         for src_line in syntect::util::LinesWithEndings::from(&hit.preview) {
             let ranges: Vec<(SynStyle, &str)> = hl.highlight_line(src_line, ps).unwrap_or_default();
-            let spans: Vec<Span> = ranges
-                .into_iter()
-                .map(|(sty, text)| {
-                    let mut rs = syn_to_ratatui(sty);
-                    if let Some(bg) = sel_bg {
-                        rs = rs.bg(bg);
-                    }
-                    Span::styled(text.to_string(), rs)
-                })
-                .collect();
-            lines.push(Line::from(spans));
+            lines.push(Line::from(source_spans(&ranges, sel_bg)));
         }
 
         // ── visual divider between snippets ──
@@ -1009,22 +1261,112 @@ fn render_file_view_lines(
         // Need to add a newline so syntect can parse.
         let src_nl = format!("{src}\n");
         let ranges: Vec<(SynStyle, &str)> = hl.highlight_line(&src_nl, ps).unwrap_or_default();
-        for (sty, text) in ranges {
-            let mut rs = syn_to_ratatui(sty);
-            if in_hl {
-                rs = rs.bg(Color::Rgb(35, 42, 62));
-            }
-            // Trim trailing newline from the last span.
-            let t = text.trim_end_matches('\n').to_string();
-            if !t.is_empty() {
-                spans.push(Span::styled(t, rs));
-            }
-        }
+        spans.extend(source_spans(
+            &ranges,
+            in_hl.then_some(Color::Rgb(35, 42, 62)),
+        ));
 
         lines.push(Line::from(spans));
     }
 
     lines
+}
+
+/// Draw the full file with line numbers.
+fn draw_file_view(f: &mut Frame, app: &mut App, area: Rect, border_color: Color) {
+    app.ensure_file_view_cache();
+    let panel = Block::bordered().inner(area);
+    app.layout_file_view(panel.width);
+
+    let (widget, scroll_info) = if let Some(cache) = &app.file_view_cache {
+        let total = cache.row_starts.last().copied().unwrap_or(0);
+        let max_scroll = total.saturating_sub(usize::from(panel.height));
+        app.file_view_scroll = app.file_view_scroll.min(max_scroll);
+        let scroll_info = if max_scroll > 0 {
+            format!(" [{}/{}]", app.file_view_scroll + 1, max_scroll + 1)
+        } else {
+            String::new()
+        };
+        let widget = paragraph_from_row(
+            &cache.lines,
+            &cache.row_starts,
+            app.file_view_scroll,
+            panel.height,
+        );
+        (widget, scroll_info)
+    } else {
+        (Paragraph::new("..."), String::new())
+    };
+
+    let display_path = app
+        .file_list_state
+        .selected()
+        .and_then(|i| app.grouped_files.get(i))
+        .map(|f| f.file_path.display().to_string())
+        .unwrap_or_default();
+    let view_widget = widget.block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .title(format!(" {display_path}{scroll_info} ")),
+    );
+    f.render_widget(Clear, area);
+    f.render_widget(view_widget, area);
+}
+
+/// Draw the snippet previews of the selected file.
+fn draw_snippets(f: &mut Frame, app: &App, area: Rect, border_color: Color) {
+    let snippets = app.current_snippets();
+    let sel = if app.mode == Mode::SnippetList {
+        Some(app.snippet_index)
+    } else {
+        None
+    };
+
+    let (snippet_lines, snippet_offsets) = render_snippet_lines(snippets, sel, &app.ps, &app.ts);
+
+    // Auto-scroll to selected snippet.
+    let panel = Block::bordered().inner(area);
+    let row_starts = wrapped_row_starts(&snippet_lines, panel.width);
+    let scroll = if let Some(sel_idx) = sel
+        && let Some(&offset) = snippet_offsets.get(sel_idx)
+    {
+        row_starts[offset].saturating_sub(usize::from(panel.height) / 4)
+    } else {
+        0
+    };
+
+    let display_path = app
+        .file_list_state
+        .selected()
+        .and_then(|i| app.grouped_files.get(i))
+        .map(|f| f.file_path.display().to_string())
+        .unwrap_or_default();
+    let snippet_count = snippets.len();
+    let right_title = if snippet_count > 0 {
+        if sel.is_some() {
+            format!(
+                " {} — snippet {}/{} ",
+                display_path,
+                app.snippet_index + 1,
+                snippet_count
+            )
+        } else {
+            format!(" {} — {} snippets ", display_path, snippet_count)
+        }
+    } else {
+        " Preview ".to_string()
+    };
+
+    let snippet_widget = paragraph_from_row(&snippet_lines, &row_starts, scroll, panel.height)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(right_title),
+        );
+    f.render_widget(Clear, area);
+    f.render_widget(snippet_widget, area);
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1375,8 @@ fn render_file_view_lines(
 
 pub async fn run_tui(cli: Cli) -> Result<()> {
     let rt = tokio::runtime::Handle::current();
+    // The UI owns the terminal.
+    crate::indexer::disable_progress_output();
     let mut app = App::new(cli, rt)?;
 
     let session = TerminalSession::enter()?;
@@ -1040,25 +1384,12 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 
     // Pre-filled query → defer search so the UI draws "Searching…" first.
     if !app.input.value().is_empty() {
-        app.status_message = Some("Searching…".to_string());
-        app.pending_search = true;
-        app.debounce_timer = None;
-        app.last_query = app.input.value().to_string();
+        app.queue_search();
     }
 
     let result: Result<()> = 'event_loop: loop {
         // ---- debounced search ----
-        if let Some(timer) = app.debounce_timer
-            && timer.elapsed() >= Duration::from_millis(300)
-        {
-            let current = app.input.value().to_string();
-            if current != app.last_query {
-                app.last_query = current;
-                app.status_message = Some("Searching…".to_string());
-                app.pending_search = true;
-            }
-            app.debounce_timer = None;
-        }
+        app.queue_debounced_search();
 
         // ---- search progress polling ----
         if let Some(ref rx) = app.search_rx {
@@ -1081,6 +1412,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         }
 
         // ---- bg progress polling ----
+        app.poll_background_index();
         if app.bg_indexing_active && app.last_bg_check.elapsed() > Duration::from_millis(500) {
             app.last_bg_check = Instant::now();
 
@@ -1122,7 +1454,8 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 if let Ok(content) = std::fs::read_to_string(&i_prog) {
                     app.status_message = Some(format!("⟳ indexing ({})", content.trim()));
                 }
-            } else if !app.workspace.index_dir.join(".enhancing.pid").exists()
+            } else if app.index_rx.is_none()
+                && !app.workspace.index_dir.join(".enhancing.pid").exists()
                 && !app.workspace.index_dir.join(".indexing.pid").exists()
             {
                 // Done. If searching isn't happening via type-debounce, clear it.
@@ -1168,8 +1501,13 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 Mode::SnippetList => "  snippets",
                 Mode::FileView => "  view",
             };
+            // Borders and the cursor use three columns.
+            let input_scroll = app
+                .input
+                .visual_scroll(usize::from(outer[0].width.saturating_sub(3)));
             let input_widget = Paragraph::new(app.input.value())
                 .style(Style::default().fg(Color::White))
+                .scroll((0, input_scroll as u16))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -1296,111 +1634,19 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             };
 
             match app.mode {
-                // -- FileView: full file with line numbers --
-                Mode::FileView => {
-                    app.ensure_file_view_cache();
-                    let view_lines = if let Some((_, _, ref lines)) = app.file_view_cache {
-                        lines.clone()
-                    } else {
-                        vec![Line::from("...")]
-                    };
-                    let total = view_lines.len() as u16;
-                    let visible = main[1].height.saturating_sub(2);
-                    let max_scroll = total.saturating_sub(visible);
-                    if app.file_view_scroll > max_scroll {
-                        app.file_view_scroll = max_scroll;
-                    }
-
-                    let display_path = app
-                        .file_list_state
-                        .selected()
-                        .and_then(|i| app.grouped_files.get(i))
-                        .map(|f| f.file_path.display().to_string())
-                        .unwrap_or_default();
-                    let scroll_info = if total > visible {
-                        format!(" [{}/{}]", app.file_view_scroll + 1, max_scroll + 1)
-                    } else {
-                        String::new()
-                    };
-
-                    let view_widget = Paragraph::new(view_lines)
-                        .scroll((app.file_view_scroll, 0))
-                        .wrap(Wrap { trim: false })
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(right_border_color))
-                                .title(format!(" {display_path}{scroll_info} ")),
-                        );
-                    f.render_widget(Clear, main[1]);
-                    f.render_widget(view_widget, main[1]);
-                }
-
-                // -- Search / FileList / SnippetList: snippet previews --
-                _ => {
-                    let snippets = app.current_snippets();
-                    let sel = if app.mode == Mode::SnippetList {
-                        Some(app.snippet_index)
-                    } else {
-                        None
-                    };
-
-                    let (snippet_lines, snippet_offsets) =
-                        render_snippet_lines(snippets, sel, &app.ps, &app.ts);
-
-                    // Auto-scroll to selected snippet.
-                    let scroll: u16 = if let Some(sel_idx) = sel
-                        && let Some(&offset) = snippet_offsets.get(sel_idx)
-                    {
-                        let visible = main[1].height.saturating_sub(2);
-                        (offset as u16).saturating_sub(visible / 4)
-                    } else {
-                        0
-                    };
-
-                    let display_path = app
-                        .file_list_state
-                        .selected()
-                        .and_then(|i| app.grouped_files.get(i))
-                        .map(|f| f.file_path.display().to_string())
-                        .unwrap_or_default();
-                    let snippet_count = snippets.len();
-                    let right_title = if snippet_count > 0 {
-                        if sel.is_some() {
-                            format!(
-                                " {} — snippet {}/{} ",
-                                display_path,
-                                app.snippet_index + 1,
-                                snippet_count
-                            )
-                        } else {
-                            format!(" {} — {} snippets ", display_path, snippet_count)
-                        }
-                    } else {
-                        " Preview ".to_string()
-                    };
-
-                    let snippet_widget = Paragraph::new(snippet_lines)
-                        .scroll((scroll, 0))
-                        .wrap(Wrap { trim: false })
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(right_border_color))
-                                .title(right_title),
-                        );
-                    f.render_widget(Clear, main[1]);
-                    f.render_widget(snippet_widget, main[1]);
-                }
+                Mode::FileView => draw_file_view(f, &mut app, main[1], right_border_color),
+                _ => draw_snippets(f, &app, main[1], right_border_color),
             }
 
             // ========== status bar ==========
-            let bar_line = if let Some(flash) = app.active_flash() {
+            let bar_line = if let Some((kind, flash)) = app.active_flash() {
+                let (mark, color) = match kind {
+                    FlashKind::Success => ('✓', Color::Green),
+                    FlashKind::Failure => ('✗', Color::Red),
+                };
                 Line::from(Span::styled(
-                    format!(" ✓ {flash}"),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
+                    format!(" {mark} {flash}"),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ))
             } else {
                 match app.mode {
@@ -1417,7 +1663,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             // ========== cursor (only when typing) ==========
             if app.mode == Mode::Search {
                 f.set_cursor_position(ratatui::layout::Position {
-                    x: outer[0].x + app.input.visual_cursor() as u16 + 1,
+                    x: outer[0].x
+                        + app.input.visual_cursor().saturating_sub(input_scroll) as u16
+                        + 1,
                     y: outer[0].y + 1,
                 });
             }
@@ -1428,14 +1676,6 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         if app.pending_search {
             app.trigger_search();
             app.pending_search = false;
-
-            // If the user hit Enter while in Search mode, they want to focus the results.
-            if app.transition_after_search {
-                if !app.grouped_files.is_empty() {
-                    app.mode = Mode::FileList;
-                }
-                app.transition_after_search = false;
-            }
 
             // Loop back immediately to draw the updated results
             continue;
@@ -1473,9 +1713,13 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     } else if rect_contains(app.file_list_rect, col, row) {
                         app.mode = Mode::FileList;
                         // Select the clicked file row.
-                        let row_in_list = (row - app.file_list_rect.y).saturating_sub(1) as usize;
-                        if row_in_list < app.grouped_files.len() {
-                            app.file_list_state.select(Some(row_in_list));
+                        if let Some(index) = clicked_file(
+                            app.file_list_rect,
+                            app.file_list_state.offset(),
+                            app.grouped_files.len(),
+                            row,
+                        ) {
+                            app.file_list_state.select(Some(index));
                             app.snippet_index = 0;
                         }
                     } else if rect_contains(app.right_panel_rect, col, row) {
@@ -1537,7 +1781,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     } else {
                         app.input = Input::default();
                         app.reset_results();
-                        app.last_query.clear();
+                        app.last_query = None;
                         app.debounce_timer = None;
                     }
                 }
@@ -1550,24 +1794,14 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         // 2nd press: clear input
                         app.input = Input::default();
                         app.reset_results();
-                        app.last_query.clear();
+                        app.last_query = None;
                         app.debounce_timer = None;
                     } else {
                         // 3rd press: quit
                         break 'event_loop Ok(());
                     }
                 }
-                KeyCode::Enter => {
-                    if app.input.value().is_empty() {
-                        app.transition_after_search = false;
-                    } else {
-                        app.pending_search = true;
-                        app.transition_after_search = true;
-                        app.last_query = app.input.value().to_string();
-                        app.status_message = Some("Searching…".to_string());
-                        app.debounce_timer = None;
-                    }
-                }
+                KeyCode::Enter => app.submit_query(),
                 KeyCode::Down => {
                     if !app.grouped_files.is_empty() {
                         app.mode = Mode::FileList;
@@ -1592,17 +1826,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.mode = Mode::FileList;
                     }
                 }
-                _ => {
-                    let prev = app.input.value().to_string();
-                    app.input.handle_event(&Event::Key(key));
-                    if prev != app.input.value() {
-                        // Cancel any in-flight search — the query just changed.
-                        if app.is_searching {
-                            app.cancel_search();
-                        }
-                        app.debounce_timer = Some(Instant::now());
-                    }
-                }
+                _ => app.edit_query(key),
             },
 
             // ===== FILE LIST MODE =====
@@ -1629,7 +1853,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         let line = file.hits.first().map(|h| h.start_line).unwrap_or(1);
                         match open_in_editor(&path, line, &mut terminal) {
                             Ok(()) => {}
-                            Err(e) => app.flash(format!("Editor: {e:#}")),
+                            Err(e) => app.flash_error(format!("Editor: {e:#}")),
                         }
                     }
                 }
@@ -1642,7 +1866,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone()))
                         {
                             Ok(()) => app.flash(format!("Copied {text}")),
-                            Err(e) => app.flash(format!("Clipboard: {e}")),
+                            Err(e) => app.flash_error(format!("Clipboard: {e}")),
                         }
                     }
                 }
@@ -1654,7 +1878,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     } else if !app.input.value().is_empty() {
                         app.input = Input::default();
                         app.reset_results();
-                        app.last_query.clear();
+                        app.last_query = None;
                         app.debounce_timer = None;
                         app.mode = Mode::Search;
                     } else {
@@ -1668,13 +1892,11 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     app.mode = Mode::Search;
-                    app.input.handle_event(&Event::Key(key));
-                    app.debounce_timer = Some(Instant::now());
+                    app.edit_query(key);
                 }
                 KeyCode::Backspace => {
                     app.mode = Mode::Search;
-                    app.input.handle_event(&Event::Key(key));
-                    app.debounce_timer = Some(Instant::now());
+                    app.edit_query(key);
                 }
                 KeyCode::Tab
                     // Tab from FileList → SnippetList.
@@ -1703,12 +1925,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
                     if app.selected_snippet().is_some() =>
                 {
-                    app.ensure_file_view_cache();
-                    // Scroll to the snippet's start line.
-                    if let Some(hit) = app.selected_snippet() {
-                        app.file_view_scroll = (hit.start_line as u16).saturating_sub(5);
-                    }
-                    app.mode = Mode::FileView;
+                    app.open_file_view();
                 }
                 KeyCode::Char('e') => {
                     if let Some(hit) = app.selected_snippet() {
@@ -1716,7 +1933,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         let line = hit.start_line;
                         match open_in_editor(&path, line, &mut terminal) {
                             Ok(()) => {}
-                            Err(e) => app.flash(format!("Editor: {e:#}")),
+                            Err(e) => app.flash_error(format!("Editor: {e:#}")),
                         }
                     }
                 }
@@ -1727,7 +1944,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone()))
                         {
                             Ok(()) => app.flash(format!("Copied {text}")),
-                            Err(e) => app.flash(format!("Clipboard: {e}")),
+                            Err(e) => app.flash_error(format!("Clipboard: {e}")),
                         }
                     }
                 }
@@ -1742,7 +1959,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         );
                         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
                             Ok(()) => app.flash(format!("Copied content {label}")),
-                            Err(e) => app.flash(format!("Clipboard: {e}")),
+                            Err(e) => app.flash_error(format!("Clipboard: {e}")),
                         }
                     }
                 }
@@ -1754,7 +1971,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     } else if !app.input.value().is_empty() {
                         app.input = Input::default();
                         app.reset_results();
-                        app.last_query.clear();
+                        app.last_query = None;
                         app.debounce_timer = None;
                         app.mode = Mode::Search;
                     } else {
@@ -1804,7 +2021,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     app.file_view_scroll = 0;
                 }
                 KeyCode::End => {
-                    app.file_view_scroll = u16::MAX; // clamped during render
+                    app.file_view_scroll = usize::MAX; // clamped during render
                 }
                 KeyCode::Char('e') => {
                     if let Some(hit) = app.selected_snippet() {
@@ -1812,7 +2029,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         let line = hit.start_line;
                         match open_in_editor(&path, line, &mut terminal) {
                             Ok(()) => {}
-                            Err(e) => app.flash(format!("Editor: {e:#}")),
+                            Err(e) => app.flash_error(format!("Editor: {e:#}")),
                         }
                     }
                 }
@@ -1823,7 +2040,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone()))
                         {
                             Ok(()) => app.flash(format!("Copied {text}")),
-                            Err(e) => app.flash(format!("Clipboard: {e}")),
+                            Err(e) => app.flash_error(format!("Clipboard: {e}")),
                         }
                     }
                 }
@@ -1838,7 +2055,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         );
                         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
                             Ok(()) => app.flash(format!("Copied content {label}")),
-                            Err(e) => app.flash(format!("Clipboard: {e}")),
+                            Err(e) => app.flash_error(format!("Clipboard: {e}")),
                         }
                     }
                 }
@@ -1851,7 +2068,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     } else if !app.input.value().is_empty() {
                         app.input = Input::default();
                         app.reset_results();
-                        app.last_query.clear();
+                        app.last_query = None;
                         app.debounce_timer = None;
                         app.mode = Mode::Search;
                         app.file_view_cache = None;
@@ -1877,6 +2094,17 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 /// Check if a point (col, row) falls inside a `Rect`.
 fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+/// Index of the file that a click in the file list selects. A click on the
+/// border or below the last file selects nothing.
+fn clicked_file(list: Rect, offset: usize, len: usize, row: u16) -> Option<usize> {
+    let rows = Block::bordered().inner(list);
+    if row < rows.top() || row >= rows.bottom() {
+        return None;
+    }
+    let index = offset + usize::from(row - rows.top());
+    (index < len).then_some(index)
 }
 
 /// Windows terminals report key releases as separate events; only presses
@@ -1973,12 +2201,13 @@ mod tests {
             is_searching: false,
             pending_search: false,
             transition_after_search: false,
-            last_query: String::new(),
+            last_query: Some(String::new()),
             debounce_timer: None,
             cancel_token: None,
             active_search_id: None,
             search_task: None,
             cleanup_tasks: Vec::new(),
+            index_rx: None,
             bg_indexing_active: false,
             last_bg_check: std::time::Instant::now(),
             cli,
@@ -2109,7 +2338,141 @@ mod tests {
         assert!(app.cleanup_tasks.is_empty());
     }
 
+    // ── Search Lifecycle Tests ──────────────────────────────────────────
+
+    fn outcome(hits: Vec<SearchHit>) -> SearchOutcome {
+        SearchOutcome {
+            hits,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn undone_edit_repeats_the_cancelled_search() {
+        let mut app = test_app(Vec::new());
+        app.input = Input::from("tax");
+        app.queue_search();
+        app.pending_search = false;
+        app.is_searching = true;
+
+        for code in [KeyCode::Char('x'), KeyCode::Backspace] {
+            app.edit_query(event::KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        assert_eq!(app.input.value(), "tax");
+        assert!(!app.is_searching);
+
+        app.debounce_timer = Some(Instant::now() - SEARCH_DEBOUNCE);
+        app.queue_debounced_search();
+        assert!(app.pending_search);
+    }
+
+    #[tokio::test]
+    async fn enter_moves_to_the_results_of_the_new_query() {
+        let mut app = test_app(vec![make_hit("old.rs", 1, 5, 1.0)]);
+        app.last_query = Some("old".to_string());
+        app.input = Input::from("new");
+
+        app.submit_query();
+        assert!(app.pending_search);
+        assert_eq!(app.mode, Mode::Search);
+
+        app.finish_search(Ok(outcome(vec![make_hit("new.rs", 1, 5, 1.0)])));
+        assert_eq!(app.mode, Mode::FileList);
+        assert_eq!(
+            app.grouped_files[0].file_path,
+            PathBuf::from("new.rs"),
+            "the list must hold the new results"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_after_enter_keeps_the_focus_in_the_input_box() {
+        let mut app = test_app(Vec::new());
+        app.input = Input::from("tax");
+        app.submit_query();
+        app.is_searching = true;
+
+        app.edit_query(event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.finish_search(Ok(outcome(vec![make_hit("a.rs", 1, 5, 1.0)])));
+        assert_eq!(app.mode, Mode::Search);
+    }
+
+    #[tokio::test]
+    async fn search_repeats_when_the_background_index_ends() {
+        let mut app = test_app(Vec::new());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        app.index_rx = Some(done_rx);
+        app.input = Input::from("calculate tax");
+        app.queue_search();
+        app.pending_search = false;
+
+        app.finish_search(Err(anyhow::anyhow!("index format incompatible")));
+        assert_eq!(app.status_message.as_deref(), Some(INDEXING_STATUS));
+        app.poll_background_index();
+        assert!(!app.pending_search);
+
+        done_tx.send(Ok(())).unwrap();
+        app.poll_background_index();
+        assert!(app.pending_search);
+
+        app.finish_search(Err(anyhow::anyhow!("disk error")));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Search failed: disk error")
+        );
+    }
+
+    #[test]
+    fn indexed_worktree_overlay_needs_no_index() {
+        let root = tempfile::tempdir().unwrap();
+        let index = tempfile::tempdir().unwrap();
+        let workspace = Workspace {
+            id: "tui-overlay".to_string(),
+            root: root.path().to_path_buf(),
+            index_dir: index.path().to_path_buf(),
+            repo_id: None,
+            base_index_dir: Some(index.path().join("base")),
+        };
+        workspace
+            .write_metadata(&crate::workspace::WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: 0,
+                last_indexed_at_unix: Some(1),
+                watch_enabled: false,
+                skip_gitignore: false,
+                index_generation: 1,
+            })
+            .unwrap();
+        std::fs::write(workspace.overlay_sqlite_path(), "").unwrap();
+        std::fs::create_dir(workspace.overlay_tantivy_dir()).unwrap();
+        std::fs::write(workspace.overlay_vector_path(), "").unwrap();
+        let cli = Cli::parse_from(["ig", "--interactive"]);
+
+        assert!(!workspace_needs_index(&cli, &workspace).unwrap());
+
+        std::fs::remove_dir(workspace.overlay_tantivy_dir()).unwrap();
+        assert!(workspace_needs_index(&cli, &workspace).unwrap());
+    }
+
     // ── Request Building Tests ──────────────────────────────────────────
+
+    #[test]
+    fn interactive_rejects_search_modes_it_cannot_apply() {
+        for flag in [
+            "--literal",
+            "--regex",
+            "--symbol",
+            "--refs",
+            "--callers",
+            "--lexical-only",
+            "--json",
+        ] {
+            let error =
+                Cli::try_parse_from(["ig", "--interactive", flag, "query"]).expect_err(flag);
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
 
     #[test]
     fn tui_search_request_preserves_workspace_scope() {
@@ -2273,6 +2636,125 @@ mod tests {
 
         let lines = render_file_view_lines(content, &path, Some((2, 4)), &ps, &ts);
         assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn tabs_are_drawn_as_spaces() {
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let text = |line: &Line| -> String { line.iter().map(|span| &*span.content).collect() };
+
+        let lines = render_file_view_lines("\tx\ty\n", &PathBuf::from("a.go"), None, &ps, &ts);
+        assert_eq!(text(&lines[0]), "   1 │     x   y");
+
+        let mut hit = make_hit("a.go", 1, 1, 1.0);
+        hit.preview = "a\tb\n\t\tc\n".to_string();
+        let (lines, _) = render_snippet_lines(&[hit], None, &ps, &ts);
+        assert_eq!(text(&lines[1]), "a   b");
+        assert_eq!(text(&lines[2]), "        c");
+    }
+
+    /// Draw the right panel into a `width` x `height` terminal.
+    fn right_panel(app: &mut App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                app.right_panel_rect = f.area();
+                if app.mode == Mode::FileView {
+                    draw_file_view(f, app, f.area(), Color::Cyan);
+                } else {
+                    draw_snippets(f, app, f.area(), Color::Cyan);
+                }
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    }
+
+    /// App with the cursor on a hit of a file that has these lines.
+    fn file_view_app(lines: Vec<String>, hit_line: usize) -> App {
+        let mut app = test_app(vec![make_hit("notes.md", hit_line, hit_line, 1.0)]);
+        app.mode = Mode::SnippetList;
+        app.file_view_cache = Some(FileViewCache {
+            path: app.absolute_path_for(std::path::Path::new("notes.md")),
+            hl_range: Some((hit_line, hit_line)),
+            lines: lines.into_iter().map(Line::from).collect(),
+            width: 0,
+            row_starts: Vec::new(),
+        });
+        app
+    }
+
+    #[tokio::test]
+    async fn file_view_reaches_every_row_of_wrapped_lines() {
+        let paragraph = |name: &str| format!("{name} {} {name}-end", "lorem ipsum ".repeat(50));
+        let mut lines: Vec<String> = (0..40).map(|i| paragraph(&format!("para{i:02}"))).collect();
+        lines.push("hit".to_string());
+        lines.push(paragraph("last"));
+        let mut app = file_view_app(lines, 41);
+        right_panel(&mut app, 60, 16);
+
+        app.open_file_view();
+        let screen = right_panel(&mut app, 60, 16);
+        assert!(screen.contains("│hit "), "{screen}");
+
+        app.file_view_scroll = usize::MAX;
+        let screen = right_panel(&mut app, 60, 10);
+        assert!(screen.contains("last-end"), "{screen}");
+        assert!(!screen.contains("hit"), "{screen}");
+
+        // Row steps show the part of a line that is taller than the panel.
+        app.file_view_scroll = 0;
+        let mut screens = right_panel(&mut app, 60, 6);
+        for _ in 0..12 {
+            app.file_view_scroll += 1;
+            screens += &right_panel(&mut app, 60, 6);
+        }
+        assert!(screens.contains("para00-end"), "{screens}");
+    }
+
+    #[tokio::test]
+    async fn file_view_keeps_its_top_line_when_the_panel_width_changes() {
+        let lines = (0..200)
+            .map(|i| format!("line{i} {}", "lorem ipsum ".repeat(10)))
+            .collect();
+        let mut app = file_view_app(lines, 101);
+        right_panel(&mut app, 60, 16);
+        app.open_file_view();
+        app.file_view_scroll = app.file_view_cache.as_ref().unwrap().row_starts[100];
+        assert!(right_panel(&mut app, 60, 16).contains("line100 "));
+        assert!(right_panel(&mut app, 30, 16).contains("line100 "));
+    }
+
+    #[tokio::test]
+    async fn file_view_opens_at_a_hit_beyond_u16_lines() {
+        let lines = (1..=70_002).map(|i| format!("line {i}")).collect();
+        let mut app = file_view_app(lines, 70_001);
+        right_panel(&mut app, 40, 20);
+
+        app.open_file_view();
+        let screen = right_panel(&mut app, 40, 20);
+        assert!(screen.contains("line 70001 "), "{screen}");
+
+        app.file_view_scroll = 66_000;
+        let screen = right_panel(&mut app, 40, 20);
+        assert!(screen.contains("line 66001 "), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn selected_snippet_is_visible_below_wrapped_snippets() {
+        let hits = (0..8)
+            .map(|i| {
+                let mut hit = make_hit("notes.md", i * 10 + 1, i * 10 + 5, 1.0);
+                hit.preview = format!("{}\n", "lorem ipsum ".repeat(100));
+                hit
+            })
+            .collect();
+        let mut app = test_app(hits);
+        app.mode = Mode::SnippetList;
+        app.snippet_index = 6;
+        let screen = right_panel(&mut app, 60, 20);
+        assert!(screen.contains("❯ :61-65"), "{screen}");
     }
 
     // ── File Navigation Tests ───────────────────────────────────────────
@@ -2447,10 +2929,16 @@ mod tests {
         assert!(app.active_flash().is_none());
 
         app.flash("hello world");
-        assert_eq!(app.active_flash(), Some("hello world"));
+        assert_eq!(
+            app.active_flash(),
+            Some((FlashKind::Success, "hello world"))
+        );
 
         // Flash is still active (within FLASH_DURATION).
-        assert_eq!(app.active_flash(), Some("hello world"));
+        assert_eq!(
+            app.active_flash(),
+            Some((FlashKind::Success, "hello world"))
+        );
     }
 
     // ── Reset Tests ─────────────────────────────────────────────────────
@@ -2583,21 +3071,6 @@ mod tests {
         );
     }
 
-    // ── FileViewCache Type Sanity ───────────────────────────────────────
-
-    #[test]
-    fn file_view_cache_type_is_used() {
-        // Ensure the type alias compiles and can be constructed.
-        let cache: FileViewCache = (
-            PathBuf::from("test.rs"),
-            Some((10, 20)),
-            vec![Line::from("hello")],
-        );
-        assert_eq!(cache.0, PathBuf::from("test.rs"));
-        assert_eq!(cache.1, Some((10, 20)));
-        assert_eq!(cache.2.len(), 1);
-    }
-
     // ── Rect Hit Testing ────────────────────────────────────────────────
 
     #[test]
@@ -2615,6 +3088,16 @@ mod tests {
         assert!(!rect_contains(r, 10, 4)); // above rect
         assert!(!rect_contains(r, 30, 5)); // right of rect (x+width is exclusive)
         assert!(!rect_contains(r, 10, 15)); // below rect
+    }
+
+    #[test]
+    fn click_selects_the_visible_file_row() {
+        let list = Rect::new(0, 4, 30, 10);
+        assert_eq!(clicked_file(list, 20, 60, 4), None, "top border");
+        assert_eq!(clicked_file(list, 20, 60, 5), Some(20));
+        assert_eq!(clicked_file(list, 20, 60, 12), Some(27));
+        assert_eq!(clicked_file(list, 20, 60, 13), None, "bottom border");
+        assert_eq!(clicked_file(list, 0, 2, 7), None, "below the last file");
     }
 
     #[test]
