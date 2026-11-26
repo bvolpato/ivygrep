@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Search ranks a file such as `src/handler_tests.rs` as a test, like `src/handler_test.rs`. It competed with source files at full weight.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.
