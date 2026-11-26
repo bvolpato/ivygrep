@@ -6,6 +6,8 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
+- The stress fixture download uses its next source when a server requests a long retry delay. Such a delay blocked the scheduled cross-platform run until its time limit, and `E2E Summary` now fails when a platform job is cancelled.
 - `install.sh` names an accelerator archive that it cannot reach instead of reporting it as not available. It also selects the Apple Silicon archive from a shell that runs under Rosetta.
 - `install.sh` reports another `ig` that comes first on `PATH`. It no longer asks to add a directory that is already on `PATH` when `IVYGREP_INSTALL_DIR` ends in `/`.
 - The PowerShell installer keeps its strict mode, error preference, functions, and variables out of the session that runs `irm ... | iex`.
