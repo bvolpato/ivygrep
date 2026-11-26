@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -330,6 +333,108 @@ pub(crate) fn job_status_at(
 
 /// Detail of an enhancement record that names the lane of its worker.
 pub(crate) const WORKER_LANE_DETAIL: &str = "lane";
+
+/// The job record of a worker process. A thread renews it until the worker
+/// stops it, also while the worker waits for a guard or a place.
+pub(crate) struct EnhancementJob {
+    workspace: Workspace,
+    lane: crate::indexer::WorkerLane,
+    nonce: Arc<Mutex<Option<String>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl EnhancementJob {
+    pub(crate) fn start(workspace: &Workspace, lane: crate::indexer::WorkerLane) -> Self {
+        let job = Self {
+            workspace: workspace.clone(),
+            lane,
+            nonce: Arc::new(Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        job.claim();
+        let (workspace, nonce, stop) = (workspace.clone(), job.nonce.clone(), job.stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let nonce = nonce.lock().clone();
+                if let Some(nonce) = nonce {
+                    let update = worker_progress(&workspace);
+                    let _ =
+                        heartbeat_job_if_current(&workspace, JobKind::Enhancement, &nonce, update);
+                }
+            }
+        });
+        job
+    }
+
+    /// Take the record again. The index can be removed, and the record with
+    /// it, while the worker waits for its place.
+    pub(crate) fn claim(&self) {
+        let nonce = start_job(&self.workspace, JobKind::Enhancement, "starting", 1)
+            .ok()
+            .and_then(|record| record.nonce);
+        *self.nonce.lock() = nonce.clone();
+        if let Some(nonce) = nonce {
+            let mut update = JobUpdate::default();
+            update
+                .details
+                .insert(WORKER_LANE_DETAIL.to_string(), self.lane.name().to_string());
+            let _ = heartbeat_job_if_current(&self.workspace, JobKind::Enhancement, &nonce, update);
+        }
+    }
+
+    pub(crate) fn nonce(&self) -> Option<String> {
+        self.nonce.lock().clone()
+    }
+
+    pub(crate) fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Stop without a result, unless another worker took the record.
+    pub(crate) fn abandon(&self, phase: &str) {
+        self.stop();
+        if let Some(nonce) = self.nonce() {
+            let _ =
+                finish_job_if_current(&self.workspace, JobKind::Enhancement, &nonce, phase, None);
+        }
+    }
+}
+
+fn worker_progress(workspace: &Workspace) -> JobUpdate {
+    let read = |path: std::path::PathBuf| {
+        fs::read_to_string(path)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let progress = read(workspace.enhancing_progress_path());
+    let stage = read(workspace.enhancing_phase_path());
+    let paused_reason = read(workspace.enhancing_paused_path());
+    let mut update = JobUpdate {
+        phase: Some(if paused_reason.is_some() {
+            "paused".to_string()
+        } else if progress.is_some() {
+            "running".to_string()
+        } else {
+            "starting".to_string()
+        }),
+        ..Default::default()
+    };
+    for (name, value) in [
+        ("progress", progress),
+        ("stage", stage),
+        ("paused_reason", paused_reason),
+    ] {
+        if let Some(value) = value {
+            update.details.insert(name.to_string(), value);
+        }
+    }
+    update
+}
 
 pub fn process_is_alive(pid: u32, expected_start_time: Option<&str>) -> bool {
     #[cfg(unix)]

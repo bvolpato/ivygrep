@@ -47,8 +47,8 @@ use compression::compress_text;
 pub use compression::{decompress_text, try_decompress_text};
 use enhancement::IndexLock;
 pub(crate) use enhancement::{
-    EnhancementJob, EnhancementSnapshot, EnhancementSuperseded, QUEUED_PHASE, WorkerLane,
-    WorkerStage, admit_worker, free_worker_slots, readmit_for_neural_pass,
+    EnhancementSnapshot, EnhancementSuperseded, QUEUED_PHASE, WorkerLane, WorkerStage,
+    admit_worker, free_worker_slots, readmit_for_neural_pass,
 };
 use git_state::{
     CleanGitCheckout, files_have_same_contents, indexed_git_state_path, record_indexed_git_state,

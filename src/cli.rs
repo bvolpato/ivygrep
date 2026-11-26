@@ -594,8 +594,7 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_hash_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
-        let job =
-            crate::indexer::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Hash);
+        let job = jobs::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Hash);
         // Wait for a place among the running workers before touching stores.
         let Some(_worker_slot) = crate::indexer::admit_worker(
             &workspace,
@@ -662,8 +661,7 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
-        let job =
-            crate::indexer::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Neural);
+        let job = jobs::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Neural);
         // Wait for a place among the running workers before opening stores.
         // The run starts with the hash pass, so only the guards of that pass
         // count here: hash vectors are built on battery too.

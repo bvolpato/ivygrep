@@ -2,14 +2,10 @@
 //! same store incarnation. A separate lock serializes vector writers without
 //! stopping lexical indexing while a model is running or paused.
 use std::fs::{self, File, OpenOptions};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use parking_lot::Mutex;
 
 use super::resources::{EnhancementTier, check_system_constraints};
-use crate::jobs::{self, JobKind, JobUpdate};
 use crate::workspace::Workspace;
 
 pub(crate) struct IndexLock(File);
@@ -213,123 +209,6 @@ pub(crate) fn free_worker_slots(lane: WorkerLane) -> usize {
     (0..crate::config::enhance_max_workers())
         .filter(|index| !matches!(probe_slot(lane, *index), SlotProbe::Held))
         .count()
-}
-
-/// The job record of a worker process. A thread renews it until the worker
-/// stops it, also while the worker waits for a guard or a place.
-pub(crate) struct EnhancementJob {
-    workspace: Workspace,
-    lane: WorkerLane,
-    nonce: Arc<Mutex<Option<String>>>,
-    stop: Arc<AtomicBool>,
-}
-
-impl EnhancementJob {
-    pub(crate) fn start(workspace: &Workspace, lane: WorkerLane) -> Self {
-        let job = Self {
-            workspace: workspace.clone(),
-            lane,
-            nonce: Arc::new(Mutex::new(None)),
-            stop: Arc::new(AtomicBool::new(false)),
-        };
-        job.claim();
-        let (workspace, nonce, stop) = (workspace.clone(), job.nonce.clone(), job.stop.clone());
-        std::thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let nonce = nonce.lock().clone();
-                if let Some(nonce) = nonce {
-                    let update = worker_progress(&workspace);
-                    let _ = jobs::heartbeat_job_if_current(
-                        &workspace,
-                        JobKind::Enhancement,
-                        &nonce,
-                        update,
-                    );
-                }
-            }
-        });
-        job
-    }
-
-    /// Take the record again. The index can be removed, and the record with
-    /// it, while the worker waits for its place.
-    pub(crate) fn claim(&self) {
-        let nonce = jobs::start_job(&self.workspace, JobKind::Enhancement, "starting", 1)
-            .ok()
-            .and_then(|record| record.nonce);
-        *self.nonce.lock() = nonce.clone();
-        if let Some(nonce) = nonce {
-            let mut update = JobUpdate::default();
-            update.details.insert(
-                jobs::WORKER_LANE_DETAIL.to_string(),
-                self.lane.name().to_string(),
-            );
-            let _ = jobs::heartbeat_job_if_current(
-                &self.workspace,
-                JobKind::Enhancement,
-                &nonce,
-                update,
-            );
-        }
-    }
-
-    pub(crate) fn nonce(&self) -> Option<String> {
-        self.nonce.lock().clone()
-    }
-
-    pub(crate) fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-
-    /// Stop without a result, unless another worker took the record.
-    pub(crate) fn abandon(&self, phase: &str) {
-        self.stop();
-        if let Some(nonce) = self.nonce() {
-            let _ = jobs::finish_job_if_current(
-                &self.workspace,
-                JobKind::Enhancement,
-                &nonce,
-                phase,
-                None,
-            );
-        }
-    }
-}
-
-fn worker_progress(workspace: &Workspace) -> JobUpdate {
-    let read = |path: std::path::PathBuf| {
-        fs::read_to_string(path)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    let progress = read(workspace.enhancing_progress_path());
-    let stage = read(workspace.enhancing_phase_path());
-    let paused_reason = read(workspace.enhancing_paused_path());
-    let mut update = JobUpdate {
-        phase: Some(if paused_reason.is_some() {
-            "paused".to_string()
-        } else if progress.is_some() {
-            "running".to_string()
-        } else {
-            "starting".to_string()
-        }),
-        ..Default::default()
-    };
-    for (name, value) in [
-        ("progress", progress),
-        ("stage", stage),
-        ("paused_reason", paused_reason),
-    ] {
-        if let Some(value) = value {
-            update.details.insert(name.to_string(), value);
-        }
-    }
-    update
 }
 
 /// What a worker reports while it waits for a place, through the phase file
