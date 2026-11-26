@@ -398,14 +398,9 @@ jobs:
             echo "| Windows x86_64 (neural CPU) | $WINDOWS_RESULT |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # A job that exceeds its timeout has the result "cancelled".
       - name: Check for failures
-        if: >-
-          needs.native-linux-x86_64.result == 'failure' ||
-          needs.native-macos-arm64.result == 'failure' ||
-          needs.native-macos-intel.result == 'failure' ||
-          needs.cross-linux-aarch64.result == 'failure' ||
-          needs.hash-only-linux.result == 'failure' ||
-          needs.native-windows-x86_64.result == 'failure'
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: |
-          echo "❌ One or more E2E jobs failed!"
+          echo "❌ One or more E2E jobs failed or were cancelled!"
           exit 1
