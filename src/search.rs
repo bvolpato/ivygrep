@@ -5133,11 +5133,6 @@ fn filter_meaningful_scores_with_query(
 ) -> Vec<RankedCandidate> {
     let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
     let query_tokens = query.tokens.as_slice();
-    let secondary_intent = query.secondary_intent;
-    let implementation_intent = query_targets_implementation(query_tokens);
-    let raw_terms = raw_query_terms(query.text);
-    let short_literal_lookup =
-        !raw_terms.is_empty() && raw_terms.len() <= 2 && !query.location_intent;
     if ranked.is_empty() {
         return vec![];
     }
@@ -5147,29 +5142,19 @@ fn filter_meaningful_scores_with_query(
     if !has_direct_candidate {
         return filter_semantic_only_scores(ranked, query, precise_query);
     }
-    let floor_ceiling = direct_candidate_authority_ceiling(&ranked, query_tokens, secondary_intent);
+    let gate = AuthorityGate::new(&ranked, query);
 
     if ranked.len() == 1 {
-        let item = &ranked[0];
-        if direct_candidate_has_enough_authority(
-            &item.chunk,
-            item.sources,
-            query_tokens,
-            precise_query,
-            secondary_intent,
-            implementation_intent,
-            short_literal_lookup,
-            floor_ceiling,
-        ) {
+        if gate.admits(&ranked[0]) {
             return ranked;
         }
         return vec![];
     }
 
     // Adaptive threshold: start from score distribution, then clamp against
-    // the best result. Low-authority files are suppressed unless the query is
-    // an exact identifier/path-style lookup with a verified literal hit; this
-    // avoids fixture/data/vendor junk leaking into high-confidence advice.
+    // the best result. Low-authority files are suppressed unless nothing better
+    // matched (see `AuthorityGate`); this avoids fixture/data/vendor junk leaking
+    // into high-confidence advice.
     let mean = ranked.iter().map(|item| item.score).sum::<f32>() / ranked.len() as f32;
     let variance = ranked
         .iter()
@@ -5179,28 +5164,11 @@ fn filter_meaningful_scores_with_query(
     let stddev = variance.sqrt();
     let adaptive_threshold = (mean - stddev).max(best_score * 0.35).max(0.010);
 
-    let candidate_authority = |chunk: &IndexedChunk, sources: SourceMask| -> (f32, f32) {
-        let path_lower = lower_index_path(&chunk.file_path);
-        let authority =
-            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
-        let mut authority_floor = recommendation_authority_floor(
-            sources,
-            precise_query,
-            secondary_intent,
-            implementation_intent,
-            short_literal_lookup,
-        );
-        if candidate_may_relax_authority_floor(path_lower.as_ref()) {
-            authority_floor = authority_floor.min(floor_ceiling);
-        }
-        (authority, authority_floor)
-    };
     let mut fallback = None;
     let mut filtered = Vec::new();
     let mut backfill = Vec::new();
     for (index, item) in ranked.into_iter().enumerate() {
-        let (authority, authority_floor) = candidate_authority(&item.chunk, item.sources);
-        let enough_authority = authority >= authority_floor;
+        let enough_authority = gate.admits(&item);
         let strong_path_match = has_path_source(item.sources)
             && file_stem_boost(query_tokens, &ChunkBoostContext::new(&item.chunk)) >= 0.5;
         let meaningful = if strong_path_match {
@@ -5327,13 +5295,7 @@ fn dense_promotion_test<'a>(
     ranked: &[RankedCandidate],
     query: &'a FusionQuery<'_>,
 ) -> impl Fn(&RankedCandidate) -> bool + 'a {
-    let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
-    let implementation_intent = query_targets_implementation(&query.tokens);
-    let raw_terms = raw_query_terms(query.text);
-    let short_literal_lookup =
-        !raw_terms.is_empty() && raw_terms.len() <= 2 && !query.location_intent;
-    let floor_ceiling =
-        direct_candidate_authority_ceiling(ranked, &query.tokens, query.secondary_intent);
+    let gate = AuthorityGate::new(ranked, query);
     let role_authority = |item: &RankedCandidate| {
         file_authority_score_for_path(lower_index_path(&item.chunk.file_path).as_ref())
     };
@@ -5342,19 +5304,7 @@ fn dense_promotion_test<'a>(
         .filter(|item| has_direct_source(item.sources))
         .map(role_authority)
         .fold(0.0f32, f32::max);
-    move |item| {
-        role_authority(item) >= best_role_authority
-            && direct_candidate_has_enough_authority(
-                &item.chunk,
-                item.sources,
-                &query.tokens,
-                precise_query,
-                query.secondary_intent,
-                implementation_intent,
-                short_literal_lookup,
-                floor_ceiling,
-            )
-    }
+    move |item| role_authority(item) >= best_role_authority && gate.admits(item)
 }
 
 fn has_direct_source(sources: SourceMask) -> bool {
@@ -5371,36 +5321,106 @@ fn has_path_source(sources: SourceMask) -> bool {
     sources & SOURCE_PATH != 0
 }
 
-#[allow(clippy::too_many_arguments)]
-fn direct_candidate_has_enough_authority(
-    chunk: &IndexedChunk,
-    sources: SourceMask,
-    query_tokens: &[String],
+/// Decides which candidates of one result list have enough authority to return.
+struct AuthorityGate<'a> {
+    query_tokens: &'a [String],
     precise_query: bool,
     secondary_intent: bool,
     implementation_intent: bool,
     short_literal_lookup: bool,
-    floor_ceiling: f32,
-) -> bool {
-    let path_lower = lower_index_path(&chunk.file_path);
-    let authority =
-        effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
-    let mut floor = recommendation_authority_floor(
-        sources,
-        precise_query,
-        secondary_intent,
-        implementation_intent,
-        short_literal_lookup,
-    );
-    if candidate_may_relax_authority_floor(path_lower.as_ref()) {
-        floor = floor.min(floor_ceiling);
+    ceiling: AuthorityCeiling,
+    /// Exact sources of a one-term lookup that no candidate above the floor has.
+    exact_sources: SourceMask,
+    /// Lowercased one-term query. The file it names is never suppressed.
+    named_path: Option<&'a str>,
+}
+
+impl<'a> AuthorityGate<'a> {
+    fn new(ranked: &[RankedCandidate], query: &'a FusionQuery<'_>) -> Self {
+        let query_tokens = query.tokens.as_slice();
+        let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
+        let raw_terms = raw_query_terms(query.text);
+        let mut gate = Self {
+            query_tokens,
+            precise_query,
+            secondary_intent: query.secondary_intent,
+            implementation_intent: query_targets_implementation(query_tokens),
+            short_literal_lookup: !raw_terms.is_empty()
+                && raw_terms.len() <= 2
+                && !query.location_intent,
+            ceiling: direct_candidate_authority_ceiling(
+                ranked,
+                query_tokens,
+                query.secondary_intent,
+            ),
+            exact_sources: 0,
+            named_path: None,
+        };
+        if !query.text.contains(char::is_whitespace) {
+            gate.named_path = Some(query.lower.as_str());
+            if precise_query {
+                gate.exact_sources = gate.exact_sources_below_the_floor(ranked);
+            }
+        }
+        gate
     }
-    authority >= floor
+
+    /// An identifier lookup must not hide the only definition of the identifier,
+    /// or the only files that contain it, because of where they are. Copies stay
+    /// hidden while a candidate with enough authority has the same evidence.
+    fn exact_sources_below_the_floor(&self, ranked: &[RankedCandidate]) -> SourceMask {
+        let mut sources = SOURCE_EXACT_SYMBOL | SOURCE_LITERAL;
+        for item in ranked {
+            if item.sources & sources != 0 && self.admits(item) {
+                sources &= !item.sources;
+                if item.sources & SOURCE_EXACT_SYMBOL != 0 {
+                    return 0;
+                }
+            }
+        }
+        sources
+    }
+
+    fn admits(&self, item: &RankedCandidate) -> bool {
+        let path_lower = lower_index_path(&item.chunk.file_path);
+        let is_named = self.named_path.is_some_and(|name| {
+            path_lower
+                .strip_suffix(name)
+                .is_some_and(|parent| parent.is_empty() || parent.ends_with('/'))
+        });
+        if is_named || item.sources & self.exact_sources != 0 {
+            return true;
+        }
+        let authority = effective_authority_score_for_path(
+            self.query_tokens,
+            path_lower.as_ref(),
+            self.secondary_intent,
+        );
+        let mut floor = recommendation_authority_floor(
+            item.sources,
+            self.precise_query,
+            self.secondary_intent,
+            self.implementation_intent,
+            self.short_literal_lookup,
+        );
+        if file_authority_score_for_path(path_lower.as_ref()) >= self.ceiling.min_role {
+            floor = floor.min(self.ceiling.authority);
+        }
+        authority >= floor
+    }
+}
+
+/// Upper bound of the authority floor for candidates whose base authority is at
+/// least `min_role`.
+#[derive(Clone, Copy)]
+struct AuthorityCeiling {
+    authority: f32,
+    min_role: f32,
 }
 
 /// Lowest base authority a candidate may have for the corpus-relative floor
 /// to adapt to it. Generated, data, and vendored paths stay below this bound
-/// and are still suppressed when nothing better matched.
+/// and are suppressed while a candidate above it matched.
 const RELAXABLE_AUTHORITY_ROLE_SCORE: f32 = 0.45;
 
 /// Upper bound for the recommendation authority floor given what actually
@@ -5410,53 +5430,72 @@ const RELAXABLE_AUTHORITY_ROLE_SCORE: f32 = 0.45;
 /// every direct hit is `Documentation` (0.5) and a fixed floor returns nothing.
 /// The floor therefore never exceeds the best authority among direct
 /// candidates whose path role is at least documentation-grade, and when
-/// documentation dominates the direct hits, documentation passes. Repositories
-/// with primary-source hits keep the static floors unchanged.
+/// documentation dominates the direct hits, documentation passes. A repository of
+/// configuration files, or a scope inside a vendored tree, has no such candidate
+/// either: the best role that matched passes. Repositories with primary-source
+/// hits keep the static floors unchanged.
 fn direct_candidate_authority_ceiling(
     ranked: &[RankedCandidate],
     query_tokens: &[String],
     secondary_intent: bool,
-) -> f32 {
+) -> AuthorityCeiling {
+    let static_floors = AuthorityCeiling {
+        authority: f32::MAX,
+        min_role: RELAXABLE_AUTHORITY_ROLE_SCORE,
+    };
     let mut best_relaxable_authority = 0.0f32;
     let mut lowest_documentation_authority = f32::MAX;
+    let mut best_low_role = 0.0f32;
+    let mut lowest_low_authority = f32::MAX;
     let mut direct = 0usize;
     let mut documentation = 0usize;
     for item in ranked.iter().filter(|item| has_direct_source(item.sources)) {
         direct += 1;
         let path_lower = lower_index_path(&item.chunk.file_path);
+        let role_authority = file_authority_score_for_path(path_lower.as_ref());
+        let authority =
+            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
+        if role_authority < RELAXABLE_AUTHORITY_ROLE_SCORE {
+            if role_authority > best_low_role {
+                best_low_role = role_authority;
+                lowest_low_authority = authority;
+            } else if role_authority == best_low_role {
+                lowest_low_authority = lowest_low_authority.min(authority);
+            }
+            continue;
+        }
         let role = path_role(path_lower.as_ref());
         if role == PathRole::PrimarySource {
             // Implementation code matched: the static floors apply unchanged.
-            return f32::MAX;
+            return static_floors;
         }
-        if !candidate_may_relax_authority_floor(path_lower.as_ref()) {
-            continue;
-        }
-        let authority =
-            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
         best_relaxable_authority = best_relaxable_authority.max(authority);
         if role == PathRole::Documentation {
             documentation += 1;
             lowest_documentation_authority = lowest_documentation_authority.min(authority);
         }
     }
-    if direct == 0 || best_relaxable_authority <= 0.0 {
-        return f32::MAX;
+    if best_relaxable_authority <= 0.0 {
+        return if best_low_role > 0.0 {
+            AuthorityCeiling {
+                authority: lowest_low_authority,
+                min_role: best_low_role,
+            }
+        } else {
+            static_floors
+        };
     }
-    if documentation * 2 > direct {
-        // Notes and docs are the corpus here; keep all of them eligible.
-        return lowest_documentation_authority.min(best_relaxable_authority);
+    // Generated, data, and vendored candidates keep the static floor even when a
+    // deeply nested documentation candidate pulls the ceiling under their score.
+    AuthorityCeiling {
+        authority: if documentation * 2 > direct {
+            // Notes and docs are the corpus here; keep all of them eligible.
+            lowest_documentation_authority.min(best_relaxable_authority)
+        } else {
+            best_relaxable_authority
+        },
+        ..static_floors
     }
-    best_relaxable_authority
-}
-
-/// Whether a candidate's path role is documentation-grade or better, i.e.
-/// eligible for the corpus-relative floor. Generated, data, and vendored paths
-/// never are: they keep the static floor even when the ceiling drops below
-/// their base score (a deeply nested documentation candidate can pull the
-/// ceiling under 0.45).
-fn candidate_may_relax_authority_floor(path_lower: &str) -> bool {
-    file_authority_score_for_path(path_lower) >= RELAXABLE_AUTHORITY_ROLE_SCORE
 }
 
 fn recommendation_authority_floor(
@@ -5967,14 +6006,13 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
 
 fn file_authority_score_for_path(path: &str) -> f32 {
     // Prefer project code over vendored and generated trees.
-    if path.contains("vendor/")
-        || path.contains("node_modules/")
-        || path.contains("__pycache__/")
-        || path.contains(".git/")
-        || path.contains("target/")
-        || path.contains("dist/")
-        || path.contains("build/")
-    {
+    let directories = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if directories.split('/').any(|directory| {
+        matches!(
+            directory,
+            "vendor" | "node_modules" | "__pycache__" | ".git" | "target" | "dist" | "build"
+        )
+    }) {
         return 0.2;
     }
 
@@ -11692,6 +11730,83 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
+    fn low_authority_files_answer_when_nothing_better_matched() {
+        // Data files are below every static floor. They must not be filtered to
+        // an empty result, however deep they are, while a generated or vendored
+        // file that matched beside them stays out.
+        let limits = make_chunk_with_path("limits", "infra/limits.json", "memory limit");
+        let chart = make_chunk_with_path("chart", "a/b/c/d/e/f/values.yaml", "memory limit");
+        let vendored = make_chunk_with_path("vendored", "vendor/limits.rs", "memory limit");
+        let ranked = make_ranked_with_chunks(&[
+            (vendored.clone(), 0.9, &["lexical"]),
+            (chart, 0.8, &["lexical"]),
+            (limits, 0.8, &["lexical"]),
+        ]);
+        let ids = |ranked, query| {
+            filter_meaningful_scores(ranked, query)
+                .into_iter()
+                .map(|(chunk, _, _)| chunk.chunk_id)
+                .collect::<Vec<_>>()
+        };
+        let query = "memory limit per namespace";
+        assert_eq!(ids(ranked, query), ["chart", "limits"]);
+        let ranked = make_ranked_with_chunks(&[(vendored, 0.9, &["lexical"])]);
+        assert_eq!(ids(ranked, query), ["vendored"]);
+    }
+
+    #[test]
+    fn identifier_lookup_reaches_the_only_definition_in_a_low_authority_tree() {
+        let definition = make_chunk_with_path(
+            "definition",
+            "src/build/planner.rs",
+            "struct CrimsonPlanner;",
+        );
+        let usage = make_chunk_with_path("usage", "src/main.rs", "CrimsonPlanner::new()");
+        let copy = make_chunk_with_path("copy", "vendor/planner.rs", "struct CrimsonPlanner;");
+        let source = make_chunk_with_path("source", "src/planner.rs", "struct CrimsonPlanner;");
+        let exact: &[&str] = &["exact-symbol", "literal", "lexical"];
+        let ids = |ranked: &[(IndexedChunk, f32, &[&str])], query| {
+            filter_meaningful_scores(make_ranked_with_chunks(ranked), query)
+                .into_iter()
+                .map(|(chunk, _, _)| chunk.chunk_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(
+                &[
+                    (usage.clone(), 0.9, &["literal", "lexical"]),
+                    (definition.clone(), 0.5, exact),
+                ],
+                "CrimsonPlanner"
+            ),
+            ["usage", "definition"]
+        );
+        assert_eq!(
+            ids(
+                &[
+                    (source, 0.9, exact),
+                    (usage, 0.8, &["literal"]),
+                    (copy, 0.5, exact)
+                ],
+                "CrimsonPlanner"
+            ),
+            ["source", "usage"],
+            "a vendored copy must stay hidden beside the source"
+        );
+        let mention = make_chunk_with_path("mention", "src/plan.rs", "src build planner rs");
+        assert_eq!(
+            ids(
+                &[
+                    (mention, 0.9, &["lexical"]),
+                    (definition, 0.8, &["path", "lexical"]),
+                ],
+                "src/build/planner.rs"
+            ),
+            ["mention", "definition"]
+        );
+    }
+
+    #[test]
     fn filter_keeps_doc_literal_when_nothing_more_authoritative_matched() {
         // A corpus of notes, or a question only notes answer, has no
         // implementation files to prefer. Returning nothing hides a real
@@ -12316,6 +12431,27 @@ export function registerCommands(p: Plugin) {
             file_authority_score(&src_bctx) > file_authority_score(&vendor_bctx),
             "src should rank above vendor"
         );
+    }
+
+    #[test]
+    fn vendored_and_build_trees_are_whole_directory_names() {
+        for path in [
+            "vendor/dep/lib.rs",
+            "web/node_modules/pkg/index.js",
+            "target/debug/out.rs",
+            "pkg/dist/bundle.js",
+            "build/out.js",
+        ] {
+            assert_eq!(file_authority_score_for_path(path), 0.2, "{path}");
+        }
+        for path in [
+            "internal/js/esbuild/batch.go",
+            "src/rebuild/mod.rs",
+            "src/retarget/mod.rs",
+            "src/build",
+        ] {
+            assert_eq!(file_authority_score_for_path(path), 1.0, "{path}");
+        }
     }
 
     #[test]
