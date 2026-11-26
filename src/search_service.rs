@@ -137,8 +137,8 @@ pub(crate) struct WorkspaceHits {
 }
 
 impl WorkspaceHits {
-    /// Adds the hits of one workspace. With absolute paths, a live span that an
-    /// overlapping workspace already returned is kept once, with its best score.
+    /// Adds the hits of one workspace. With absolute paths, a live span from two
+    /// overlapping workspaces is kept once, with its best score.
     pub(crate) fn add(
         &mut self,
         workspace_root: &Path,
