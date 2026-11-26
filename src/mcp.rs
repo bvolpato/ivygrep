@@ -2141,14 +2141,15 @@ fn local_context_pack(
     Ok(serde_json::to_value(bundle)?)
 }
 
-/// Hit budget requested from the search layer for one hits-mode call.
+/// Hit budget requested from the search layer for `file_limit` result files.
+/// The CLI uses the enumerating budget.
 ///
 /// Ranked modes return score-ordered chunks spread across files, so a small
 /// multiple of `file_limit` fills the file list; the floor matches the CLI
 /// default so the default MCP call costs the same as `ig <query>`. Enumerating
 /// modes can cluster many hits per file. Literal search uses the budget for
 /// counting matching files and bounding previews across the displayed results.
-fn hits_mode_hit_budget(file_limit: usize, ranked_mode: bool) -> usize {
+pub(crate) fn hits_mode_hit_budget(file_limit: usize, ranked_mode: bool) -> usize {
     let budget = if ranked_mode {
         file_limit
             .saturating_mul(RANKED_HIT_OVERFETCH)

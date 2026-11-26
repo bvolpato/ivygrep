@@ -4,6 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `-n` limits result files, not matches, in CLI regex, reference, and caller searches. One file with many matches could use the whole limit. These searches read 20 matches per requested file, from 200 to 1,000 in total, so a file with more matches can still hide later files.
+- A hybrid search that finds more chunks than its limit keeps the best chunk of each file before further chunks of a kept file.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.

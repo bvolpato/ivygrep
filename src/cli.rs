@@ -1536,6 +1536,16 @@ async fn run_remove(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Hits to request for a file limit when a search enumerates matches. One dense
+/// file can hold many of them; rendering keeps the limit on files. Ranked searches
+/// keep the limit itself, because their candidate depth follows it.
+fn enumerating_hit_limit(file_limit: Option<usize>) -> Option<usize> {
+    file_limit.map(|files| match files {
+        usize::MAX => usize::MAX,
+        files => crate::mcp::hits_mode_hit_budget(files, false),
+    })
+}
+
 async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
     let query = cli
         .query
@@ -1994,7 +2004,11 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             crate::symbols::SymbolSearchMode::Callers
         };
         let options = SearchOptions {
-            limit,
+            limit: if cli.symbol {
+                limit
+            } else {
+                enumerating_hit_limit(limit)
+            },
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2086,10 +2100,16 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         file_results = Some(files);
         Vec::new()
     } else if cli.regex {
+        // Filename-only regex search limits files itself.
+        let hit_limit = if cli.file_name_only {
+            limit
+        } else {
+            enumerating_hit_limit(limit)
+        };
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
-            limit,
+            limit: hit_limit,
             file_name_only: cli.file_name_only,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
@@ -2100,7 +2120,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             skip_gitignore: cli.skip_gitignore,
         };
         let local_options = SearchOptions {
-            limit,
+            limit: hit_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),

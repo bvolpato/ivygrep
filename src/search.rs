@@ -11776,6 +11776,29 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
+    fn result_limit_keeps_the_best_chunk_of_each_file_first() {
+        let ranked = ["a1", "a2", "a3", "b1", "a4", "c1"]
+            .map(|id| {
+                let chunk = make_chunk_with_path(id, &format!("src/{}.rs", &id[..1]), "fn x() {}");
+                (chunk, 1.0, vec!["lexical".to_string()])
+            })
+            .to_vec();
+        for (limit, expected) in [
+            (2, &["a1", "b1"][..]),
+            (4, &["a1", "a2", "b1", "c1"]),
+            (6, &["a1", "a2", "a3", "b1", "a4", "c1"]),
+        ] {
+            let mut kept = ranked_candidates_from_tuples(ranked.clone());
+            fusion::truncate_files_first(&mut kept, limit);
+            let ids = kept
+                .iter()
+                .map(|item| item.chunk.chunk_id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, expected);
+        }
+    }
+
+    #[test]
     fn backfill_requires_ten_distinct_candidate_files() {
         let ranked = (0..12)
             .map(|index| {

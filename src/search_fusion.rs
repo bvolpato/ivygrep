@@ -220,6 +220,32 @@ pub(super) fn fuse_dense_file_order(
     });
 }
 
+/// Keeps `limit` candidates in order. The best candidate of a file counts before
+/// further candidates of a kept file, so one dense file cannot use up the limit.
+pub(super) fn truncate_files_first(ranked: &mut Vec<RankedCandidate>, limit: usize) {
+    if ranked.len() <= limit {
+        return;
+    }
+    let mut files = HashSet::new();
+    let distinct = ranked
+        .iter()
+        .filter(|item| files.insert(path_key(&item.chunk.file_path)))
+        .count();
+    let mut best = distinct.min(limit);
+    let mut further = limit - best;
+    files.clear();
+    ranked.retain(|item| {
+        let budget = if files.insert(path_key(&item.chunk.file_path)) {
+            &mut best
+        } else {
+            &mut further
+        };
+        let keep = *budget > 0;
+        *budget -= usize::from(keep);
+        keep
+    });
+}
+
 pub(super) fn fuse_rrf_with_context(
     ctx: Option<&SearchContext>,
     candidates: FusionCandidates,
@@ -935,7 +961,7 @@ pub(super) fn fuse_rrf_with_context(
     };
 
     if let Some(limit) = limit {
-        filtered.truncate(limit);
+        truncate_files_first(&mut filtered, limit);
     }
     tracing::trace!(
         "fuse_filter={:?} results={}",
