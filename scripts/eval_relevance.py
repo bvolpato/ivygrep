@@ -425,10 +425,10 @@ def main() -> int:
                 deep_recall = relevant_recall(deep_output.paths, case.judgments)
                 audit_hits["hybrid-deep"] = len(deep_output.paths)
                 audit_path_union = set(paths) | set(deep_output.paths)
-                source_runs = {
-                    "lexical": ["--lexical-only"],
-                    "literal": ["--literal"],
-                }
+                source_runs = {"lexical": ["--lexical-only"]}
+                # Literal mode rejects text that spans lines.
+                if "\n" not in case.query.strip():
+                    source_runs["literal"] = ["--literal"]
                 candidate_audit_sources = []
                 source_recalls = {
                     "final": candidate_recall,
