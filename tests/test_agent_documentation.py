@@ -93,8 +93,8 @@ class AgentDocumentationTest(unittest.TestCase):
 
     def test_installers_verify_release_checksums_and_configure_path(self) -> None:
         self.assertIn(".sha256", self.unix_installer)
-        self.assertIn("sha256sum -c", self.unix_installer)
-        self.assertIn("shasum -a 256 -c", self.unix_installer)
+        self.assertIn("sha256sum <", self.unix_installer)
+        self.assertIn("shasum -a 256 <", self.unix_installer)
         self.assertIn("IVYGREP_INSTALL_DIR", self.unix_installer)
         self.assertIn("IVYGREP_ACCELERATOR", self.unix_installer)
         self.assertIn("linux-x86_64-cuda", self.unix_installer)
