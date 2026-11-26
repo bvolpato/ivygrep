@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` names an accelerator archive that it cannot reach instead of reporting it as not available. It also selects the Apple Silicon archive from a shell that runs under Rosetta.
+- `install.sh` reports another `ig` that comes first on `PATH`. It no longer asks to add a directory that is already on `PATH` when `IVYGREP_INSTALL_DIR` ends in `/`.
+- The PowerShell installer keeps its strict mode, error preference, functions, and variables out of the session that runs `irm ... | iex`.
+
+### Security
+
+- `install.sh` compares SHA-256 digests directly. The `sha256sum -c` of macOS accepts an empty or malformed checksum file, so the installer could install an archive that it did not verify.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.

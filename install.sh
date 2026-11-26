@@ -3,6 +3,9 @@ set -eu
 
 repository="bvolpato/ivygrep"
 install_dir="${IVYGREP_INSTALL_DIR:-$HOME/.local/bin}"
+case "$install_dir" in
+    ?*/) install_dir="${install_dir%/}" ;;
+esac
 version="${IVYGREP_VERSION:-latest}"
 accelerator="${IVYGREP_ACCELERATOR:-auto}"
 local_archive="${IVYGREP_INSTALL_ARCHIVE:-}"
@@ -43,6 +46,11 @@ esac
 
 os="$(uname -s)"
 arch="$(uname -m)"
+# A shell under Rosetta reports x86_64 on Apple Silicon.
+if [ "$os-$arch" = "Darwin-x86_64" ] &&
+    [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
+    arch="arm64"
+fi
 case "$os-$arch" in
     Linux-x86_64) target="linux-x86_64-musl" ;;
     Linux-aarch64 | Linux-arm64) target="linux-aarch64-musl" ;;
@@ -115,8 +123,16 @@ missing_cuda_libraries() {
     printf '%s' "$missing"
 }
 
-asset_exists() {
-    curl -fsI "$base_url/$1" >/dev/null 2>&1
+# Prints why a release asset cannot be used, or nothing when it exists.
+asset_problem() {
+    if ! status="$(curl -sSI -o /dev/null -w '%{http_code}' "$base_url/$1")"; then
+        echo "not reachable"
+        return
+    fi
+    case "$status" in
+        404 | 410) echo "not available" ;;
+        4?? | 5??) echo "not reachable (HTTP $status)" ;;
+    esac
 }
 
 accelerator_target=""
@@ -214,13 +230,14 @@ fi
 
 if [ -n "$accelerator_target" ]; then
     accelerator_archive="ivygrep-$tag-$accelerator_target.tar.gz"
-    if asset_exists "$accelerator_archive"; then
+    problem="$(asset_problem "$accelerator_archive")"
+    if [ -z "$problem" ]; then
         target="$accelerator_target"
         echo "ivygrep installer: selected $accelerator_label archive ($target)"
     elif [ "$accelerator" = "auto" ]; then
-        echo "ivygrep installer: $accelerator_label archive not available for $tag; using $target"
+        echo "ivygrep installer: $accelerator_label archive $problem for $tag; using $target"
     else
-        echo "ivygrep installer: requested $accelerator_label archive is not available for $tag" >&2
+        echo "ivygrep installer: requested $accelerator_label archive is $problem for $tag" >&2
         exit 1
     fi
 fi
@@ -249,17 +266,25 @@ else
     curl -fsSL "$base_url/$archive.sha256" -o "$tmp_dir/$archive.sha256"
 fi
 
-(
-    cd "$tmp_dir"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum -c "$archive.sha256"
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 -c "$archive.sha256"
-    else
-        echo "ivygrep installer: sha256sum or shasum is required" >&2
-        exit 1
-    fi
-)
+# The macOS sha256sum -c exits 0 when no line contains a valid checksum, so the
+# digests are compared here.
+if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum <"$tmp_dir/$archive")"
+elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 <"$tmp_dir/$archive")"
+else
+    echo "ivygrep installer: sha256sum or shasum is required" >&2
+    exit 1
+fi
+actual="${actual%% *}"
+expected=""
+read -r expected _ <"$tmp_dir/$archive.sha256" || true
+expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
+if [ "${#actual}" -ne 64 ] || [ "$actual" != "$expected" ]; then
+    echo "ivygrep installer: SHA-256 verification failed for $archive" >&2
+    exit 1
+fi
+echo "ivygrep installer: verified SHA-256 of $archive"
 
 tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
 mkdir -p "$install_dir"
@@ -273,8 +298,14 @@ echo "Installed ivygrep $tag to $install_dir/ig"
 "$install_dir/ig" --version
 
 case ":${PATH:-}:" in
-    *":$install_dir:"*) ;;
+    *":$install_dir:"* | *":$install_dir/:"*) ;;
     *)
         echo "Add $install_dir to PATH to run ig from any shell."
         ;;
 esac
+
+active="$(command -v ig || true)"
+if [ -n "$active" ] && [ "$active" != "$install_dir/ig" ] &&
+    ! cmp -s "$active" "$install_dir/ig"; then
+    echo "Another ig comes first on PATH: $active. Put $install_dir before it to run this version."
+fi
