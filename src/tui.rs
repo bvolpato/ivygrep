@@ -485,7 +485,7 @@ impl App {
             self.mode = Mode::FileList;
         }
         self.queue_search();
-        self.transition_after_search = true;
+        self.transition_after_search = self.mode == Mode::Search;
     }
 
     /// Apply a key to the input box.
@@ -2383,6 +2383,18 @@ mod tests {
             PathBuf::from("new.rs"),
             "the list must hold the new results"
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_search_keeps_an_open_snippet() {
+        let mut app = test_app(vec![make_hit("a.rs", 1, 5, 1.0)]);
+        app.last_query = Some("tax".to_string());
+        app.input = Input::from("tax");
+        app.submit_query();
+        assert_eq!(app.mode, Mode::FileList);
+        app.mode = Mode::SnippetList;
+        app.finish_search(Ok(outcome(vec![make_hit("a.rs", 1, 5, 1.0)])));
+        assert_eq!(app.mode, Mode::SnippetList);
     }
 
     #[tokio::test]
