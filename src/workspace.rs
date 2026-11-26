@@ -1601,7 +1601,7 @@ fn comparable_git_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn git_dir_from_marker(dir: &Path, marker: &Path) -> Option<PathBuf> {
+pub(crate) fn git_dir_from_marker(dir: &Path, marker: &Path) -> Option<PathBuf> {
     // The path can have bytes that are not UTF-8.
     let contents = fs::read(marker).ok()?;
     let raw_git_dir =

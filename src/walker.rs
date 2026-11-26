@@ -50,7 +50,10 @@ pub(crate) fn source_walker_scoped(
                 // The walk calls this for a directory before its entries. Most
                 // workspaces need no lock, because no directory needs the rules.
                 if !needs_enclosing_rules.load(Ordering::Relaxed) {
-                    if is_dir && repository_boundary(entry.path()) == Some(false) {
+                    if is_dir
+                        && (repository_boundary(entry.path()) == Some(false)
+                            || submodule_exclude(entry.path()).is_some())
+                    {
                         needs_enclosing_rules.store(true, Ordering::Relaxed);
                     }
                     return false;
@@ -105,9 +108,22 @@ fn repository_boundary(dir: &Path) -> Option<bool> {
         .then(|| crate::workspace::is_git_workspace_root(dir))
 }
 
-/// Git rules below a directory with a `.git` or `.jj` entry that is not a
-/// repository, such as a worktree whose repository moved. The `ignore` crate
-/// stops Git rules there. In Git, the rules of the enclosing repository apply.
+/// `info/exclude` of a checkout whose Git directory is elsewhere, such as a
+/// submodule. The `ignore` crate does not read it.
+fn submodule_exclude(dir: &Path) -> Option<PathBuf> {
+    let marker = dir.join(".git");
+    if !marker.is_file() {
+        return None;
+    }
+    crate::workspace::git_dir_from_marker(dir, &marker)
+        .map(|git_dir| git_dir.join("info/exclude"))
+        .filter(|exclude| exclude.is_file())
+}
+
+/// Git rules that the `ignore` crate does not apply. It stops Git rules at a
+/// directory with a `.git` or `.jj` entry that is not a repository, such as a
+/// worktree whose repository moved. In Git, the rules of the enclosing
+/// repository apply there. It also does not read `info/exclude` of a submodule.
 ///
 /// These rules only hide more: below such a directory, a `!` rule of the
 /// enclosing repository does not override the global ignore file or an
@@ -116,6 +132,8 @@ struct EnclosingGitRules {
     root: PathBuf,
     /// The `repository_boundary` of each directory below `root`.
     boundaries: HashMap<PathBuf, Option<bool>>,
+    /// The `submodule_exclude` of each repository below `root`.
+    excludes: HashMap<PathBuf, Option<PathBuf>>,
     /// For each enclosing repository.
     matchers: HashMap<PathBuf, ignore::IncrementalIgnore>,
 }
@@ -126,6 +144,7 @@ impl EnclosingGitRules {
         (!skip_gitignore && crate::workspace::is_git_workspace_root(root)).then(|| Self {
             root: root.to_path_buf(),
             boundaries: HashMap::new(),
+            excludes: HashMap::new(),
             matchers: HashMap::new(),
         })
     }
@@ -149,14 +168,22 @@ impl EnclosingGitRules {
             }
             stops_early |= boundary.is_some();
         }
-        if !stops_early {
+        let exclude = if repository == Path::new("") {
+            None
+        } else {
+            self.excludes
+                .entry(repository.to_path_buf())
+                .or_insert_with(|| submodule_exclude(&self.root.join(repository)))
+                .as_deref()
+        };
+        if !stops_early && exclude.is_none() {
             return None;
         }
         let matcher = self
             .matchers
             .entry(repository.to_path_buf())
             .or_insert_with(|| {
-                let mut walker = source_ignore_builder(&self.root.join(repository), false, None);
+                let mut walker = source_ignore_builder(&self.root.join(repository), false, exclude);
                 walker.require_git(false).parents(false);
                 incremental_ignore(&walker)
             });
@@ -615,6 +642,7 @@ mod tests {
         };
         write_git_dir(&root.join(".git"), false);
         file(".git/info/exclude".into(), "excluded.rs\n");
+        file(".git/modules/sub/info/exclude".into(), "local-secret.rs\n");
         file(".gitignore".into(), "*.env\n");
         // A submodule has rules of its own.
         let submodule = |path: &str| {
@@ -657,6 +685,9 @@ mod tests {
                 }
             }
         }
+        paths.push(("local-secret.rs".into(), true));
+        paths.push(("sub/local-secret.rs".into(), false));
+        paths.push(("sub/deep/local-secret.rs".into(), false));
         paths.push(("jj/sub/secret.env".into(), true));
         paths.push(("jj/sub/debug.log".into(), false));
         for (path, _) in &paths {
