@@ -2000,11 +2000,37 @@ impl DaemonState {
         repair_exclusive: bool,
         cancellation: Option<&AtomicBool>,
     ) -> Option<Vec<WorkspaceModeLease>> {
+        self.acquire_workspace_leases_for_rebuild(
+            workspaces,
+            skip_gitignore,
+            direct_exclusive,
+            repair_exclusive,
+            HashSet::new(),
+            cancellation,
+        )
+    }
+
+    /// [`Self::acquire_workspace_leases`] with exclusive leases for `rebuild`,
+    /// the workspaces that a search found unqueryable under a shared lease. The
+    /// stores are inspected only under a lease: on Windows, an open store fails
+    /// the exclusive holder that removes it.
+    fn acquire_workspace_leases_for_rebuild(
+        &self,
+        workspaces: &[Workspace],
+        skip_gitignore: bool,
+        direct_exclusive: bool,
+        repair_exclusive: bool,
+        mut rebuild: HashSet<String>,
+        cancellation: Option<&AtomicBool>,
+    ) -> Option<Vec<WorkspaceModeLease>> {
         let mut requirements = HashMap::new();
         let mut base_ids = HashMap::new();
         for workspace in workspaces {
             let workspace_requires_mutation = direct_exclusive
-                || (repair_exclusive && self.search_may_rebuild(workspace, skip_gitignore));
+                || rebuild.contains(&workspace.id)
+                || (repair_exclusive
+                    && (workspace.has_unfinished_index_publication()
+                        || workspace.base_has_unfinished_index_publication()));
             requirements
                 .entry(workspace.id.clone())
                 .and_modify(|exclusive| *exclusive |= workspace_requires_mutation)
@@ -2061,10 +2087,7 @@ impl DaemonState {
                 skip_gitignore,
                 &workspace_readiness_signature(workspace),
             )
-        }) || shared_search_workspaces
-            .into_iter()
-            .any(|workspace| self.search_may_rebuild(workspace, skip_gitignore))
-        {
+        }) {
             // The stores changed while this request waited for its leases.
             drop(leases);
             return self.acquire_workspace_leases(
@@ -2072,6 +2095,24 @@ impl DaemonState {
                 skip_gitignore,
                 true,
                 false,
+                cancellation,
+            );
+        }
+        let unqueryable = shared_search_workspaces
+            .into_iter()
+            .filter(|workspace| self.search_may_rebuild(workspace, skip_gitignore))
+            .map(|workspace| workspace.id.clone())
+            .collect::<Vec<_>>();
+        if !unqueryable.is_empty() {
+            // Each retry adds a workspace to `rebuild`, so the retries end.
+            drop(leases);
+            rebuild.extend(unqueryable);
+            return self.acquire_workspace_leases_for_rebuild(
+                workspaces,
+                skip_gitignore,
+                direct_exclusive,
+                repair_exclusive,
+                rebuild,
                 cancellation,
             );
         }
