@@ -3067,8 +3067,13 @@ fn confirm_broad_build(root: &Path, force: bool, skip_gitignore: bool) -> Result
 /// [`confirm_broad_build`] for an MCP request, which cannot ask the user.
 pub(crate) fn refuse_broad_build(root: &Path, skip_gitignore: bool) -> Result<()> {
     if let Some(broad) = pending_broad_build(root, false, skip_gitignore)? {
+        let flag = if skip_gitignore {
+            " --skip-gitignore"
+        } else {
+            ""
+        };
         bail!(
-            "did not index {root}: it is {}. Pass the absolute path of a project as `path`. To index this directory on purpose, the user can run `ig --add {root} --yes`.",
+            "did not index {root}: it is {}. Pass the absolute path of a project as `path`. To index this directory on purpose, the user can run `ig --add {root}{flag} --yes`.",
             broad.describe(),
             root = root.display(),
         );

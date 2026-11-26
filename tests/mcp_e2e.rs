@@ -959,6 +959,7 @@ fn e2e_mcp_does_not_build_an_index_of_the_home_directory() {
         assert!(text.contains("your home directory"), "{text}");
         assert!(text.contains("absolute path of a project"), "{text}");
         assert!(text.contains("--yes"), "{text}");
+        text.to_string()
     };
 
     assert_refused(search(json!({"query": "greeting"})));
@@ -977,5 +978,18 @@ fn e2e_mcp_does_not_build_an_index_of_the_home_directory() {
     // An existing index is searched, but not expanded.
     let existing = search(json!({"query": "greeting"}));
     assert_eq!(existing["isError"], false, "{existing}");
-    assert_refused(search(json!({"query": "greeting", "skip_gitignore": true})));
+    let expanding = json!({"query": "greeting", "skip_gitignore": true});
+    let refusal = assert_refused(search(expanding.clone()));
+    // The command in the error makes the same call succeed.
+    let command = refusal.split('`').find_map(|part| part.strip_prefix("ig "));
+    let arguments = command.unwrap().split(' ').collect::<Vec<_>>();
+    assert!(
+        ig(&arguments)
+            .args(["--hash", "--no-watch"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let expanded = search(expanding);
+    assert_eq!(expanded["isError"], false, "{expanded}");
 }
