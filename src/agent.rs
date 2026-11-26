@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use regex::Regex;
 use serde_json::{Map, Value, json};
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue, value};
 use uuid::Uuid;
@@ -514,7 +515,21 @@ fn write_client_config(
 ) -> Result<(PathBuf, bool)> {
     let path = client.config_path(home);
     let changed = match client {
-        AgentClient::Claude | AgentClient::Cursor => write_json_config(&path, executable)?,
+        AgentClient::Claude => write_json_config(&path, executable)?,
+        AgentClient::Cursor => {
+            if read_json_config(&path).is_err() && read_commented_json_config(&path).is_some() {
+                bail!(
+                    "`ig` cannot edit {} because it has comments or trailing commas. Set `mcpServers.ig` in it to {}, then run `ig agent doctor`.",
+                    path.display(),
+                    json!({
+                        "type": "stdio",
+                        "command": executable.to_string_lossy(),
+                        "args": ["--mcp"]
+                    })
+                );
+            }
+            write_json_config(&path, executable)?
+        }
         AgentClient::Codex => write_codex_config(&path, executable)?,
     };
     Ok((path, changed))
@@ -524,15 +539,26 @@ fn read_config(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("cannot read {}", path.display()))
 }
 
-/// Parse a JSON config. An empty file is an empty object, and a leading UTF-8
-/// byte order mark is not part of the document.
+/// Parse a JSON config. A leading UTF-8 byte order mark is not part of the
+/// document. An empty file is an error: Claude Code offers to restore a backup
+/// of it, and Cursor reports a syntax error.
 fn read_json_config(path: &Path) -> Result<Value> {
     let bytes = read_config(path)?;
     let source = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
-    if source.trim_ascii().is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
     serde_json::from_slice(source).with_context(|| format!("{} is not valid JSON", path.display()))
+}
+
+/// Parse a Cursor config without the comments and trailing commas that Cursor
+/// accepts. Both patterns match a string first, so its text does not change.
+fn read_commented_json_config(path: &Path) -> Option<Value> {
+    let source = fs::read_to_string(path).ok()?;
+    let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
+    let comment =
+        Regex::new(r#"(?s)("(?:[^"\\]|\\.)*")|//[^\n]*|/\*.*?\*/"#).expect("valid comment regex");
+    let comma =
+        Regex::new(r#"(?s)("(?:[^"\\]|\\.)*")|,(\s*[}\]])"#).expect("valid trailing comma regex");
+    let source = comment.replace_all(source, "$1");
+    serde_json::from_str(&comma.replace_all(&source, "$1$2")).ok()
 }
 
 fn write_json_config(path: &Path, executable: &Path) -> Result<bool> {
@@ -616,7 +642,12 @@ fn config_matches(client: AgentClient, home: &Path, executable: &Path) -> Result
         return Ok(false);
     }
     match client {
-        AgentClient::Claude | AgentClient::Cursor => json_config_matches(&path, executable),
+        AgentClient::Claude => Ok(json_config_matches(&read_json_config(&path)?, executable)),
+        AgentClient::Cursor => {
+            let root = read_json_config(&path)
+                .or_else(|error| read_commented_json_config(&path).ok_or(error))?;
+            Ok(json_config_matches(&root, executable))
+        }
         AgentClient::Codex => {
             let document = read_codex_config(&path)?;
             Ok(codex_document_matches(&document, executable))
@@ -624,17 +655,14 @@ fn config_matches(client: AgentClient, home: &Path, executable: &Path) -> Result
     }
 }
 
-fn json_config_matches(path: &Path, executable: &Path) -> Result<bool> {
-    let root = read_json_config(path)?;
+fn json_config_matches(root: &Value, executable: &Path) -> bool {
     let Some(server) = root["mcpServers"]["ig"].as_object() else {
-        return Ok(false);
+        return false;
     };
     let command = server.get("command").and_then(Value::as_str);
     let args = server.get("args").and_then(Value::as_array);
-    Ok(
-        command.is_some_and(|command| command_matches(command, executable))
-            && args.is_some_and(|args| args.iter().filter_map(Value::as_str).eq(["--mcp"])),
-    )
+    command.is_some_and(|command| command_matches(command, executable))
+        && args.is_some_and(|args| args.iter().filter_map(Value::as_str).eq(["--mcp"]))
 }
 
 fn codex_document_matches(document: &DocumentMut, executable: &Path) -> bool {
@@ -840,24 +868,24 @@ mod tests {
     fn malformed_configs_are_not_changed() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("mcp.json");
-        fs::write(&path, "{broken").unwrap();
-        let before = fs::read(&path).unwrap();
-        assert!(write_json_config(&path, Path::new("/tmp/ig")).is_err());
-        assert_eq!(fs::read(&path).unwrap(), before);
+        for source in ["{broken", "", "\n", "\u{feff}"] {
+            fs::write(&path, source).unwrap();
+            let result = write_json_config(&path, Path::new("/tmp/ig"));
+            assert!(result.is_err(), "{source:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        }
     }
 
     #[test]
-    fn install_accepts_empty_and_byte_order_marked_json() {
+    fn install_accepts_byte_order_marked_json() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("mcp.json");
         let executable = env::current_exe().unwrap().canonicalize().unwrap();
-        for source in ["", "\n", "\u{feff}", "\u{feff}{\"theme\":\"dark\"}"] {
-            fs::write(&path, source).unwrap();
-            assert!(!json_config_matches(&path, &executable).unwrap());
-            assert!(write_json_config(&path, &executable).unwrap(), "{source:?}");
-            assert!(json_config_matches(&path, &executable).unwrap());
-        }
-        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fs::write(&path, "\u{feff}{\"theme\":\"dark\"}").unwrap();
+
+        assert!(write_json_config(&path, &executable).unwrap());
+        let value = read_json_config(&path).unwrap();
+        assert!(json_config_matches(&value, &executable));
         assert_eq!(value["theme"], "dark");
     }
 

@@ -83,22 +83,14 @@ fn install_writes_the_config_that_client_variables_select() {
         stub_client(&bin, client);
         let config_dir = temp.path().join(variable);
         fs::create_dir_all(&config_dir).unwrap();
-        let ig = |args: &[&str]| {
-            let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
-            command
-                .current_dir(&home)
-                .env("HOME", &home)
-                .env("USERPROFILE", &home)
-                // An empty value does not select a home directory.
-                .env("IVYGREP_AGENT_HOME", "")
-                .env("IVYGREP_HOME", temp.path().join("ivygrep"))
-                .env(variable, &config_dir)
-                .env("PATH", test_path(&bin))
-                .args(args);
-            command
-        };
 
-        ig(&["agent", "install", client]).assert().success();
+        ig_command(temp.path(), &["agent", "install", client])
+            .current_dir(&home)
+            // An empty value does not select a home directory.
+            .env("IVYGREP_AGENT_HOME", "")
+            .env(variable, &config_dir)
+            .assert()
+            .success();
         let written = fs::read_to_string(config_dir.join(config)).unwrap();
         assert!(written.contains("--mcp"), "{client}: {written}");
         assert_eq!(fs::read_dir(&home).unwrap().count(), 0, "{client}");
@@ -113,26 +105,58 @@ fn doctor_fails_when_a_detected_client_has_an_invalid_config() {
     fs::create_dir_all(home.join(".cursor")).unwrap();
     fs::create_dir_all(&bin).unwrap();
     stub_client(&bin, "cursor");
-    let ig = |args: &[&str]| {
-        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
-        command
-            .env("HOME", &home)
-            .env("USERPROFILE", &home)
-            .env("IVYGREP_AGENT_HOME", &home)
-            .env("IVYGREP_HOME", temp.path().join("ivygrep"))
-            .env("PATH", test_path(&bin))
-            .args(args);
-        command
-    };
+    let ig = |args: &[&str]| ig_command(temp.path(), args);
     ig(&["agent", "install", "cursor"]).assert().success();
-    fs::write(home.join(".claude.json"), "{broken").unwrap();
+    for source in ["{broken", ""] {
+        fs::write(home.join(".claude.json"), source).unwrap();
+
+        ig(&["agent", "doctor"])
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains("Cursor: configured"))
+            .stdout(predicates::str::contains("Agent setup healthy").not())
+            .stderr(predicates::str::contains("invalid config for Claude Code"));
+    }
+}
+
+#[test]
+fn cursor_config_with_comments_is_checked_but_not_edited() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let bin = temp.path().join("bin");
+    let config = home.join(".cursor").join("mcp.json");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    stub_client(&bin, "cursor");
+    let ig = |args: &[&str]| ig_command(temp.path(), args);
+    let executable = serde_json::to_string(assert_cmd::cargo::cargo_bin!("ig")).unwrap();
+    let commented = format!(
+        r#"// The "servers" of this host
+{{
+  "mcpServers": {{
+    "ig": {{"command": {executable}, "args": ["--mcp"]}}, /* local, */
+    "docs": {{"url": "https://example.com/mcp", "headers": {{"note": "a \" // b"}}}}, // remote
+  }},
+}}
+"#
+    );
+    fs::write(&config, &commented).unwrap();
 
     ig(&["agent", "doctor"])
         .assert()
+        .success()
+        .stdout(predicates::str::contains("Cursor: configured"));
+    ig(&["agent", "install", "cursor"])
+        .assert()
         .failure()
-        .stdout(predicates::str::contains("Cursor: configured"))
-        .stdout(predicates::str::contains("Agent setup healthy").not())
-        .stderr(predicates::str::contains("invalid config for Claude Code"));
+        .stderr(predicates::str::contains("comments or trailing commas"));
+    assert_eq!(fs::read_to_string(&config).unwrap(), commented);
+
+    fs::write(&config, format!("{commented}}}")).unwrap();
+    ig(&["agent", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("config invalid"));
 }
 
 #[test]
@@ -169,6 +193,23 @@ fn missing_client_prints_exact_remediation() {
         .stderr(predicates::str::contains(
             "Claude Code not detected. Install Claude Code, then rerun `ig agent install claude`.",
         ));
+}
+
+/// `ig` with each configuration home inside `temp`.
+fn ig_command(temp: &std::path::Path, args: &[&str]) -> Command {
+    let home = temp.join("home");
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    command
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("IVYGREP_AGENT_HOME", &home)
+        .env("IVYGREP_HOME", temp.join("ivygrep"))
+        .env("PATH", test_path(&temp.join("bin")))
+        .args(args);
+    command
 }
 
 fn stub_client(bin: &std::path::Path, name: &str) {
