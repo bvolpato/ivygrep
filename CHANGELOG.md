@@ -7,8 +7,8 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 
 - `--callers` and `--refs` search C, C++, and Objective-C together, and JavaScript and TypeScript together. A function defined in a `.h` file has its `.cpp` callers.
-- `--callers` finds Rust calls in macro arguments such as `assert_eq!(parse(x), y)`, Rust macro invocations, Bash commands, Objective-C messages, and constructor calls in C++, PHP, Scala, and Dart.
-- `--refs` and `--callers` read code in Bash `"$(...)"` and PHP `"{$...}"` strings. `--refs` no longer lists the names that C, C++, Objective-C, and Haskell declarations introduce.
+- `--callers` finds Rust calls in macro arguments such as `assert_eq!(parse(x), y)`, Rust macro invocations, Bash commands, Objective-C messages, and `new` expressions in C++, PHP, Scala, and Dart.
+- `--refs` and `--callers` read code in Bash `"$(...)"` and PHP `"{$...}"` strings. `--refs` no longer lists the names that declarations introduce in C, C++, Haskell, and Objective-C `.m` and `.mm` files.
 - The `-C` help states that references show one line, and that definitions and callers show the complete chunk.
 
 ## [1.3.6] - 2026-11-15

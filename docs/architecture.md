@@ -657,7 +657,8 @@ Leading and trailing dollar sigils retain their existing bare-name aliases.
 Reference searches use indexed identifier candidates, then verify source syntax.
 `--refs` includes non-call uses such as callbacks and function values, and returns
 the matching line without context lines; `--callers` returns chunks containing
-calls, including constructor and macro calls. Whitespace, newlines, and generic arguments do
+calls, including `new` expressions and macro calls. Options of Rust attributes and
+`cfg!` predicates are not calls. Whitespace, newlines, and generic arguments do
 not need to be adjacent to the name. Tree-sitter excludes declaration names,
 including Go type, alias, and interface method names, comments, and literal
 text; files without a usable parse use quote/comment masking and a conservative

@@ -1137,7 +1137,7 @@ fn matching_symbol_lines_in_source(
         let line = line_starts.partition_point(|offset| *offset <= start);
         let line_start = line_starts[line - 1];
         let is_call = if let Some(node) = node {
-            is_call_reference(node, language == "go" && go_generic_function)
+            is_call_reference(node, text, language == "go" && go_generic_function)
         } else {
             let line_end = line_starts.get(line).copied().unwrap_or(source.len());
             if looks_like_definition(&lower[line_start..line_end], start - line_start) {
@@ -1391,12 +1391,12 @@ fn contains_node(container: tree_sitter::Node<'_>, node: tree_sitter::Node<'_>) 
     container.start_byte() <= node.start_byte() && node.end_byte() <= container.end_byte()
 }
 
-fn is_call_reference(node: tree_sitter::Node<'_>, go_generic_function: bool) -> bool {
+fn is_call_reference(node: tree_sitter::Node<'_>, text: &str, go_generic_function: bool) -> bool {
     if node
         .parent()
         .is_some_and(|parent| parent.kind() == "token_tree")
     {
-        return is_macro_argument_call(node);
+        return is_macro_argument_call(node, text);
     }
     let mut current = node;
     while let Some(parent) = current.parent() {
@@ -1473,7 +1473,7 @@ fn is_call_reference(node: tree_sitter::Node<'_>, go_generic_function: bool) -> 
 
 /// Rust macro arguments are flat tokens: the name and its argument list are
 /// siblings, with optional `::<T>` tokens or the `!` of a nested macro between.
-fn is_macro_argument_call(node: tree_sitter::Node<'_>) -> bool {
+fn is_macro_argument_call(node: tree_sitter::Node<'_>, text: &str) -> bool {
     if node
         .prev_sibling()
         .is_some_and(|token| token.kind() == "fn")
@@ -1505,7 +1505,30 @@ fn is_macro_argument_call(node: tree_sitter::Node<'_>) -> bool {
             }
         }
     }
-    next.kind() == "token_tree" && next.child(0).is_some_and(|open| open.kind() == "(")
+    next.kind() == "token_tree"
+        && next.child(0).is_some_and(|open| open.kind() == "(")
+        && !is_attribute_option(node, text)
+}
+
+/// Attribute options and `cfg!` predicates such as `not(test)` look like calls.
+/// In macro tokens, an attribute is a `#` and a token tree in brackets.
+fn is_attribute_option(mut node: tree_sitter::Node<'_>, text: &str) -> bool {
+    while let Some(tokens) = node.parent().filter(|parent| parent.kind() == "token_tree") {
+        let before = tokens.prev_sibling();
+        let bang = before.filter(|token| token.kind() == "!");
+        let prefix = bang.map_or(before, |bang| bang.prev_sibling());
+        let is_option = match prefix.and_then(|prefix| prefix.utf8_text(text.as_bytes()).ok()) {
+            Some("#") => tokens.child(0).is_some_and(|open| open.kind() == "["),
+            Some("cfg") => bang.is_some(),
+            _ => false,
+        };
+        if is_option {
+            return true;
+        }
+        node = tokens;
+    }
+    node.parent()
+        .is_some_and(|parent| parent.kind() == "attribute")
 }
 
 fn go_generic_callee_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -3485,6 +3508,19 @@ void phantomCpp() {}
             ("assert!(audit_target < other(1));", false),
             ("matches!(value, audit_target { .. });", false),
             ("cfg_if! { fn audit_target(value: u8) {} }", false),
+            ("#[cfg(audit_target(test))] audit_other(1);", false),
+            ("#[serde(with(audit_target(a = \"b\")))] struct S;", false),
+            ("#![cfg_attr(test, audit_target(dead_code))]", false),
+            ("cfg_if! { if #[cfg(audit_target(unix))] {} }", false),
+            ("proptest! { #![config(audit_target(1))] }", false),
+            ("if cfg!(audit_target(unix)) {}", false),
+            ("assert!(cfg!(other(audit_target(unix))));", false),
+            ("#[cfg(test)] assert!(audit_target(1));", true),
+            ("#[arg(parser = audit_target!(u16))] struct S;", true),
+            ("cfg_if! { if #[cfg(unix)] { audit_target(1) } }", true),
+            ("assert!(!cfg!(unix) && !(audit_target(1)));", true),
+            ("assert!(items[audit_target(1)]);", true),
+            ("quote! { #(audit_target(1)),* }", true),
         ] {
             assert_eq!(
                 relationship_lines("calls.rs", "rust", &format!("fn run() {{ {arguments} }}\n")),
