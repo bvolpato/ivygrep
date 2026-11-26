@@ -4848,6 +4848,8 @@ fn source_mask(sources: &[String]) -> SourceMask {
 }
 
 const MIN_FILTERED_RESULTS: usize = 10;
+/// Most files below the authority floor that an exact lookup adds to its results.
+const MAX_LOW_AUTHORITY_MATCHES: usize = 3;
 const REPRESENTATIVE_SPAN_MIN_COVERAGE: f32 = 0.75;
 const FILE_COHERENCE_WEIGHT: f32 = 0.22;
 const FILE_COHERENCE_CANDIDATES: usize = 50;
@@ -5143,12 +5145,13 @@ fn filter_meaningful_scores_with_query(
         return filter_semantic_only_scores(ranked, query, precise_query);
     }
     let gate = AuthorityGate::new(&ranked, query);
+    let only_exact_matches = gate.only_exact_matches(&ranked, query);
 
     if ranked.len() == 1 {
         if gate.admits(&ranked[0]) {
             return ranked;
         }
-        return vec![];
+        return only_exact_matches;
     }
 
     // Adaptive threshold: start from score distribution, then clamp against
@@ -5212,6 +5215,15 @@ fn filter_meaningful_scores_with_query(
                 }
             }
         }
+    }
+    // One chunk for each file, scored below every result: these files never move
+    // or replace a file above the floor.
+    let mut next_score = filtered.last().map_or(f32::MAX, |item| item.score * 0.99);
+    for mut item in only_exact_matches {
+        item.score = item.score.min(next_score);
+        next_score = item.score * 0.99;
+        item.sources |= SOURCE_BACKFILL;
+        filtered.push(item);
     }
 
     filtered
@@ -5329,20 +5341,15 @@ struct AuthorityGate<'a> {
     implementation_intent: bool,
     short_literal_lookup: bool,
     ceiling: AuthorityCeiling,
-    /// Exact sources of a one-term lookup that no candidate above the floor has.
-    exact_sources: SourceMask,
-    /// Lowercased one-term query. The file it names is never suppressed.
-    named_path: Option<&'a str>,
 }
 
 impl<'a> AuthorityGate<'a> {
     fn new(ranked: &[RankedCandidate], query: &'a FusionQuery<'_>) -> Self {
         let query_tokens = query.tokens.as_slice();
-        let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
         let raw_terms = raw_query_terms(query.text);
-        let mut gate = Self {
+        Self {
             query_tokens,
-            precise_query,
+            precise_query: is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens),
             secondary_intent: query.secondary_intent,
             implementation_intent: query_targets_implementation(query_tokens),
             short_literal_lookup: !raw_terms.is_empty()
@@ -5353,44 +5360,11 @@ impl<'a> AuthorityGate<'a> {
                 query_tokens,
                 query.secondary_intent,
             ),
-            exact_sources: 0,
-            named_path: None,
-        };
-        if !query.text.contains(char::is_whitespace) {
-            gate.named_path = Some(query.lower.as_str());
-            if precise_query {
-                gate.exact_sources = gate.exact_sources_below_the_floor(ranked);
-            }
         }
-        gate
-    }
-
-    /// An identifier lookup must not hide the only definition of the identifier,
-    /// or the only files that contain it, because of where they are. Copies stay
-    /// hidden while a candidate with enough authority has the same evidence.
-    fn exact_sources_below_the_floor(&self, ranked: &[RankedCandidate]) -> SourceMask {
-        let mut sources = SOURCE_EXACT_SYMBOL | SOURCE_LITERAL;
-        for item in ranked {
-            if item.sources & sources != 0 && self.admits(item) {
-                sources &= !item.sources;
-                if item.sources & SOURCE_EXACT_SYMBOL != 0 {
-                    return 0;
-                }
-            }
-        }
-        sources
     }
 
     fn admits(&self, item: &RankedCandidate) -> bool {
         let path_lower = lower_index_path(&item.chunk.file_path);
-        let is_named = self.named_path.is_some_and(|name| {
-            path_lower
-                .strip_suffix(name)
-                .is_some_and(|parent| parent.is_empty() || parent.ends_with('/'))
-        });
-        if is_named || item.sources & self.exact_sources != 0 {
-            return true;
-        }
         let authority = effective_authority_score_for_path(
             self.query_tokens,
             path_lower.as_ref(),
@@ -5407,6 +5381,46 @@ impl<'a> AuthorityGate<'a> {
             floor = floor.min(self.ceiling.authority);
         }
         authority >= floor
+    }
+
+    /// Files below the floor with the strongest evidence for a one-term lookup: the
+    /// file it names, else the definition of the identifier, else the files that
+    /// contain it. Copies stay hidden beside a named file or a definition above the
+    /// floor.
+    fn only_exact_matches(
+        &self,
+        ranked: &[RankedCandidate],
+        query: &FusionQuery<'_>,
+    ) -> Vec<RankedCandidate> {
+        if query.text.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let is_named = |item: &RankedCandidate| {
+            lower_index_path(&item.chunk.file_path)
+                .strip_suffix(query.lower.as_str())
+                .is_some_and(|parent| parent.is_empty() || parent.ends_with('/'))
+        };
+        let has = |item: &RankedCandidate, source| self.precise_query && item.sources & source != 0;
+        let is_definition = |item: &RankedCandidate| has(item, SOURCE_EXACT_SYMBOL);
+        let has_text = |item: &RankedCandidate| has(item, SOURCE_LITERAL);
+        let kinds: [&dyn Fn(&RankedCandidate) -> bool; 3] = [&is_named, &is_definition, &has_text];
+        let Some(kind) = kinds.into_iter().find(|matches| ranked.iter().any(matches)) else {
+            return Vec::new();
+        };
+        if ranked
+            .iter()
+            .filter(|item| kind(item) || is_definition(item))
+            .any(|item| self.admits(item))
+        {
+            return Vec::new();
+        }
+        let mut files = HashSet::new();
+        ranked
+            .iter()
+            .filter(|item| kind(item) && files.insert(path_key(&item.chunk.file_path)))
+            .take(MAX_LOW_AUTHORITY_MATCHES)
+            .cloned()
+            .collect()
     }
 }
 
@@ -6008,10 +6022,14 @@ fn file_authority_score_for_path(path: &str) -> f32 {
     // Prefer project code over vendored and generated trees.
     let directories = path.rsplit_once('/').map_or("", |(parent, _)| parent);
     if directories.split('/').any(|directory| {
-        matches!(
-            directory,
-            "vendor" | "node_modules" | "__pycache__" | ".git" | "target" | "dist" | "build"
-        )
+        // `_vendor`, `_build`, and `.build` are names of the same trees, as are
+        // `cmake-build` and the `cmake-build-debug` of CLion.
+        matches!(directory, "__pycache__" | ".git")
+            || directory.starts_with("cmake-build")
+            || matches!(
+                directory.trim_start_matches(['_', '.']),
+                "vendor" | "node_modules" | "target" | "dist" | "build"
+            )
     }) {
         return 0.2;
     }
@@ -11762,11 +11780,17 @@ export function registerCommands(p: Plugin) {
             "struct CrimsonPlanner;",
         );
         let usage = make_chunk_with_path("usage", "src/main.rs", "CrimsonPlanner::new()");
-        let copy = make_chunk_with_path("copy", "vendor/planner.rs", "struct CrimsonPlanner;");
+        let copy = make_chunk_with_path("copy", "_vendor/planner.rs", "struct CrimsonPlanner;");
         let source = make_chunk_with_path("source", "src/planner.rs", "struct CrimsonPlanner;");
+        let script = make_chunk_with_path("script", "vendor/bin/crimsonplanner", "run");
         let exact: &[&str] = &["exact-symbol", "literal", "lexical"];
         let ids = |ranked: &[(IndexedChunk, f32, &[&str])], query| {
-            filter_meaningful_scores(make_ranked_with_chunks(ranked), query)
+            let filtered = filter_meaningful_scores(make_ranked_with_chunks(ranked), query);
+            assert!(
+                filtered.is_sorted_by(|left, right| left.1 > right.1),
+                "{query}: {filtered:?}"
+            );
+            filtered
                 .into_iter()
                 .map(|(chunk, _, _)| chunk.chunk_id)
                 .collect::<Vec<_>>()
@@ -11774,35 +11798,62 @@ export function registerCommands(p: Plugin) {
         assert_eq!(
             ids(
                 &[
-                    (usage.clone(), 0.9, &["literal", "lexical"]),
-                    (definition.clone(), 0.5, exact),
+                    (definition.clone(), 0.9, exact),
+                    (usage.clone(), 0.5, &["literal", "lexical"]),
                 ],
                 "CrimsonPlanner"
             ),
-            ["usage", "definition"]
+            ["usage", "definition"],
+            "a vendored definition must follow the files that use it"
         );
         assert_eq!(
             ids(
                 &[
-                    (source, 0.9, exact),
-                    (usage, 0.8, &["literal"]),
-                    (copy, 0.5, exact)
+                    (source.clone(), 0.9, exact),
+                    (usage.clone(), 0.8, &["literal"]),
+                    (script, 0.6, &["path"]),
+                    (copy.clone(), 0.5, exact)
                 ],
                 "CrimsonPlanner"
             ),
             ["source", "usage"],
-            "a vendored copy must stay hidden beside the source"
+            "vendored files must stay hidden beside the source"
         );
+        let vendored = (0..6)
+            .map(|index| {
+                let path = format!("vendor/pkg{index}/planner.rs");
+                make_chunk_with_path(&path, &path, "struct CrimsonPlanner;")
+            })
+            .collect::<Vec<_>>();
+        let mut ranked = vec![(usage, 0.9, ["literal"].as_slice())];
+        ranked.extend(vendored.into_iter().map(|chunk| (chunk, 0.8, exact)));
+        assert_eq!(
+            ids(&ranked, "CrimsonPlanner").len(),
+            1 + MAX_LOW_AUTHORITY_MATCHES
+        );
+
         let mention = make_chunk_with_path("mention", "src/plan.rs", "src build planner rs");
         assert_eq!(
             ids(
                 &[
-                    (mention, 0.9, &["lexical"]),
-                    (definition, 0.8, &["path", "lexical"]),
+                    (definition.clone(), 0.9, &["path", "lexical"]),
+                    (mention, 0.8, &["literal", "lexical"]),
                 ],
                 "src/build/planner.rs"
             ),
             ["mention", "definition"]
+        );
+        assert_eq!(
+            ids(
+                &[
+                    (copy, 0.9, exact),
+                    (definition, 0.8, &["path", "lexical"]),
+                    (source, 0.7, &["path", "lexical"]),
+                ],
+                "planner.rs"
+            ),
+            ["source"],
+            "a file above the floor with the same name hides the others"
         );
     }
 
@@ -12437,10 +12488,15 @@ export function registerCommands(p: Plugin) {
     fn vendored_and_build_trees_are_whole_directory_names() {
         for path in [
             "vendor/dep/lib.rs",
+            "src/pip/_vendor/requests/api.py",
             "web/node_modules/pkg/index.js",
             "target/debug/out.rs",
             "pkg/dist/bundle.js",
             "build/out.js",
+            "docs/_build/conf.py",
+            ".build/checkouts/nio/channel.swift",
+            "cmake-build/probe.c",
+            "cmake-build-debug/probe.c",
         ] {
             assert_eq!(file_authority_score_for_path(path), 0.2, "{path}");
         }
@@ -12448,6 +12504,8 @@ export function registerCommands(p: Plugin) {
             "internal/js/esbuild/batch.go",
             "src/rebuild/mod.rs",
             "src/retarget/mod.rs",
+            "src/image-build/mod.rs",
+            "src/git/mod.rs",
             "src/build",
         ] {
             assert_eq!(file_authority_score_for_path(path), 1.0, "{path}");

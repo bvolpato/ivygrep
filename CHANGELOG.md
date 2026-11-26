@@ -6,8 +6,8 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
-- Hybrid search no longer hides source files below directories whose name only ends in `build`, `target`, `dist`, or `vendor`, such as `internal/js/esbuild/` or `src/rebuild/`. The path check matched substrings.
-- A one-term lookup finds an identifier or a file in a build, distribution, or vendored tree when no other file has that definition or text. Such a lookup returned nothing or only the uses. Copies stay hidden beside the source, and ranking is unchanged.
+- Hybrid search no longer hides source files below directories whose name only ends in `build`, `target`, `dist`, or `vendor`, such as `internal/js/esbuild/` or `src/rebuild/`. The path check matched substrings. `_vendor/`, `.build/`, and `cmake-build*/` stay vendored and build trees.
+- A one-term lookup also returns up to three files of a build, distribution, or vendored tree when no other file has that name, definition, or text. They follow all other results. Such a lookup returned nothing or only the uses. Copies stay hidden beside the source.
 - Queries of three or more words return configuration and data files when nothing better matches. In a repository of YAML, JSON, or TOML files, or in a scope of such files, every match was filtered out.
 
 ## [1.3.6] - 2026-11-15
