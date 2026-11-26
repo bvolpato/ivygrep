@@ -999,7 +999,7 @@ pub(crate) fn literal_file_search_with_context(
             _,
         ) => literal::FileSearchMode::FilesWithPreviews {
             file_limit: file_limit.min(MAX_SEARCH_RESULT_LIMIT),
-            hits_per_file: hits_per_file.clamp(1, crate::protocol::MAX_HITS_PER_FILE),
+            hits_per_file: hits_per_file.clamp(1, MAX_SEARCH_RESULT_LIMIT),
         },
         _ => literal::FileSearchMode::Files,
     };
@@ -8847,7 +8847,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         std::fs::write(tmp.path().join("a.md"), "認証\n".repeat(60)).unwrap();
-        std::fs::write(tmp.path().join("b.md"), "認証\n".repeat(90)).unwrap();
+        std::fs::write(tmp.path().join("b.md"), "認証\n".repeat(150)).unwrap();
         std::fs::write(tmp.path().join("c.py"), "def 認証(user):\n    pass\n").unwrap();
         let workspace = Workspace::resolve(tmp.path()).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -8870,8 +8870,10 @@ mod tests {
         };
         let expected = ["b.md", "a.md", "c.py"].map(PathBuf::from);
         assert_eq!(ranked(Some(2)).0, expected[..2]);
-        assert_eq!(ranked(None), (expected.to_vec(), 7));
-        assert_eq!(ranked(Some(usize::MAX)), (expected.to_vec(), 151));
+        // A full limit marks counts as lower bounds. Below it, no match is missing.
+        assert_eq!(ranked(None), (expected.to_vec(), DEFAULT_SEARCH_LIMIT));
+        assert_eq!(ranked(Some(1_000)), (expected.to_vec(), 211));
+        assert_eq!(ranked(Some(usize::MAX)), (expected.to_vec(), 211));
     }
 
     #[test]

@@ -1259,8 +1259,32 @@ fn deeply_nested_queries_do_not_overflow_the_stack() {
                 .is_empty()
         );
     }
-    let negations = format!("{}login", "NOT ".repeat(20_000));
-    hybrid_search_outcome(&workspace, &negations, None, &SearchOptions::default()).unwrap();
+    let negations = "NOT ".repeat(64);
+    for query in [
+        format!("{}login", "NOT ".repeat(20_000)),
+        format!(
+            "{}login{}",
+            format!("{negations}(login ").repeat(8),
+            ")".repeat(8)
+        ),
+    ] {
+        hybrid_search_outcome(&workspace, &query, None, &SearchOptions::default()).unwrap();
+    }
+    for (query, accepted) in [
+        ("((((((login)))))) AND page", true),
+        ("(((((((login))))))) AND page", false),
+        ("login NOT (NOT (NOT (invoice)))", true),
+        ("login NOT (NOT (NOT (NOT invoice)))", false),
+        ("login NOT (-NOT (-NOT (-NOT invoice)))", false),
+    ] {
+        match hybrid_search(&workspace, query, None, &SearchOptions::default()) {
+            Ok(hits) => assert!(accepted && !hits.is_empty(), "{query:?}: {hits:?}"),
+            Err(error) => assert!(
+                !accepted && error.to_string().contains("nest up to 6 levels"),
+                "{query:?}: {error:#}"
+            ),
+        }
+    }
 }
 
 #[test]

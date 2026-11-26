@@ -25,8 +25,8 @@ pub(super) enum BooleanSearch {
 /// [`BooleanSearch::NotApplied`]).
 pub(crate) const BOOLEAN_NOT_APPLIED_WARNING: &str = "\
     Boolean operators not applied: this multi-line or long query is not a valid Boolean \
-    expression, so uppercase AND, OR, and NOT were searched as ordinary words. For a Boolean \
-    search, send a short one-line expression such as `alpha AND NOT beta`.";
+    expression, or it nests too deeply, so uppercase AND, OR, and NOT were searched as ordinary \
+    words. For a Boolean search, send a short one-line expression such as `alpha AND NOT beta`.";
 
 /// Keep identifier-like input and quoted/escaped/code-span words on the ordinary
 /// expansion path. An unfinished quote must not hide a Boolean operator from
@@ -204,15 +204,19 @@ pub(super) fn has_sign_before_bare_star(text: &str) -> bool {
     false
 }
 
-/// Deepest group or `NOT` nesting passed to Tantivy's grammar.
-const MAX_QUERY_NESTING: usize = 64;
+/// Most levels of groups and `NOT` in a query. Tantivy's grammar, and the query
+/// that it builds, recurse for each level. Nested conjunctions set the limit
+/// before the stack does: each level doubles the cost of every seek, and a tree
+/// of them triples it.
+const MAX_QUERY_NESTING: usize = 6;
 
-/// Whether `text` nests groups or `NOT` deeper than [`MAX_QUERY_NESTING`].
-/// Tantivy's grammar recurses for every unclosed `(` and every `NOT` in a row,
-/// and a stack overflow aborts the process. An unclosed `:(` on each line of a
-/// chat log is enough.
+/// Whether open groups and `NOT` runs of `text` add up to more than
+/// [`MAX_QUERY_NESTING`] levels. An unclosed `:(` on each line of a chat log is
+/// enough to overflow the stack, which aborts the process.
 pub(super) fn nests_too_deeply(text: &str) -> bool {
-    let (mut groups, mut negations) = (0usize, 0usize);
+    // Depth outside each open group.
+    let mut open = Vec::new();
+    let (mut depth, mut negations) = (0usize, 0usize);
     let mut word_start = None;
     for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
         if !character.is_whitespace() && !matches!(character, '(' | ')') {
@@ -220,18 +224,25 @@ pub(super) fn nests_too_deeply(text: &str) -> bool {
             continue;
         }
         if let Some(start) = word_start.take() {
-            negations = if &text[start..index] == "NOT" {
+            // A sign or a closed phrase can touch the operator.
+            negations = if text[start..index].ends_with("NOT") {
                 negations + 1
             } else {
                 0
             };
         }
         match character {
-            '(' => groups += 1,
-            ')' => groups = groups.saturating_sub(1),
+            '(' => {
+                open.push(depth);
+                depth += std::mem::take(&mut negations) + 1;
+            }
+            ')' => {
+                depth = open.pop().unwrap_or(0);
+                negations = 0;
+            }
             _ => {}
         }
-        if groups > MAX_QUERY_NESTING || negations > MAX_QUERY_NESTING {
+        if depth + negations > MAX_QUERY_NESTING {
             return true;
         }
     }
@@ -358,9 +369,14 @@ fn anchor_negative_clauses(ast: &mut UserInputAst) {
 }
 
 fn boolean_query_error(text: &str) -> String {
+    let limit = if nests_too_deeply(text) {
+        format!("Groups and NOT can nest up to {MAX_QUERY_NESTING} levels.\n")
+    } else {
+        String::new()
+    };
     format!(
         "invalid or unsupported Boolean query: {text}\n\
-         Hint: to search code or prose containing AND, OR, or NOT, wrap that text \
+         {limit}Hint: to search code or prose containing AND, OR, or NOT, wrap that text \
          in matching backticks or a fenced code block."
     )
 }

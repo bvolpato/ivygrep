@@ -923,15 +923,15 @@ fn exact_substring_hits(
     query_text: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    const HITS_PER_FILE: usize = 3;
-
     let limit = options.bounded_limit().unwrap_or(DEFAULT_SEARCH_LIMIT);
     let output = if limit == usize::MAX {
         LiteralSearchOutput::Files
     } else {
+        // Callers read fewer hits than `limit` as a complete result, so only
+        // the limit may cut the hits of a file.
         LiteralSearchOutput::FilesWithPreviews {
             file_limit: limit,
-            hits_per_file: HITS_PER_FILE,
+            hits_per_file: limit,
         }
     };
     let literal_options = SearchOptions {
