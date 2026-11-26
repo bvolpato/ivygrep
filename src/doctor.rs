@@ -440,6 +440,8 @@ mod tests {
         workspace
     }
 
+    // The liveness check of a recorded process is always positive on Windows.
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn doctor_fix_rebuilds_after_an_interrupted_indexing_run() {
