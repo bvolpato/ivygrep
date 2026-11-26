@@ -14,7 +14,7 @@ use crate::walker::SourcePathMatcher;
 use crate::workspace::Workspace;
 
 const MAX_SERIALIZED_CHANGES: usize = 512;
-/// A pack shows at most three items of one file.
+/// Named lines of one file that can become evidence.
 const MAX_SEED_LINES_PER_FILE: usize = 3;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -904,15 +904,7 @@ fn insert_task_path(
         relative = remainder;
         external_path = false;
     }
-    let stored = crate::workspace_file::stored_path(root, &relative).or_else(|| {
-        // `a/src/lib.rs` and `b/src/lib.rs` in a pasted diff.
-        let path = ["a", "b", "c", "i", "o", "w"]
-            .iter()
-            .find_map(|prefix| relative.strip_prefix(prefix).ok())
-            .filter(|_| !external_path)?;
-        crate::workspace_file::stored_path(root, path)
-    });
-    if let Some(stored) = stored {
+    if let Some(stored) = crate::workspace_file::stored_path(root, &relative) {
         relative = stored;
     } else {
         if line.is_none() && BARE_VERSION.is_match(&normalized_separators) {
@@ -939,17 +931,26 @@ fn insert_task_path(
         if external_path {
             matches.sort_by_key(|candidate| std::cmp::Reverse(candidate.components().count()));
         }
-        let Some(candidate) = matches.first() else {
-            return false;
-        };
-        let best_depth = candidate.components().count();
-        if matches
-            .get(1)
-            .is_some_and(|candidate| !external_path || candidate.components().count() == best_depth)
-        {
-            return false;
+        if let Some(candidate) = matches.first() {
+            let best_depth = candidate.components().count();
+            if matches.get(1).is_some_and(|candidate| {
+                !external_path || candidate.components().count() == best_depth
+            }) {
+                return false;
+            }
+            relative = (*candidate).clone();
+        } else {
+            // `a/src/lib.rs` and `b/src/lib.rs` in a pasted diff.
+            let Some(stored) = ["a", "b", "c", "i", "o", "w"]
+                .iter()
+                .find_map(|prefix| relative.strip_prefix(prefix).ok())
+                .filter(|_| !external_path)
+                .and_then(|path| crate::workspace_file::stored_path(root, path))
+            else {
+                return false;
+            };
+            relative = stored;
         }
-        relative = (*candidate).clone();
     }
     push_task_path(paths, relative, line);
     true
@@ -1111,6 +1112,7 @@ mod tests {
         for path in [
             "Makefile",
             "app/[slug]/page.tsx",
+            "bindings/c/page.tsx",
             "page.tsx",
             "src/app/(shop)/+page.ts",
             "src/café.py",
@@ -1146,6 +1148,8 @@ mod tests {
                 "src/plain.ts",
                 None,
             ),
+            // A directory with the name of a diff prefix.
+            ("bug in c/page.tsx:3", "bindings/c/page.tsx", Some(3)),
             (
                 "Makefile:4: *** missing separator.  Stop.",
                 "Makefile",
@@ -1204,6 +1208,17 @@ mod tests {
                 line: Some(6),
             }]
         );
+        let decomposed = "app/cafe\u{301}.php";
+        fs::write(root.path().join(decomposed), "\n").unwrap();
+        if root.path().join("app/caf\u{e9}.php").exists() {
+            assert_eq!(
+                referenced_task_paths(root.path(), "bug at app/caf\u{e9}.php:2", false),
+                [ContextInputPath {
+                    file_path: PathBuf::from(decomposed),
+                    line: Some(2),
+                }]
+            );
+        }
     }
 
     #[test]

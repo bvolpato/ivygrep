@@ -31,26 +31,26 @@ pub(crate) fn open(root: &Path, path: &Path) -> io::Result<File> {
     regular_file(open_components(root, &components)?)
 }
 
-/// The name of a file as its directory stores it. A case-insensitive file
-/// system opens other spellings, which are not paths in Git or in an index.
+/// The name of a file as its directory stores it. A file system that ignores
+/// letter case or Unicode normalization opens other spellings, which are not
+/// paths in Git or in an index.
 pub(crate) fn stored_path(root: &Path, path: &Path) -> Option<PathBuf> {
     let absolute = root.join(path);
     if !absolute.is_file() {
         return None;
     }
-    let typed = crate::workspace::index_path_string(path);
+    // A symlink resolves to another name and keeps its own.
+    let linked = path
+        .ancestors()
+        .any(|name| !name.as_os_str().is_empty() && root.join(name).is_symlink());
     let stored = absolute
         .canonicalize()
         .ok()
         .zip(root.canonicalize().ok())
-        .and_then(|(file, root)| {
-            file.strip_prefix(root)
-                .ok()
-                .map(crate::workspace::index_path_string)
-        })
-        // A symlink resolves to another name and keeps its own.
-        .filter(|stored| stored.to_lowercase() == typed.to_lowercase());
-    Some(PathBuf::from(stored.unwrap_or(typed)))
+        .filter(|_| !linked)
+        .and_then(|(file, root)| file.strip_prefix(root).ok().map(Path::to_path_buf));
+    let stored = stored.as_deref().unwrap_or(path);
+    Some(PathBuf::from(crate::workspace::index_path_string(stored)))
 }
 
 /// Names of `path` beneath `root`. An absolute `path` must start with `root`.

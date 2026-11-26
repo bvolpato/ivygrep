@@ -319,10 +319,10 @@ pub(crate) fn build_context_bundle_with_search_context(
             }
         }
         primary_hits.push(hit.clone());
-        if !input_graph_seeds
+        let first_of_file = !input_graph_seeds
             .iter()
-            .any(|known: &ContextSeed| known.file_path == seed.file_path)
-        {
+            .any(|known: &ContextSeed| known.file_path == seed.file_path);
+        if first_of_file {
             input_graph_seeds.push(seed.clone());
         }
         let hit = focus_hit_on_line(hit, seed.line, item_token_budget(budget_tokens), task);
@@ -335,12 +335,18 @@ pub(crate) fn build_context_bundle_with_search_context(
                 ContextRole::Related
             },
             seed.reason.clone(),
-            if task_relevant {
+            if !task_relevant {
+                0.03
+            } else if first_of_file {
                 0.20 + f64::from(seed.priority) * 0.10
             } else {
-                0.03
+                0.0
             },
         );
+        if !first_of_file {
+            // Further lines of a file rank below the first line of each named file.
+            candidate.fused_score = candidate.fused_score.max(0.30);
+        }
         candidate.focus_line = candidate.focus_line.or(seed.line);
         if let Some(role) = classify_file_role(&hit) {
             add_candidate(
@@ -1163,13 +1169,24 @@ fn assemble_bundle(
     budget_tokens: usize,
     mut anchor_symbols: Vec<String>,
     change_scope: Option<ContextChangeScope>,
-    mut referenced_paths: Vec<ContextInputPath>,
+    referenced_paths: Vec<ContextInputPath>,
     mut candidates: Vec<Candidate>,
 ) -> ContextBundle {
     let mut change_scope = change_scope.map(|scope| bound_change_scope(scope, budget_tokens));
     let referenced_path_limit = (budget_tokens / 64).clamp(1, 32);
     let mut truncated = referenced_paths.len() > referenced_path_limit;
-    referenced_paths.truncate(referenced_path_limit);
+    // The first line of each file precedes the second line of any file, so that
+    // the lines of one file cannot use up the limit.
+    let mut ranked_paths = referenced_paths
+        .chunk_by(|left, right| left.file_path == right.file_path)
+        .flat_map(|lines| lines.iter().cloned().enumerate())
+        .collect::<Vec<_>>();
+    ranked_paths.sort_by_key(|(rank, _)| *rank);
+    let mut referenced_paths = ranked_paths
+        .into_iter()
+        .map(|(_, path)| path)
+        .take(referenced_path_limit)
+        .collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let estimate_header = |task: &str,
                            anchors: &[String],
@@ -1222,6 +1239,7 @@ fn assemble_bundle(
             &referenced_paths,
         );
     }
+    referenced_paths.sort_by(|left, right| left.file_path.cmp(&right.file_path));
     let task_budget = header_budget.saturating_sub(fixed_header_tokens).min(1_024);
     let (mut output_task, task_truncated, _) =
         truncate_to_token_budget(task.trim(), task_budget, task);
@@ -1289,9 +1307,16 @@ fn assemble_bundle(
             truncated = true;
             break;
         }
-        if file_counts
-            .get(&candidate.hit.file_path)
-            .is_some_and(|count| *count >= 3)
+        // Lines that the task names have a limit of their own.
+        let named = candidate
+            .hit
+            .sources
+            .iter()
+            .any(|source| source == "task_input");
+        if !named
+            && file_counts
+                .get(&candidate.hit.file_path)
+                .is_some_and(|count| *count >= 3)
             || items
                 .iter()
                 .any(|item| substantially_overlaps(item, &candidate.hit))
@@ -2643,10 +2668,12 @@ mod tests {
         let bundle = pack(
             &[("worker.py", source)],
             "File \"worker.py\", line 60, in process_records\n\
+             File \"worker.py\", line 31, in process_records\n\
              File \"worker.py\", line 104, in process_records\nZeroDivisionError",
         );
 
-        for line in [60, 104] {
+        // The definition of the function is one more item of this file.
+        for line in [31, 60, 104] {
             assert!(
                 bundle
                     .items
@@ -2661,6 +2688,51 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn lines_of_one_file_do_not_displace_other_named_files() {
+        let files = [
+            "auth", "billing", "cache", "database", "events", "files", "gateway", "health",
+            "invoice", "jobs", "kafka", "ledger",
+        ]
+        .map(|name| {
+            let source = (0..3)
+                .map(|step| {
+                    let body = (0..14)
+                        .map(|key| {
+                            format!("    value_{key} = session.lookup(payload, {step}, retries)\n")
+                        })
+                        .collect::<String>();
+                    format!("def {name}_step_{step}(session, payload, retries):\n{body}\n")
+                })
+                .collect::<String>();
+            (format!("{name}.py"), source)
+        });
+        let task = files
+            .iter()
+            .flat_map(|(path, _)| [10, 28, 46].map(|line| format!("{path}:{line}: error\n")))
+            .collect::<String>();
+        let files = files
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.clone()))
+            .collect::<Vec<_>>();
+
+        let bundle = pack(&files, &task);
+
+        assert_eq!(bundle.coverage.files, files.len());
+        let referenced = bundle
+            .referenced_paths
+            .iter()
+            .map(|reference| &reference.file_path)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(referenced.len(), files.len());
+        assert!(
+            bundle
+                .referenced_paths
+                .is_sorted_by_key(|path| &path.file_path)
+        );
     }
 
     fn chunk_count(source: &str) -> usize {

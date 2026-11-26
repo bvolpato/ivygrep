@@ -257,11 +257,11 @@ pub(crate) fn extract_file_graph_with_trees(
         BTreeSet::new()
     };
     for related in likely_test_candidates(rel_path) {
-        if existing_workspace_file(root, snapshot, &related).is_some() {
+        if let Some(stored) = existing_workspace_file(root, snapshot, &related) {
             if path_looks_like_test(rel_path) {
-                insert_edge(&mut edges, &related, rel_path, FileEdgeKind::Test);
+                insert_edge(&mut edges, &stored, rel_path, FileEdgeKind::Test);
             } else {
-                insert_edge(&mut edges, rel_path, &related, FileEdgeKind::Test);
+                insert_edge(&mut edges, rel_path, &stored, FileEdgeKind::Test);
             }
         } else if late_bound_tests.contains(&related)
             && let Some(lookup_key) = late_bound_owner_lookup_key(rel_path)
@@ -1619,7 +1619,9 @@ fn first_go_package_file(
         .filter(|path| root.join(path).is_file() && is_go_package_file(path))
         .collect::<Vec<_>>();
     candidates.sort();
-    candidates.into_iter().next()
+    candidates
+        .iter()
+        .find_map(|path| existing_workspace_file(root, snapshot, path))
 }
 
 fn is_go_package_file(path: &Path) -> bool {
@@ -1682,14 +1684,13 @@ fn existing_workspace_file(
     relative: &Path,
 ) -> Option<PathBuf> {
     let normalized = normalize_relative_path(relative)?;
-    let exists = snapshot.map_or_else(
-        || {
-            crate::workspace_file::stored_path(root, &normalized).as_deref()
-                == Some(normalized.as_path())
-        },
-        |snapshot| snapshot.files.contains_key(&index_path_string(&normalized)),
-    );
-    exists.then_some(normalized)
+    let Some(snapshot) = snapshot else {
+        return crate::workspace_file::stored_path(root, &normalized);
+    };
+    snapshot
+        .files
+        .contains_key(&index_path_string(&normalized))
+        .then_some(normalized)
 }
 
 fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
@@ -1719,10 +1720,10 @@ fn nearest_manifest(
     for directory in parent.ancestors() {
         for manifest in manifest_names_for_language(language) {
             let candidate = directory.join(manifest);
-            if candidate != rel_path
-                && existing_workspace_file(root, snapshot, &candidate).is_some()
+            if let Some(stored) = existing_workspace_file(root, snapshot, &candidate)
+                && stored != rel_path
             {
-                return Some(candidate);
+                return Some(stored);
             }
         }
         if language == "csharp"
@@ -2952,18 +2953,40 @@ mod tests {
     #[test]
     fn live_edges_use_the_stored_spelling_of_a_path() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("app/Models")).unwrap();
-        fs::write(root.path().join("app/Models/Invoice.php"), "<?php\n").unwrap();
+        for (path, content) in [
+            ("app/Models/Invoice.php", "<?php\n"),
+            ("Composer.json", "{}\n"),
+            ("go.mod", "module example.com/m\n"),
+            ("internal/api/server.go", "package api\n"),
+            ("Tests/test_ledger.py", ""),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
         if !root.path().join("APP").exists() {
             return; // case-sensitive volume
         }
-        let edges = extract_file_edges(
-            root.path(),
-            None,
-            Path::new("app/Controller.php"),
-            "<?php\nuse App\\Models\\Invoice;\n",
-        );
-        assert_eq!(edges, []);
+        for (source, content, expected) in [
+            (
+                "app/Controller.php",
+                "<?php\nuse App\\Models\\Invoice;\n",
+                &["Composer.json", "app/Models/Invoice.php"][..],
+            ),
+            (
+                "main.go",
+                "package main\n\nimport \"example.com/m/internal/API\"\n",
+                &["go.mod", "internal/api/server.go"][..],
+            ),
+            ("src/ledger.py", "", &["Tests/test_ledger.py"][..]),
+        ] {
+            let edges = extract_file_edges(root.path(), None, Path::new(source), content);
+            let targets = edges
+                .iter()
+                .map(|edge| edge.target_path.to_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(targets, expected.iter().copied().collect(), "{source}");
+        }
     }
 
     #[cfg(unix)]
