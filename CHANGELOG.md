@@ -36,6 +36,13 @@ All notable changes to ivygrep are documented in this file.
 - A daemon that a query starts no longer keeps the standard input and the working directory of that query. `producer | ig QUERY` could wait forever, and a volume could not be ejected.
 - The watcher updates files in a directory named `.ivygrep`, which the indexer already included.
 - A daemon exits within seconds after its app home is deleted or replaced. Such a daemon recreated deleted indexes, and it later removed the socket of the daemon that replaced it.
+- On macOS, a process recognizes running watchers and workers that started with another locale or time zone. `ig --status` reported a live watcher as offline, and `--wait-for-enhancement` failed with `background enhancement stalled` after a second process started a second worker.
+- `ig --status` shows a hash worker, and a worker that waits for its start, after an earlier worker of the workspace finished. It also keeps the pause reason. A process that received the PID of a dead worker no longer blocks enhancement.
+- `ig --add --force`, `ig --rm`, and other index removals no longer fail with `Directory not empty` or `No such file or directory` while another process reads or updates the index.
+- An `--all-indices` search warns about each workspace that it skips because the index of that workspace is not complete. During a rebuild it returned no results without a message.
+- `ig --status` reports the error when the updates of a live watcher fail. It reported `configured + live`.
+- `ig --doctor` reports a burst of watcher events only while events wait. The finding stayed until the daemon restarted.
+- A query warns when the path of the daemon socket is too long for a Unix socket. Only `daemon.log` named the reason why no daemon and no watcher ran.
 
 ### Security
 

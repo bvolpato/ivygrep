@@ -206,6 +206,17 @@ mod unix {
         Ok(config::app_home()?.join("daemon.sock"))
     }
 
+    /// Why no daemon can listen at [`socket_path`], if its path is too long for
+    /// a Unix socket.
+    pub fn socket_path_problem() -> Option<String> {
+        let path = socket_path().ok()?;
+        std::os::unix::net::SocketAddr::from_pathname(&path).err()?;
+        Some(format!(
+            "the daemon cannot listen at {}: the path is too long for a Unix socket; set a shorter IVYGREP_HOME",
+            path.display()
+        ))
+    }
+
     pub async fn bind() -> Result<(IpcListener, PathBuf)> {
         let path = socket_path()?;
         if path.exists() {
@@ -327,6 +338,10 @@ mod windows {
 
     pub fn socket_path() -> Result<PathBuf> {
         Ok(config::app_home()?.join("daemon.port"))
+    }
+
+    pub fn socket_path_problem() -> Option<String> {
+        None
     }
 
     pub async fn bind() -> Result<(IpcListener, PathBuf)> {

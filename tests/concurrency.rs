@@ -476,3 +476,45 @@ fn concurrent_cli_searches_via_binary() {
         eprintln!("concurrent CLI search '{query}': OK");
     }
 }
+
+/// A hash worker that waits for a place is visible in status, also after an
+/// earlier worker of the workspace left a finished job record.
+#[test]
+#[serial]
+fn queued_hash_worker_is_listed_as_active() {
+    use ivygrep::jobs::{JobKind, finish_job};
+    use ivygrep::workspace::list_workspaces;
+
+    let (_root, home, workspace, _model) = make_indexed_workspace(1);
+    finish_job(&workspace, JobKind::Enhancement, "hash-completed", None).unwrap();
+
+    // The only place of the lane is taken.
+    let slots = home.path().join("enhancement-slots");
+    fs::create_dir_all(&slots).unwrap();
+    let place = fs::File::create(slots.join("hash-0.lock")).unwrap();
+    fs2::FileExt::lock_exclusive(&place).unwrap();
+    let mut worker = std::process::Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_ENHANCE_MAX_WORKERS", "1")
+        .env("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0")
+        .arg("--enhance-hash-internal")
+        .arg(&workspace.root)
+        .spawn()
+        .unwrap();
+    let phase = || {
+        let status = list_workspaces().unwrap().pop().unwrap();
+        (status.enhancing_in_progress, status.enhancing_phase)
+    };
+    let queued = (0..600).any(|_| {
+        thread::sleep(std::time::Duration::from_millis(50));
+        phase() == (true, Some("queued".to_string()))
+    });
+    // The hash worker does not count as the neural worker of a later request.
+    let needs_neural = workspace.needs_neural_enhancement();
+    drop(place);
+    assert!(worker.wait().unwrap().success());
+    assert!(queued, "status: {:?}", phase());
+    assert!(needs_neural);
+    assert!(!phase().0);
+    assert!(!workspace.needs_hash_enhancement());
+}

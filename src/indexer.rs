@@ -600,13 +600,45 @@ fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
             continue;
         }
         let path = entry.path();
-        if path.is_dir() {
-            fs::remove_dir_all(&path)?;
+        let removed = if path.is_dir() {
+            remove_index_directory(&path)
         } else {
-            fs::remove_file(&path)?;
+            fs::remove_file(&path)
+        };
+        match removed {
+            // Other processes replace metadata and drop stale PID files
+            // without the index lock.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            removed => removed?,
         }
     }
     Ok(())
+}
+
+/// Other processes open a store without the index lock, and Tantivy creates
+/// lock files in the directory that it opens. A directory under a new name gets
+/// no new files. If a crash leaves it behind, the next index run removes it.
+fn remove_index_directory(path: &Path) -> std::io::Result<()> {
+    let renamed = path.with_file_name(format!(
+        "{}{}",
+        staging::STAGING_DIR_PREFIX,
+        uuid::Uuid::new_v4()
+    ));
+    // Windows does not rename a directory with open files.
+    let path = if fs::rename(path, &renamed).is_ok() {
+        renamed.as_path()
+    } else {
+        path
+    };
+    for _ in 0..20 {
+        match fs::remove_dir_all(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            removed => return removed,
+        }
+    }
+    fs::remove_dir_all(path)
 }
 
 pub fn index_workspace(
@@ -7286,6 +7318,55 @@ mod tests {
                 std::ffi::OsString::from("job.lock"),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn remove_workspace_index_tolerates_readers_and_metadata_writers() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let metadata = WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 1,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: true,
+            skip_gitignore: false,
+            index_generation: 1,
+        };
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            // A process that opens the store creates Tantivy lock files in it.
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = fs::write(workspace.tantivy_dir().join(".tantivy-meta.lock"), "");
+                }
+            });
+            // Another process publishes metadata and drops its PID file.
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = workspace.write_metadata(&metadata);
+                    let _ = fs::write(workspace.enhancing_pid_path(), "1");
+                    let _ = fs::remove_file(workspace.enhancing_pid_path());
+                }
+            });
+            let removals = (0..300)
+                .map(|_| {
+                    fs::create_dir_all(workspace.tantivy_dir()).unwrap();
+                    remove_workspace_index(&workspace)
+                })
+                .collect::<Vec<_>>();
+            stop.store(true, Ordering::Relaxed);
+            for removal in removals {
+                removal.unwrap();
+            }
+        });
     }
 
     #[test]
