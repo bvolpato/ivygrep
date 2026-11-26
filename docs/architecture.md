@@ -211,7 +211,8 @@ home, or the filesystem root. An interactive terminal accepts `y` or `yes`;
 non-interactive use requires `--yes`. A plain `--add` of an already indexed,
 healthy directory does not trigger this prompt. `--force` rebuilds it, while
 `--skip-gitignore` can add ignored files, and both prompt when they target a
-broad root.
+broad root. MCP cannot ask, so `ig_search` returns an error instead of building
+or expanding such an index. It still searches a healthy one that already exists.
 
 Main indexes and overlays mark live publication as incomplete before changing
 stores. The marker survives failures and is cleared only after stores, metadata,

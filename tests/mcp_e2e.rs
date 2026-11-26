@@ -868,7 +868,7 @@ fn e2e_mcp_context_pack_through_the_daemon_matches_the_in_process_pack() {
 }
 
 #[test]
-fn e2e_mcp_literal_filenames_rank_dense_files_before_applying_limit() {
+fn e2e_mcp_filenames_rank_dense_files_before_applying_limit() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(repo.join(".git")).unwrap();
@@ -881,20 +881,26 @@ fn e2e_mcp_literal_filenames_rank_dense_files_before_applying_limit() {
         (true, 3, json!(["z.txt", "a.txt", "m.txt"])),
     ] {
         let home = tmp.path().join(format!("home-{autospawn}"));
-        let (result, _) = mcp_search(
-            &home,
-            &repo,
-            autospawn,
-            json!({"query": "needle", "path": repo, "literal": true, "file_name_only": true, "limit": limit}),
-        );
+        let mut results = Vec::new();
+        for mode in ["literal", "regex"] {
+            let (result, _) = mcp_search(
+                &home,
+                &repo,
+                autospawn,
+                json!({"query": "needle", "path": repo, mode: true, "file_name_only": true, "limit": limit}),
+            );
+            results.push(result);
+        }
         let daemon = DaemonGuard {
             pid: find_watcher_pid(&home),
         };
         assert_eq!(daemon.pid.is_some(), autospawn);
-        let payload = &result["structuredContent"];
-        assert_eq!(payload["file_paths"], expected, "{result}");
-        assert_eq!(payload["total_matches"], 3);
-        assert_eq!(payload["truncated"], limit < 3);
+        for result in results {
+            let payload = &result["structuredContent"];
+            assert_eq!(payload["file_paths"], expected, "{result}");
+            assert_eq!(payload["total_matches"], 3);
+            assert_eq!(payload["truncated"], limit < 3);
+        }
         let (detailed, _) = mcp_search(
             &home,
             &repo,
@@ -908,4 +914,68 @@ fn e2e_mcp_literal_filenames_rank_dense_files_before_applying_limit() {
         assert_eq!(files[0]["hit_count"], 350);
         assert_eq!(files[0]["more_hits_in_file"], 345);
     }
+}
+
+// `dirs::home_dir` reads `HOME` only on Unix.
+#[cfg(unix)]
+#[test]
+fn e2e_mcp_does_not_build_an_index_of_the_home_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let user_home = tmp.path().join("user");
+    let home = tmp.path().join("ivygrep_home");
+    fs::create_dir_all(user_home.join("project")).unwrap();
+    fs::write(user_home.join("notes.rs"), "pub fn greeting() {}\n").unwrap();
+    fs::write(user_home.join("project/lib.rs"), "pub fn project_fn() {}\n").unwrap();
+    let ig = |args: &[&str]| {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin("ig"));
+        command
+            .args(args)
+            .current_dir(&user_home)
+            .env("HOME", &user_home)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1");
+        command
+    };
+    let search = |arguments: Value| -> Value {
+        let mut child = ig(&["--mcp"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(
+            child.stdin.take().unwrap(),
+            "{}",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                   "params": {"name": "ig_search", "arguments": arguments}})
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        response["result"].clone()
+    };
+    let assert_refused = |result: Value| {
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("your home directory"), "{text}");
+        assert!(text.contains("absolute path of a project"), "{text}");
+        assert!(text.contains("--yes"), "{text}");
+    };
+
+    assert_refused(search(json!({"query": "greeting"})));
+    assert_refused(search(json!({"query": "greeting", "path": tmp.path()})));
+    assert_eq!(fs::read_dir(home.join("indexes")).unwrap().count(), 0);
+
+    let project = search(json!({"query": "project_fn", "path": user_home.join("project")}));
+    assert_eq!(project["isError"], false, "{project}");
+    assert!(
+        ig(&["--rm", "project"]).status().unwrap().success()
+            && ig(&["--add", "--yes", "--hash", "--no-watch"])
+                .status()
+                .unwrap()
+                .success()
+    );
+    // An existing index is searched, but not expanded.
+    let existing = search(json!({"query": "greeting"}));
+    assert_eq!(existing["isError"], false, "{existing}");
+    assert_refused(search(json!({"query": "greeting", "skip_gitignore": true})));
 }

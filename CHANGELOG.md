@@ -4,6 +4,13 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP `ig_search` no longer builds an index of the home directory, a directory that contains it, or the filesystem root. It also does not add ignored files to such an index. It returns an error that asks for a project path and names `ig --add PATH --yes`. A healthy index of such a directory is searched as before.
+- MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
+- The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
+- MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
+
 ## [1.3.6] - 2026-11-15
 
 This release includes all changes prepared for the unpublished v1.3.5 tag.
