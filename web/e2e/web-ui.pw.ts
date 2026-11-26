@@ -8,6 +8,8 @@ function sessionEntryPath(): string {
   return token ? `/?token=${encodeURIComponent(token)}` : "/";
 }
 
+const projectRoot = new URL(process.env.IVYGREP_WEB_URL ?? "http://localhost").searchParams.get("workspace") ?? "";
+
 test("opens through the launcher redirect file and calls the API with the session cookie", async ({ page }) => {
   // scripts/e2e_web_ui.sh runs `ig --web` with a recording opener and passes on
   // the one argument it received: the owner-only redirect file, not the token URL.
@@ -104,4 +106,49 @@ test("ignores late search results after folder navigation", async ({ page }) => 
   expect(released).toBe(true);
   await expect(page.locator("#results .file-path").filter({ hasText: "stale.ts" })).toHaveCount(0);
   await expect(page.locator("#results .file-path").filter({ hasText: "fresh.ts" })).toHaveCount(1);
+});
+
+test("a URL restores its scope, and an untracked path is not searched elsewhere", async ({ page }) => {
+  await page.goto(sessionEntryPath());
+  await expect(page.locator("#workspaces .workspace").filter({ hasText: "project" })).toBeVisible();
+
+  const query = "q=semantic+browser+marker";
+  await page.goto(`/?${query}&workspace=${encodeURIComponent(`${projectRoot}/src/web.ts`)}`);
+  await expect(page.locator("#results .file-path")).toHaveText(["src/web.ts"]);
+  await expect(page.locator("#tree .tree-row.file")).toHaveText([/web\.ts/]);
+
+  await page.locator("#workspaces .workspace").filter({ hasText: "All indices" }).click();
+  await expect(page.locator("#results .file-path").first()).toContainText(`${projectRoot}/src/web.ts`);
+  await page.reload();
+  await expect(page.locator("#results .file-path").first()).toContainText(`${projectRoot}/src/web.ts`);
+  await expect(page.locator("#workspaces .workspace.active")).toContainText("All indices");
+
+  await page.goto(`/?${query}&workspace=/not/tracked`);
+  await expect(page.locator("#summary")).toHaveText("/not/tracked is not tracked.");
+  await expect(page.locator("#results .hit")).toHaveCount(0);
+});
+
+test("the viewer keeps source text and the results keep their workspace", async ({ page, context }) => {
+  await page.goto(sessionEntryPath());
+  await expect(page.locator("#tree .tree-row.folder").filter({ hasText: "docs" })).toBeVisible();
+  await page.locator("#query").fill("guide link marker");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.locator("#results .hit-main").filter({ hasText: "guide.md" }).first().click();
+  await page.locator("#file-view").getByRole("link", { name: "source" }).click();
+  await expect(page.locator("#viewer-title")).toHaveText("src/web.ts");
+  const selected = await page.locator("#file-view .code").evaluate((code) => {
+    getSelection()?.selectAllChildren(code);
+    return getSelection()?.toString() ?? "";
+  });
+  expect(selected).toContain("semantic browser marker");
+  expect(selected).not.toContain("Line 1:");
+
+  await page.locator("#query").fill("");
+  await page.locator("#workspaces .workspace").filter({ hasText: "other" }).click();
+  await expect(page.locator("#results .hit")).toHaveCount(0);
+
+  await context.clearCookies();
+  await page.locator("#query").fill("lost session");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.locator("#summary")).toContainText("authentication required");
 });

@@ -1,6 +1,20 @@
 import { ALL_WORKSPACES } from "./app-types";
 import type { WorkspaceStatus } from "./app-types";
-import { countText } from "./ui-utils";
+import { countText, isWithin, relativeWithin } from "./ui-utils";
+
+/**
+ * Workspace and scope for a requested path. A workspace can be nested in
+ * another one, and only its own index holds its files.
+ */
+export function workspaceForPath(
+  workspaces: WorkspaceStatus[],
+  path: string
+): { root: string; scope: string } | undefined {
+  const roots = workspaces.map((ws) => ws.root).filter((root) => isWithin(path, root));
+  if (!roots.length) return undefined;
+  const root = roots.reduce((longest, candidate) => candidate.length > longest.length ? candidate : longest);
+  return { root, scope: relativeWithin(path, root) };
+}
 
 export function workspaceMeta(ws: WorkspaceStatus): string {
   if (ws.root === ALL_WORKSPACES) return "Search every tracked index";

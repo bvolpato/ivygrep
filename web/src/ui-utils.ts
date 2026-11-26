@@ -36,6 +36,22 @@ export function hitKey(hit: { file_path: string; start_line: number; end_line: n
   return `${normalizePath(hit.file_path)}:${hit.start_line}:${hit.end_line}`;
 }
 
+/** Keeps the first hit of each file range, so every row has its own key. */
+export function uniqueHits<T extends { file_path: string; start_line: number; end_line: number }>(hits: T[]): T[] {
+  const keys = new Set<string>();
+  return hits.filter((hit) => {
+    const key = hitKey(hit);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+}
+
+/** Spaces are part of a regex pattern. Pasted line breaks at its ends are not. */
+export function searchQuery(mode: string, value: string): string {
+  return mode === "regex" ? value.replace(/^[\r\n]+|[\r\n]+$/g, "") : value.trim();
+}
+
 export function isWithin(path: string, root: string): boolean {
   return path === root || path.startsWith(`${root}/`) || path.startsWith(`${root}\\`);
 }
