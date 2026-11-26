@@ -26,6 +26,10 @@ All notable changes to ivygrep are documented in this file.
 - The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
 - Malformed Web requests get a 400 or 431 response instead of a closed connection.
 - Search ranks a file such as `src/handler_tests.rs` as a test, like `src/handler_test.rs`. It competed with source files at full weight.
+- A file without read permission no longer fails an index run and no longer makes the workspace unsearchable. ivygrep skips the file with a warning, keeps the chunks that the index has for it, and tries again on the next run. This changes the rule of v1.3.1, where a permission error failed the update. Other I/O errors, an unreadable `.gitignore` or `.ignore` file, a file replaced by a symlink, and a missing workspace root still fail the update, but a failure before the first commit now leaves the index queryable.
+- `ig --add` finds sources that Git status cannot report as changed: the files of a submodule after `git submodule update --init` or `deinit`, a tracked directory that gets or loses its own `.git` entry, and a tracked file that was missing only while the first scan ran. The clean-checkout shortcut kept the older index until the next commit.
+- `ig --add` and `ig --add --force` rebuild an index whose `workspace.json` or `index_incarnation` file is damaged. They stopped with a JSON or UTF-8 error.
+- `ig --doctor` and searches no longer rebuild the index of a directory whose only text files are larger than 16 MiB.
 - `-n` limits result files, not matches, in CLI regex, reference, and caller searches. One file with many matches could use the whole limit. These searches read 20 matches per requested file, from 200 to 1,000 in total, so a file with more matches can still hide later files.
 
 ### Security

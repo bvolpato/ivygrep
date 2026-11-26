@@ -4134,8 +4134,9 @@ async fn run_index_request(
             index_state.clear_workspace_contexts(&index_workspace_target);
             index_state.clear_watcher_failure(&index_workspace_target.id);
         }
-        let mut metadata = index_workspace_target.read_metadata()?.unwrap_or_else(|| {
-            crate::workspace::WorkspaceMetadata {
+        let mut metadata = index_workspace_target
+            .read_undamaged_metadata()?
+            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
                 id: index_workspace_target.id.clone(),
                 root: index_workspace_target.root.clone(),
                 created_at_unix: std::time::SystemTime::now()
@@ -4146,8 +4147,7 @@ async fn run_index_request(
                 watch_enabled: watch,
                 skip_gitignore,
                 index_generation: 0,
-            }
-        });
+            });
         let obsolete_overlay = !index_workspace_target.is_worktree()
             && index_workspace_target.base_ref_path().exists();
         let already_current = replacement.is_none()
@@ -4235,8 +4235,13 @@ async fn run_index_request(
                 (Err(message), _) => DaemonResponse::Error { message },
                 (Ok(()), Some(summary)) => DaemonResponse::Ack {
                     message: format!(
-                        "indexed {} files ({} chunks)",
-                        summary.indexed_files, summary.total_chunks
+                        "indexed {} files ({} chunks){}",
+                        summary.indexed_files,
+                        summary.total_chunks,
+                        summary
+                            .warning
+                            .map(|warning| format!("; {warning}"))
+                            .unwrap_or_default()
                     ),
                 },
                 (Ok(()), None) => DaemonResponse::Ack {
