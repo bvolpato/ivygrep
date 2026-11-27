@@ -6,6 +6,16 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- A context pack for a stack trace or compiler message shows the line that the text names, also inside a function that does not fit into one item. A pack lists up to 32 named lines as references, or one for each 64 tokens of a smaller budget, and the first line of each file has priority. Up to three lines of a file become evidence, with the first and the last line of a file that has more.
+- Context packs resolve paths in `file://`, bundler, and local development server URLs, in diff headers, in workspaces whose path contains spaces, and with route segments (`[slug]`, `(group)`, `$id`) or non-ASCII names. A name without an extension, such as `Makefile:4`, resolves when the file exists.
+- Context packs do not mark production code as a test because it calls a function such as `split(` or `commit(`. That mark also replaced definitions with called names as anchors.
+- Up to 24 changed files can become evidence in a context pack that has room for them. Changed files that do not match the task stopped after the fourth one, and the pack was not marked as truncated.
+- Context packs are identical for the same task and index. The graph ranking added floating-point numbers in random order.
+- On a file system that ignores letter case or Unicode normalization, context packs use the stored spelling of a path. A PHP import such as `App\Models\Invoice` listed `app/Models/Invoice.php` twice under two names.
+- Context packs skip changed or named files that the indexer skips, such as binary and minified files, and read named files that are not valid UTF-8 as the indexer does.
+- Context items keep the indentation of their first line. Roles and reasons of symbols whose line is cut from an item are removed, and files that a test imports are not labeled as its tests.
+- A context pack closes a code fence that the task leaves open, so that the evidence stays outside the code block. A task with an uppercase `AND`, `OR`, or `NOT` that is not a valid Boolean expression is searched as text.
+- `ig context --since` reports that two histories have no merge base. The change list does not repeat a file that the working tree renamed, or report a deletion of a file that was only staged.
 - `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
 - The stress fixture download uses its next source when a server requests a long retry delay. Such a delay blocked the scheduled cross-platform run until its time limit, and `E2E Summary` now fails when a platform job is cancelled.
 - `install.sh` names an accelerator archive that it cannot reach instead of reporting it as not available. It also selects the Apple Silicon archive from a shell that runs under Rosetta.
@@ -66,16 +76,10 @@ All notable changes to ivygrep are documented in this file.
 - R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
 - A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
 - A source file of unmatched punctuation no longer takes minutes to index.
-- A context pack for a stack trace or compiler message shows the line that the text names, also inside a function that does not fit into one item. A pack lists up to 32 named lines as references, or one for each 64 tokens of a smaller budget, and the first line of each file has priority. Up to three lines of a file become evidence, with the first and the last line of a file that has more.
-- Context packs resolve paths in `file://`, bundler, and local development server URLs, in diff headers, in workspaces whose path contains spaces, and with route segments (`[slug]`, `(group)`, `$id`) or non-ASCII names. A name without an extension, such as `Makefile:4`, resolves when the file exists.
-- Context packs do not mark production code as a test because it calls a function such as `split(` or `commit(`. That mark also replaced definitions with called names as anchors.
-- Up to 24 changed files can become evidence in a context pack that has room for them. Changed files that do not match the task stopped after the fourth one, and the pack was not marked as truncated.
-- Context packs are identical for the same task and index. The graph ranking added floating-point numbers in random order.
-- On a file system that ignores letter case or Unicode normalization, context packs use the stored spelling of a path. A PHP import such as `App\Models\Invoice` listed `app/Models/Invoice.php` twice under two names.
-- Context packs skip changed or named files that the indexer skips, such as binary and minified files, and read named files that are not valid UTF-8 as the indexer does.
-- Context items keep the indentation of their first line. Roles and reasons of symbols whose line is cut from an item are removed, and files that a test imports are not labeled as its tests.
-- A context pack closes a code fence that the task leaves open, so that the evidence stays outside the code block. A task with an uppercase `AND`, `OR`, or `NOT` that is not a valid Boolean expression is searched as text.
-- `ig context --since` reports that two histories have no merge base. The change list does not repeat a file that the working tree renamed, or report a deletion of a file that was only staged.
+- MCP `ig_search` no longer builds an index of the home directory, a directory that contains it, or the filesystem root. It also does not add ignored files to such an index. It returns an error that asks for a project path and names the `ig --add` command that builds the index on purpose. A healthy index of such a directory is searched as before.
+- MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
+- The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
+- MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
 
 ### Security
 
