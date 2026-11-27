@@ -1033,8 +1033,12 @@ fn literal_search_candidates(
     if options.is_cancelled() {
         return Ok(None);
     }
-    let query = query_text.trim();
-    if query.is_empty() || options.bounded_limit() == Some(0) {
+    if query_text.trim().is_empty() || options.bounded_limit() == Some(0) {
+        return Ok(None);
+    }
+    // A shell `$(...)` removes the `\n` of a final `\r\n` and keeps the `\r`.
+    let query = without_final_line_break(query_text).trim_end_matches('\r');
+    if query.contains('\n') {
         return Ok(None);
     }
 
@@ -1053,6 +1057,26 @@ fn literal_search_candidates(
         return Ok(None);
     }
     Ok(Some(LiteralCandidates { query_lower, paths }))
+}
+
+/// Explains the empty result of a pattern that [`pattern_needs_line_break`] reports.
+pub(crate) const MULTI_LINE_PATTERN_WARNING: &str = "literal and regex searches match within one line, but this pattern needs a line break. Search for one of its lines, or search without this mode.";
+
+/// Whether a literal or regex pattern can only match across lines. Both modes
+/// search one line at a time, so it has no results.
+pub(crate) fn pattern_needs_line_break(pattern: &str, regex: bool) -> bool {
+    if regex {
+        crate::regex_search::line_pattern(pattern).is_none()
+    } else {
+        without_final_line_break(pattern).contains('\n')
+    }
+}
+
+/// A pasted line can end with its line break. It is not part of the pattern.
+pub(crate) fn without_final_line_break(pattern: &str) -> &str {
+    pattern
+        .strip_suffix('\n')
+        .map_or(pattern, |line| line.strip_suffix('\r').unwrap_or(line))
 }
 
 /// Case-insensitive literal matching folds each character independently.
@@ -7590,6 +7614,39 @@ mod tests {
             literal_search(&workspace, "calculate_sales_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_sales_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_keeps_spaces_and_drops_one_line_break() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("notes.txt"), "diff the notes\n  if ready\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let options = SearchOptions {
+            context: 0,
+            ..SearchOptions::default()
+        };
+        let lines = |query: &str| {
+            literal_search(&workspace, query, &options)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.preview)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines("if"), ["diff the notes", "  if ready"]);
+        for query in ["if ", " if", "  if ready\r\n", "  if ready\r"] {
+            assert_eq!(lines(query), ["  if ready"], "{query:?}");
+        }
+        assert!(lines(" \n").is_empty());
+        assert!(lines("diff the notes\n  if ready").is_empty());
+        for (pattern, multi_line) in [("if \n", false), ("a\nb", true), ("a\n\n", true)] {
+            assert_eq!(pattern_needs_line_break(pattern, false), multi_line);
+        }
     }
 
     #[test]
