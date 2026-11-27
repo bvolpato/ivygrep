@@ -1,39 +1,69 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep for Cursor</title><meta name="description" content="Connect Cursor to local ivygrep code search and context packs.">
-    <link rel="canonical" href="https://bvolpato.github.io/ivygrep/integrations/cursor.html">
-    <meta property="og:title" content="ivygrep for Cursor">
-    <meta property="og:description" content="Connect Cursor to local ivygrep code search and context packs.">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://bvolpato.github.io/ivygrep/integrations/cursor.html">
-    <meta property="og:site_name" content="ivygrep">
-    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
-    <meta property="og:image:width" content="1280">
-    <meta property="og:image:height" content="698">
-    <meta property="og:image:alt" content="ivygrep search and bounded task-context workflow">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep for Cursor">
-    <meta name="twitter:description" content="Connect Cursor to local ivygrep code search and context packs.">
-    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
-    <meta name="twitter:image:alt" content="ivygrep search and bounded task-context workflow">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="integration.css"><link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ivygrep for Cursor</title>
+<meta name="description" content="Add local code search and context packs to Cursor with one command.">
+<meta name="theme-color" content="#0c3b2b">
+<link rel="canonical" href="https://bvolpato.github.io/ivygrep/integrations/cursor.html">
+<meta property="og:title" content="ivygrep for Cursor">
+<meta property="og:description" content="Add local code search and context packs to Cursor with one command.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bvolpato.github.io/ivygrep/integrations/cursor.html">
+<meta property="og:site_name" content="ivygrep">
+<meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="698">
+<meta property="og:image:alt" content="grep finds what you typed. ivygrep finds what you meant.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ivygrep for Cursor">
+<meta name="twitter:description" content="Add local code search and context packs to Cursor with one command.">
+<meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
+<meta name="twitter:image:alt" content="grep finds what you typed. ivygrep finds what you meant.">
+<link rel="preload" href="../assets/fonts/recursive-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../site.css">
+<link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+<noscript><style>.copy { display: none !important; }</style></noscript>
+<script src="../site.js" defer></script>
 </head>
 <body>
-    <div class="bg-fx"></div><div class="bg-fx-glow"></div>
-    <nav class="navbar relative z-10"><div class="container nav-content"><a href="../index.html" class="logo"><img src="../assets/icon.svg" alt="ivygrep" width="38" height="34"></a><div class="integration-nav"><a href="codex.html">Codex</a><a href="claude-code.html">Claude Code</a><a href="cursor.html" aria-current="page">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html">MCP</a></div></div></nav>
-    <main class="integration-main relative z-10"><div class="container">
-        <header class="integration-header"><span class="section-tag">Cursor integration</span><h1>Search local code from Cursor.</h1><p>Automatic setup updates Cursor MCP configuration, preserves existing servers, verifies handshake, and runs one smoke search.</p></header>
-        <div class="integration-grid">
-            <section class="glass-panel integration-card"><h2>Install</h2><pre class="integration-command">brew install bvolpato/tap/ivygrep
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../assets/icon.svg" alt="" width="34" height="31">ivygrep</a>
+    <nav class="site-links always" aria-label="Integrations"><a href="claude-code.html">Claude Code</a><a href="codex.html">Codex</a><a href="cursor.html" aria-current="page">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html">MCP</a></nav>
+  </div>
+</header>
+<main id="main" class="wrap guide">
+<article>
+<h1>Search local code from Cursor.</h1>
+<p>One command updates the Cursor MCP configuration, keeps your existing servers, checks the handshake, and runs a search.</p>
+<h2>Install</h2>
+<div class="cmd"><pre>brew install bvolpato/tap/ivygrep
 ig agent install cursor
-ig agent doctor</pre><p>Windows: <code>winget install --id BrunoVolpato.ivygrep --exact</code>. See <a href="../index.html#install">all install options</a>.</p><p>Restart Cursor after setup. For project-local configuration, add this to <code>.cursor/mcp.json</code>:</p><pre class="integration-command">{"mcpServers":{"ig":{"type":"stdio","command":"ig","args":["--mcp"]}}}</pre><h3>Use</h3><pre class="integration-command">Use ig_search with output=context_pack and budget_tokens=8000 for this task.</pre></section>
-            <aside class="glass-panel integration-card"><h2>Good task pack</h2><ul><li>Concrete task or error as query</li><li>Absolute repository path</li><li><code>since=main</code> includes committed current-branch changes since the merge base, plus staged, unstaged, and untracked files</li><li>One focused literal search only if needed</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
-        </div>
-    </div></main>
+ig agent doctor</pre><button class="copy">Copy</button></div>
+<p>On Windows, install with <code>winget install --id BrunoVolpato.ivygrep --exact</code>. See <a href="../index.html#install">all install options</a>.</p>
+<p>Restart Cursor after setup.</p>
+<h2>One project only</h2>
+<p>Add this to <code>.cursor/mcp.json</code> in the project:</p>
+<div class="cmd"><pre>{"mcpServers":{"ig":{"type":"stdio","command":"ig","args":["--mcp"]}}}</pre><button class="copy">Copy</button></div>
+<h2>Use it</h2>
+<div class="cmd"><pre>Use ig_search with output=context_pack and budget_tokens=8000 for this task.</pre><button class="copy">Copy</button></div>
+</article>
+<aside><h2>A good request has</h2><ul><li>A concrete task or error as the query</li><li>The absolute repository path</li><li><code>since=main</code> to include commits since the merge base, plus staged, unstaged, and untracked files</li><li>One literal search later, only if the task needs it</li></ul><p><a href="mcp.html">MCP details</a></p></aside>
+</main>
+<footer class="site-foot">
+  <div class="wrap">
+    <nav aria-label="Project">
+      <a href="../index.html">Home</a>
+      <a href="https://github.com/bvolpato/ivygrep">GitHub</a>
+      <a href="https://github.com/bvolpato/ivygrep#readme">Documentation</a>
+      <a href="../benchmarks/">Benchmarks</a>
+    </nav>
+    <span>MIT licensed. Maintained by <a href="https://github.com/bvolpato">Bruno Volpato</a>.</span>
+  </div>
+</footer>
+<div class="vh" role="status" aria-live="polite" id="announce"></div>
 </body>
 </html>
