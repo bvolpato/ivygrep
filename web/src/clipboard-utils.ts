@@ -1,19 +1,11 @@
-import type { ContextBundle, CopyFormat, CopyScope, SearchHit } from "./app-types";
-
-export type SearchExportMeta = {
-  query: string;
-  workspace: string;
-  scope: string;
-  mode: string;
-  limit: number;
-};
+import type { ContextBundle, CopyFormat, CopyScope, SearchHit, SearchMetadata } from "./app-types";
 
 export function clipboardText(
   format: CopyFormat,
   hits: SearchHit[],
   contextPack: ContextBundle | null,
   scope: CopyScope,
-  metadata: SearchExportMeta
+  metadata: SearchMetadata
 ): string {
   if (!hits.length) return "";
   if (format === "files") return uniqueFilePaths(hits).join("\n");
@@ -28,7 +20,7 @@ export function uniqueFilePaths(hits: SearchHit[]): string[] {
   return Array.from(new Set(hits.map((hit) => hit.file_path)));
 }
 
-export function searchExport(hits: SearchHit[], metadata: SearchExportMeta): Record<string, unknown> {
+export function searchExport(hits: SearchHit[], metadata: SearchMetadata): Record<string, unknown> {
   return {
     ...metadata,
     scope: metadata.scope || null,

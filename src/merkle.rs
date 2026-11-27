@@ -14,10 +14,28 @@ use crate::workspace::index_path_string;
 
 use std::io::IsTerminal;
 
-const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// Replaces the metadata hash of a file that vanished before it was indexed.
 /// A metadata hash is hexadecimal, so no file on disk has this hash.
 const VANISHED_FILE_HASH: &str = "vanished";
+/// Replaces the metadata hash of a regular file that may not be read.
+const UNREADABLE_FILE_HASH: &str = "unreadable";
+
+/// Whether `error` means that this process may not read the regular file at
+/// `path`. A contained read that rejects an unsafe path has no OS error code.
+/// An ignore file does not count: without its rules, the index would hold the
+/// files that it hides.
+pub(crate) fn is_unreadable_file(path: &Path, error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        && error.raw_os_error().is_some()
+        && !is_ignore_file(path)
+        && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+fn is_ignore_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+}
 
 pub(crate) fn normalized_indexable_content<'a>(path: &Path, bytes: &'a [u8]) -> Cow<'a, [u8]> {
     if !is_indexable_file(path, bytes) || !bytes.windows(2).any(|window| window == b"\r\n") {
@@ -344,6 +362,17 @@ impl MerkleSnapshot {
                         );
                     }
                 };
+                // The walker reports no error for an ignore file that it cannot
+                // open, and walks without its rules.
+                if is_ignore_file(path)
+                    && let Err(error) = fs::File::open(path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return fail(
+                        anyhow::Error::new(error)
+                            .context(format!("failed reading source file {}", path.display())),
+                    );
+                }
                 if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
                     return ignore::WalkState::Continue;
                 }
@@ -355,10 +384,11 @@ impl MerkleSnapshot {
 
                 let file_hash = if content_based {
                     let content = match fs::read(path) {
-                        Ok(c) => c,
+                        Ok(content) => Some(content),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                             return ignore::WalkState::Continue;
                         }
+                        Err(error) if is_unreadable_file(path, &error) => None,
                         Err(error) => {
                             return fail(anyhow::Error::new(error).context(format!(
                                 "failed reading source file {}",
@@ -366,12 +396,17 @@ impl MerkleSnapshot {
                             )));
                         }
                     };
-                    let rel_str = index_path_string(&rel);
-                    let content = normalized_indexable_content(path, &content);
-                    let mut data = Vec::with_capacity(rel_str.len() + content.len());
-                    data.extend_from_slice(rel_str.as_bytes());
-                    data.extend_from_slice(content.as_ref());
-                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
+                    content.map_or_else(
+                        || UNREADABLE_FILE_HASH.to_string(),
+                        |content| {
+                            let rel_str = index_path_string(&rel);
+                            let content = normalized_indexable_content(path, &content);
+                            let mut data = Vec::with_capacity(rel_str.len() + content.len());
+                            data.extend_from_slice(rel_str.as_bytes());
+                            data.extend_from_slice(content.as_ref());
+                            hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
+                        },
+                    )
                 } else {
                     metadata_file_hash(&metadata)
                 };
@@ -490,11 +525,7 @@ impl MerkleSnapshot {
             if rel_path.to_str().is_none() {
                 continue;
             }
-            if rel_path.as_os_str().is_empty()
-                || rel_path
-                    .file_name()
-                    .is_some_and(|name| name == ".gitignore" || name == ".ignore")
-            {
+            if rel_path.as_os_str().is_empty() || is_ignore_file(rel_path) {
                 return Ok(None);
             }
 
@@ -592,12 +623,44 @@ impl MerkleSnapshot {
     /// it as an ordinary deletion. The new hash matches no file: if the file
     /// returned with the same metadata, the next run indexes it again.
     pub(crate) fn mark_vanished(&mut self, rel_paths: &[PathBuf]) {
+        self.replace_hashes(rel_paths, VANISHED_FILE_HASH);
+    }
+
+    /// Records that `rel_paths` may not be read. The index keeps the chunks
+    /// that it has for them, and the next run reads them again.
+    pub(crate) fn mark_unreadable(&mut self, rel_paths: &[PathBuf]) {
+        self.replace_hashes(rel_paths, UNREADABLE_FILE_HASH);
+    }
+
+    fn replace_hashes(&mut self, rel_paths: &[PathBuf], new_hash: &str) {
+        if rel_paths.is_empty() {
+            return;
+        }
         for rel_path in rel_paths {
             if let Some(hash) = self.files.get_mut(&index_path_string(rel_path)) {
-                *hash = format!("{VANISHED_FILE_HASH}-{}", u8::from(hash.ends_with("-1")));
+                *hash = format!("{new_hash}-{}", u8::from(hash.ends_with("-1")));
             }
         }
         self.root_hash = root_hash(&self.files);
+    }
+
+    /// Marks and returns the files that `older` records as unreadable and that
+    /// still may not be read, so that they do not make every run an update.
+    pub(crate) fn keep_unreadable(&mut self, older: &Self, root: &Path) -> Vec<PathBuf> {
+        let unreadable = older
+            .files
+            .iter()
+            .filter(|(path, hash)| {
+                hash.starts_with(UNREADABLE_FILE_HASH) && self.files.contains_key(*path)
+            })
+            .map(|(path, _)| PathBuf::from(path))
+            .filter(|path| {
+                crate::workspace_file::open(root, path)
+                    .is_err_and(|error| is_unreadable_file(&root.join(path), &error))
+            })
+            .collect::<Vec<_>>();
+        self.mark_unreadable(&unreadable);
+        unreadable
     }
 }
 
@@ -656,11 +719,12 @@ fn root_hash(files: &BTreeMap<String, String>) -> String {
     hex::encode(hasher.digest128().to_le_bytes())
 }
 
-/// Reports chosen source files as deleted at one stage of an index run. A
-/// concurrent `git checkout` has the same effect on a file already listed.
+/// Reports chosen source files as deleted, or their read as failed, at one
+/// stage of an index run. A concurrent `git checkout` deletes listed files too.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
+    use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use std::sync::{LazyLock, Mutex};
 
@@ -672,31 +736,35 @@ pub(crate) mod test_support {
         Index,
     }
 
-    static VANISHED: LazyLock<Mutex<HashSet<(Stage, PathBuf)>>> =
-        LazyLock::new(|| Mutex::new(HashSet::new()));
+    static FAILURES: LazyLock<Mutex<HashMap<(Stage, PathBuf), ErrorKind>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
-    pub(crate) struct VanishedFile(Stage, PathBuf);
+    pub(crate) struct FailingFile(Stage, PathBuf);
 
-    impl Drop for VanishedFile {
+    impl Drop for FailingFile {
         fn drop(&mut self) {
-            VANISHED.lock().unwrap().remove(&(self.0, self.1.clone()));
+            FAILURES.lock().unwrap().remove(&(self.0, self.1.clone()));
         }
     }
 
-    pub(crate) fn vanish(stage: Stage, path: &Path) -> VanishedFile {
-        assert!(VANISHED.lock().unwrap().insert((stage, path.to_path_buf())));
-        VanishedFile(stage, path.to_path_buf())
+    pub(crate) fn fail(stage: Stage, path: &Path, kind: ErrorKind) -> FailingFile {
+        let previous = FAILURES
+            .lock()
+            .unwrap()
+            .insert((stage, path.to_path_buf()), kind);
+        assert!(previous.is_none());
+        FailingFile(stage, path.to_path_buf())
+    }
+
+    pub(crate) fn vanish(stage: Stage, path: &Path) -> FailingFile {
+        fail(stage, path, ErrorKind::NotFound)
     }
 
     pub(crate) fn check(stage: Stage, path: &Path) -> std::io::Result<()> {
-        if VANISHED
-            .lock()
-            .unwrap()
-            .contains(&(stage, path.to_path_buf()))
-        {
-            return Err(std::io::ErrorKind::NotFound.into());
+        match FAILURES.lock().unwrap().get(&(stage, path.to_path_buf())) {
+            Some(kind) => Err((*kind).into()),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -885,22 +953,42 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unreadable_file_aborts_content_snapshot_build() {
+    fn unreadable_file_matches_no_content_snapshot() {
         let dir = tempdir().unwrap();
-        let file = dir.path().join("kept.rs");
-        fs::write(&file, "fn retained() {}\n").unwrap();
+        let file = dir.path().join("locked.rs");
+        fs::write(&file, "fn locked() {}\n").unwrap();
+        fs::write(dir.path().join("kept.rs"), "fn retained() {}\n").unwrap();
+        let readable = MerkleSnapshot::build_content_based(dir.path(), false).unwrap();
         let _restore = RestorePermissions::revoke(&file);
         if fs::read(&file).is_ok() {
             return;
         }
-        assert_eq!(
-            fs::read(&file).unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        for skip_gitignore in [false, true] {
-            let error =
-                MerkleSnapshot::build_content_based(dir.path(), skip_gitignore).unwrap_err();
-            assert!(format!("{error:#}").contains("kept.rs"), "{error:#}");
+        let unreadable = MerkleSnapshot::build_content_based(dir.path(), false).unwrap();
+        assert_eq!(unreadable.files["kept.rs"], readable.files["kept.rs"]);
+        assert_eq!(unreadable.files["locked.rs"], "unreadable-0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_ignore_file_aborts_snapshot_build() {
+        for name in [".gitignore", ".ignore"] {
+            let dir = tempdir().unwrap();
+            fs::create_dir(dir.path().join("nested")).unwrap();
+            fs::write(dir.path().join("nested/hidden.rs"), "fn hidden() {}\n").unwrap();
+            let rules = dir.path().join("nested").join(name);
+            fs::write(&rules, "hidden.rs\n").unwrap();
+            let _restore = RestorePermissions::revoke(&rules);
+            if fs::read(&rules).is_ok() {
+                return; // Privileged users can bypass Unix permission bits.
+            }
+            for content_based in [false, true] {
+                for skip_gitignore in [false, true] {
+                    let error =
+                        MerkleSnapshot::build_inner(dir.path(), content_based, skip_gitignore)
+                            .unwrap_err();
+                    assert!(format!("{error:#}").contains(name), "{error:#}");
+                }
+            }
         }
     }
 
