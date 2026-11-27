@@ -650,6 +650,11 @@ Live source reads use `workspace_file.rs` to open regular files beneath the
 selected workspace without following child symlinks. Preview metadata and text
 come from the same opened file; unavailable live previews use indexed text.
 
+Literal and regex searches compare single lines. A pattern keeps its spaces and
+loses one trailing line break. A literal pattern also loses trailing carriage
+returns. A literal pattern with any other line break, or a regex whose every match
+needs one, has no results, and the CLI and MCP say so in a warning.
+
 Literal and regex previews return lines up to 1 KiB unchanged. A longer line,
 such as a minified bundle or source map, keeps a 1 KiB window around its first
 match (context lines keep their start), cut on character boundaries and marked
@@ -680,7 +685,8 @@ register only names without a chunk of their own, such as a C `typedef`.
 Qualified lookups (`Owner.method`, `Owner::method`,
 `Owner#method`, `Owner->method`) filter by owner, preferring exact-case matches
 and falling back to the bare name; reference and caller scans are restricted
-to the languages that define the symbol. Adding these columns bumped the index
+to the languages that define the symbol. C, C++, and Objective-C count as one
+language, as do JavaScript and TypeScript. Adding these columns bumped the index
 format to v22.
 
 Format v23 rebuilds existing indexes so unchanged Swift and Objective-C files
@@ -694,8 +700,10 @@ marks, and JavaScript joiners; case-insensitive lookup still folds ASCII only.
 Leading and trailing dollar sigils retain their existing bare-name aliases.
 
 Reference searches use indexed identifier candidates, then verify source syntax.
-`--refs` includes non-call uses such as callbacks and function values; `--callers`
-returns chunks containing calls. Whitespace, newlines, and generic arguments do
+`--refs` includes non-call uses such as callbacks and function values, and returns
+the matching line without context lines; `--callers` returns chunks containing
+calls, including `new` expressions and macro calls. Options of Rust attributes and
+`cfg!` predicates are not calls. Whitespace, newlines, and generic arguments do
 not need to be adjacent to the name. Tree-sitter excludes declaration names,
 including Go type, alias, and interface method names, comments, and literal
 text; files without a usable parse use quote/comment masking and a conservative
@@ -1331,7 +1339,7 @@ variables tune runtime defaults. "Set" means present with any value, including
 | `IVYGREP_HOME` | Data directory for indexes. Default `~/.local/share/ivygrep` on every OS, or `$XDG_DATA_HOME/ivygrep` when `XDG_DATA_HOME` is set. Empty values are ignored. |
 | `IVYGREP_MODEL_PROFILE` | Neural profile: `potion-code-16m-v2` (default, also `potion-code-v2`; Model2Vec, 256 dimensions, CPU), the opt-in static profiles `static-retrieval-v1` (also `static`; the default through v1.2.16) and `potion-code-16m-v1`, or transformer profiles `general`, `code`, and `code-hq` (384 dimensions). CUDA and Metal builds accelerate only transformer profiles. Unknown values use the default. Vectors from another profile are not reused. |
 | `IVYGREP_CUDA_LIBRARY_PATH` | Library search path `ig hardware` checks for CUDA runtime libraries, in place of `LD_LIBRARY_PATH`, before falling back to `ldconfig`. `install.sh` instead treats it as an exclusive colon-separated search path, without checking `ldconfig` or standard CUDA directories; an incomplete override can select the portable build. Empty values are ignored. |
-| `IVYGREP_AGENT_HOME` | Home directory `ig agent install` and `ig agent doctor` use to find client configuration files. Default: the user's home directory. |
+| `IVYGREP_AGENT_HOME` | Home directory `ig agent install` and `ig agent doctor` use to find client configuration files. Default: the user's home directory, except that a non-empty `CODEX_HOME` or `CLAUDE_CONFIG_DIR` selects the directory of that client's file. When `IVYGREP_AGENT_HOME` is set, it overrides both. Empty values are ignored. |
 | `IVYGREP_RERANKER` | `learned` (default; also `auto`) or `deterministic` (also `disabled`, `off`). Unknown values report an error in status and use `learned`. |
 | `IVYGREP_RERANK_LIMIT` | Fused candidates the reranker reorders per query. A positive integer overrides the routed default: with the learned reranker, 100 for natural-language, docs/tests/examples, and mixed queries and 30 for identifier, path, and literal or error queries; 30 for every query with the deterministic reranker. Other values are ignored. |
 | `IVYGREP_SEARCH_DEADLINE_SECS` | Server-side daemon search deadline. Default `60`; `0` disables it. Hits gathered before the deadline return with a warning. |

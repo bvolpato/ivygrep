@@ -46,15 +46,25 @@ All notable changes to ivygrep are documented in this file.
 - Search works inside a Git submodule. A submodule, a clone made with `git clone --separate-git-dir`, and a linked worktree of either are standalone workspaces. ivygrep took their Git directory for the main checkout: every search in a submodule failed with `base index format incompatible`, and a separate Git directory was indexed as a workspace. When ivygrep rebuilds the checkout, it removes that index. An index of a submodule no longer prevents an index of its parent repository.
 - `.gitignore` and `info/exclude` rules above a Git repository no longer apply to its files, as in Git. A rule such as `*` or `.worktrees/**` in a directory above a repository or a linked worktree left its index empty. A submodule inside a workspace also stops the rules of its parent repository, except the `info/exclude` rules of a workspace whose root has a `.git` file. Its own `info/exclude` rules apply. `.ignore` files above a repository and all rules above a plain directory still apply. An index with such rules above its repository rebuilds on first use. The next `ig --add` adds the submodule files that rules of the parent hid.
 - C and C++ symbol lookups return definitions only. A mention such as `struct node *next` no longer counts as a definition of `node`, so a common type no longer hides its own definition. `typedef` and `using` names and C++ unions are found.
-- C++ and Objective-C declarations in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
 - Several definitions on one line, such as `int getA() { ... } int getB() { ... }`, are all found.
 - In C and C++ code that the grammar cannot parse because of a macro, types with a body are found. A `typedef` in such code can be missing.
 - Python module docstrings and imports no longer register words such as `provides` or `import` as symbols.
 - Previews of exact symbol hits show the definition line when a multi-line decorator or annotation precedes it.
+- Index format v31 rebuilds existing indexes once to pick up the symbol and chunking changes above.
+- Literal search keeps leading and trailing spaces in the pattern, also in the Web UI, so `--literal 'if '` no longer matches `diff`.
+- The CLI and MCP warn that a literal or regex pattern that needs a line break has no results, because both modes search one line at a time. One trailing line break is ignored.
+- Regex context lines of UTF-16 files are decoded like the matching lines.
+- `--callers` and `--refs` search C, C++, and Objective-C together, and JavaScript and TypeScript together. A function defined in a `.h` file has its `.cpp` callers.
+- `--callers` finds Rust calls in macro arguments such as `assert_eq!(parse(x), y)`, Rust macro invocations, Bash commands, Objective-C messages, and `new` expressions in C++, PHP, Scala, and Dart.
+- `--refs` and `--callers` read code in Bash `"$(...)"` and PHP `"{$...}"` strings. `--refs` no longer lists the names that declarations introduce in C, C++, Haskell, and Objective-C `.m` and `.mm` files.
+- The `-C` help states that references show one line, and that definitions and callers show the complete chunk.
+- `ig agent install` and `ig agent doctor` use the configuration file that `CODEX_HOME` or `CLAUDE_CONFIG_DIR` selects. An empty `IVYGREP_AGENT_HOME` no longer writes the file into the current directory.
+- `ig agent install` accepts a JSON config with a UTF-8 byte order mark and an inline `mcp_servers` table in the Codex config. An unreadable config error names the file. `ig agent doctor` fails when a detected client has an invalid config, instead of reporting a healthy setup.
+- `ig agent doctor` checks a Cursor config that has comments or trailing commas. `ig agent install cursor` does not edit that config and shows the entry to set by hand.
+- C++ and Objective-C declarations in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
 - R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
 - A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
 - A source file of unmatched punctuation no longer takes minutes to index.
-- Index format v31 rebuilds existing indexes once to pick up the symbol and chunking changes above.
 
 ### Security
 

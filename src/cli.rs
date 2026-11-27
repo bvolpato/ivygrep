@@ -170,7 +170,8 @@ pub struct Cli {
     pub json: bool,
 
     /// Lines before and after the focused match to include in each snippet.
-    /// This changes output size, not retrieval ranking.
+    /// This changes output size, not retrieval ranking. --refs shows one line.
+    /// --symbol and --callers show the complete chunk.
     #[arg(
         short = 'C',
         long,
@@ -1941,6 +1942,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             }
         }
         std::process::exit(0);
+    }
+
+    if (cli.literal || cli.regex) && crate::search::pattern_needs_line_break(query, cli.regex) {
+        eprintln!("warning: {}", crate::search::MULTI_LINE_PATTERN_WARNING);
     }
 
     let mut file_results = None;
