@@ -347,8 +347,12 @@ no longer registers a definition or gets its own chunk; `typedef`, `using`, and
 Python `type` names at file or namespace scope and C++ unions register symbols,
 and so do types with a body in C or C++ code that the grammar cannot parse; several
 definitions on one line all register; Python module text and imports, and C++
-destructors and operators, register none; and `.h` files with C++ syntax use the
-C++ grammar. They keep the language name `c`.
+destructors and operators, register none; and `.h` files with C++ or Objective-C
+syntax use the grammar of that language. They keep the language name `c`. R,
+PowerShell, and Clojure functions register their complete names, and a byte-order
+mark does not hide the first line from the line heuristics. Query matching has
+the CPU allowance of the parse budget, so a tree with very many unnamed siblings
+falls back to heuristic chunks.
 
 ## Search pipeline
 

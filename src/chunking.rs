@@ -707,7 +707,12 @@ pub(crate) fn chunk_source_with_metadata(
 ) -> ChunkedSource {
     let lang_def = find_language_def(rel_path);
     let language = lang_def.map(|d| d.name).unwrap_or("text").to_string();
-    let lines: Vec<&str> = text.lines().collect();
+    let mut lines: Vec<&str> = text.lines().collect();
+    // The parser skips a byte-order mark, but the line heuristics do not. The
+    // tree keeps its offsets into the complete text.
+    if let Some(line) = lines.first_mut() {
+        *line = line.strip_prefix('\u{feff}').unwrap_or(line);
+    }
 
     if lines.is_empty() {
         return ChunkedSource {
@@ -872,6 +877,12 @@ impl ParseBudget {
         Self::with_operation_limit(TREE_SITTER_PARSE_OPERATION_BUDGET)
     }
 
+    /// Query matching is linear for ordinary trees. Only the CPU allowance
+    /// limits it.
+    fn for_query() -> Self {
+        Self::with_operation_limit(u64::MAX)
+    }
+
     fn with_operation_limit(max_operations: u64) -> Self {
         Self {
             max_operations,
@@ -969,20 +980,48 @@ pub(crate) fn parse_source_tree(
     parse_source_tree_with_budget(text, &grammar, &ParseBudget::new())
 }
 
-/// C++ headers often use the `.h` extension, and the C grammar cannot parse
-/// classes, namespaces, or templates.
+/// C++ and Objective-C headers often use the `.h` extension, and the C grammar
+/// cannot parse classes, namespaces, templates, or interfaces. Mixed headers use
+/// the C++ grammar.
 fn grammar_language<'a>(rel_path: &Path, language: &'a str, text: &str) -> &'a str {
-    let cpp_header = language == "c"
-        && rel_path
+    if language != "c"
+        || !rel_path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("h"))
-        && text.lines().map(str::trim).any(|line| {
-            matches!(line, "public:" | "protected:" | "private:")
-                || line.starts_with("template<")
-                || line.starts_with("template <")
-                || line.starts_with("namespace ") && line.ends_with('{')
-        });
-    if cpp_header { "cpp" } else { language }
+    {
+        return language;
+    }
+    // Prose such as `namespace pollution` in a comment is not C++.
+    let mut code = crate::text::code_line_ranges(text, language);
+    if code.any(|range| is_cpp_header_line(&text[range])) {
+        "cpp"
+    } else if text.lines().map(str::trim).any(|line| {
+        // Doxygen has commands named `@interface`, `@protocol`, and `@class`.
+        line == "@end"
+            || line.starts_with("@end ")
+            || line.starts_with("#import ")
+            || line.starts_with("@class ") && line.ends_with(';')
+    }) {
+        "objc"
+    } else {
+        language
+    }
+}
+
+fn is_cpp_header_line(line: &str) -> bool {
+    let single_name = |rest: &str| {
+        let name = rest.split(['{', '/']).next().unwrap_or_default().trim();
+        !name.is_empty() && !name.contains(char::is_whitespace)
+    };
+    matches!(line, "public:" | "protected:" | "private:")
+        || line.starts_with("template<")
+        || line.starts_with("template <")
+        || line
+            .strip_prefix("namespace ")
+            .is_some_and(|rest| rest.ends_with('{') || single_name(rest))
+        || line.starts_with("enum class ")
+        || line.starts_with("class ") && line.ends_with(['{', ';'])
+        || line.starts_with("struct ") && line.contains(" : public ")
 }
 
 fn parse_source_tree_with_budget(
@@ -1025,6 +1064,14 @@ fn parse_source_tree_with_budget(
     (!parse_cancelled).then_some(tree)
 }
 
+fn query_flow(stop: bool) -> std::ops::ControlFlow<()> {
+    if stop {
+        std::ops::ControlFlow::Break(())
+    } else {
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
 fn try_tree_sitter_chunk_source_with_budget(
     rel_path: &Path,
     text: &str,
@@ -1036,11 +1083,8 @@ fn try_tree_sitter_chunk_source_with_budget(
     use streaming_iterator::StreamingIterator;
     use tree_sitter::QueryCursor;
 
-    let (grammar, query) = tree_sitter_query(
-        rel_path,
-        grammar_language(rel_path, language, text),
-        lines.len(),
-    )?;
+    let syntax = grammar_language(rel_path, language, text);
+    let (grammar, query) = tree_sitter_query(rel_path, syntax, lines.len())?;
     let query = query?;
     let objcxx = language == "objc"
         && rel_path
@@ -1055,7 +1099,18 @@ fn try_tree_sitter_chunk_source_with_budget(
     let mut captured = Vec::new();
     let mut aliases = Vec::new();
     let mut rust_doc_includes = Vec::new();
-    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    let query_budget = ParseBudget::for_query();
+    let mut query_stopped = false;
+    let mut progress = |_: &tree_sitter::QueryCursorState| {
+        query_stopped = query_budget.record_progress();
+        query_flow(query_stopped)
+    };
+    let mut matches = cursor.matches_with_options(
+        query,
+        tree.root_node(),
+        text.as_bytes(),
+        tree_sitter::QueryCursorOptions::new().progress_callback(&mut progress),
+    );
 
     while let Some(m) = matches.next() {
         for capture in m.captures {
@@ -1129,6 +1184,10 @@ fn try_tree_sitter_chunk_source_with_budget(
             captured.push((capture.node, kind));
         }
     }
+    drop(matches);
+    if query_stopped {
+        return None;
+    }
 
     // These grammars identify the declarations we index. Uncaptured strings,
     // comments, and expressions must not become heuristic symbol definitions.
@@ -1148,13 +1207,13 @@ fn try_tree_sitter_chunk_source_with_budget(
         // the normal whole-file fallback, never a partial AST result.
         objective_cpp_definition_ranges(rel_path, text, captured, budget, &mut trees.cpp_tree)?
     } else {
-        captured_definition_ranges(captured, language, text.as_bytes())
+        captured_definition_ranges(captured, syntax, text.as_bytes())
     };
 
     // Multiple Tree-sitter captures can describe the exact same malformed
     // source span. Keep overlapping parent/child definitions, but never let
     // duplicate captures become extra lexical documents or embedding vectors.
-    if matches!(language, "swift" | "objc") {
+    if matches!(syntax, "swift" | "objc") {
         ranges = coalesce_inline_definition_ranges(ranges);
     } else {
         ranges = merge_duplicate_ranges(ranges, lines);
@@ -1672,7 +1731,18 @@ fn objective_cpp_definition_ranges(
 
     let mut cpp_captured = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
-    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    let query_budget = ParseBudget::for_query();
+    let mut query_stopped = false;
+    let mut progress = |_: &tree_sitter::QueryCursorState| {
+        query_stopped = query_budget.record_progress();
+        query_flow(query_stopped)
+    };
+    let mut matches = cursor.matches_with_options(
+        query,
+        tree.root_node(),
+        text.as_bytes(),
+        tree_sitter::QueryCursorOptions::new().progress_callback(&mut progress),
+    );
     while let Some(matched) = matches.next() {
         for capture in matched.captures {
             let capture_name = query.capture_names()[capture.index as usize];
@@ -1699,6 +1769,10 @@ fn objective_cpp_definition_ranges(
             };
             cpp_captured.push((node, kind));
         }
+    }
+    drop(matches);
+    if query_stopped {
+        return None;
     }
 
     // Resolve owners separately: ObjC methods belong to their @implementation,
@@ -2666,6 +2740,21 @@ fn tree_sitter_query(
             tree_sitter_dart::LANGUAGE,
             "(class_declaration) @class (function_signature) @fn (method_signature) @fn"
         ),
+        // Headers also declare the C types of an Objective-C API.
+        "objc"
+            if rel_path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("h")) =>
+        {
+            cached_query!(
+                OBJC_HEADER_QUERY,
+                tree_sitter_objc::LANGUAGE,
+                concat!(
+                    "(class_interface) @class (protocol_declaration) @class (method_declaration) @fn (function_definition) @fn (struct_specifier body: (_)) @class (enum_specifier body: (_)) @class (union_specifier body: (_)) @class ",
+                    file_scope_alias_query!("(type_definition)"),
+                )
+            )
+        }
         "objc" => cached_query!(
             OBJC_QUERY,
             tree_sitter_objc::LANGUAGE,
@@ -3563,6 +3652,85 @@ mod tests {
         ] {
             assert_eq!(parsed_definitions(path, source), pairs(expected), "{path}");
         }
+    }
+
+    #[test]
+    fn headers_use_the_grammar_of_their_language() {
+        for (source, expected) in [
+            (
+                "#import <Foundation/Foundation.h>\n\n@interface Greeter : NSObject\n- (void)greetPerson:(NSString *)who;\n@end\n\n@protocol GreeterDelegate <NSObject>\n- (void)didGreet;\n@end\n\nunion Reading { int count; float ratio; };\n",
+                &[
+                    ("Greeter", None),
+                    ("greetPerson", Some("Greeter")),
+                    ("GreeterDelegate", None),
+                    ("didGreet", Some("GreeterDelegate")),
+                    ("Reading", None),
+                ][..],
+            ),
+            (
+                "#pragma once\nnamespace ui\n{\nclass Panel : public Base\n{\n  void openPanel() { open_ = true; }\n};\n}\n",
+                &[
+                    ("ui", None),
+                    ("Panel", Some("ui")),
+                    ("openPanel", Some("Panel")),
+                ],
+            ),
+            (
+                "class Widget;\nenum class Shade { Light, Dark };\ninline int width(const Widget &widget) { return 1; }\n",
+                &[("Shade", None), ("width", None)],
+            ),
+            (
+                "/*\n class that is not for public use;\n namespace pollution\n*/\n@interface Meter : NSObject\n@end\n",
+                &[("Meter", None)],
+            ),
+            // Doxygen commands do not make a header Objective-C or C++.
+            (
+                "/**\n@interface\n@class node of a list\n*/\nstruct node { int class; };\n",
+                &[("node", None)],
+            ),
+        ] {
+            let chunks = chunk_source(Path::new("header.h"), source);
+            assert!(chunks.iter().all(|chunk| chunk.language == "c"));
+            assert_eq!(
+                parsed_definitions("header.h", source),
+                pairs(expected),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_first_line() {
+        for (path, source) in [
+            ("schema.graphql", "type Query {\n  user: User\n}\n"),
+            (
+                "store.ex",
+                "defmodule Inventory.Store do\n  def put(x), do: x\nend\n",
+            ),
+            ("run.rb", "#!/usr/bin/env ruby\nmodule Run\nend\n"),
+        ] {
+            let shape = |source: &str| {
+                chunk_source(Path::new(path), source)
+                    .into_iter()
+                    .map(|chunk| (chunk.start_line, chunk.end_line, chunk.kind, chunk.text))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(shape(&format!("\u{feff}{source}")), shape(source), "{path}");
+        }
+    }
+
+    #[test]
+    fn query_matching_over_unmatched_punctuation_stops() {
+        // One error node with 80,000 unnamed children makes matching quadratic:
+        // about 24 seconds of CPU time in a debug build without a limit.
+        let source = format!("{}\n", "(".repeat(400)).repeat(200);
+        let started = thread_cpu_time();
+        let chunks = chunk_source(Path::new("blob.rs"), &source);
+        if let (Some(started), Some(now)) = (started, thread_cpu_time()) {
+            let used = now.saturating_sub(started);
+            assert!(used < std::time::Duration::from_secs(10), "{used:?}");
+        }
+        assert_eq!(chunks.iter().map(|chunk| chunk.end_line).max(), Some(200));
     }
 
     #[test]

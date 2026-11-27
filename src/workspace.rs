@@ -63,8 +63,9 @@ pub struct Workspace {
 ///  29: Retain resolved dependency specs for incremental target precedence changes
 ///  30: Index fallback preambles, Python and JS/TS decorators, Java records,
 ///      JS/TS module function bindings, and Rust macros
-///  31: C and C++ type declarations and aliases, C++ `.h` headers, same-line
-///      definitions, and Python module text
+///  31: C and C++ type declarations and aliases, C++ and Objective-C `.h`
+///      headers, same-line definitions, Python module text, R, PowerShell, and
+///      Clojure names, and byte-order marks
 pub const INDEX_FORMAT_VERSION: u32 = 31;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
