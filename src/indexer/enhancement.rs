@@ -108,7 +108,7 @@ pub(crate) enum WorkerLane {
 }
 
 impl WorkerLane {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Hash => "hash",
             Self::Neural => "neural",
