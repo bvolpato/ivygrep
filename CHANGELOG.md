@@ -89,6 +89,9 @@ All notable changes to ivygrep are documented in this file.
 - Boolean operands can be identifiers that the code tokenizer splits, such as `url_for`, `LocalProxy`, or `sha256`. They failed with `invalid or unsupported Boolean query`.
 - `--all` returns a hit once when tracked workspaces overlap. Hybrid, symbol, and regex searches returned it once per workspace and added the scores.
 - Hybrid results no longer repeat a line range of a file when overlapping chunks, such as a class and its method, focus on the same line.
+- Hybrid search no longer hides source files below directories whose name only ends in `build`, `target`, `dist`, or `vendor`, such as `internal/js/esbuild/` or `src/rebuild/`. The path check matched substrings. `_vendor/`, `.build/`, and `cmake-build*/` stay vendored and build trees.
+- A one-term lookup also returns up to three files of a build, distribution, or vendored tree when no other file has that name, definition, or text. They follow all other results. Such a lookup returned nothing or only the uses. Copies stay hidden beside the source.
+- Queries of three or more words return configuration and data files when nothing better matches. In a repository of YAML, JSON, or TOML files, or in a scope of such files, every match was filtered out.
 
 ### Security
 
