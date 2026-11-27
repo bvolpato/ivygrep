@@ -59,6 +59,9 @@ All notable changes to ivygrep are documented in this file.
 - `--callers` finds Rust calls in macro arguments such as `assert_eq!(parse(x), y)`, Rust macro invocations, Bash commands, Objective-C messages, and `new` expressions in C++, PHP, Scala, and Dart.
 - `--refs` and `--callers` read code in Bash `"$(...)"` and PHP `"{$...}"` strings. `--refs` no longer lists the names that declarations introduce in C, C++, Haskell, and Objective-C `.m` and `.mm` files.
 - The `-C` help states that references show one line, and that definitions and callers show the complete chunk.
+- `ig agent install` and `ig agent doctor` use the configuration file that `CODEX_HOME` or `CLAUDE_CONFIG_DIR` selects. An empty `IVYGREP_AGENT_HOME` no longer writes the file into the current directory.
+- `ig agent install` accepts a JSON config with a UTF-8 byte order mark and an inline `mcp_servers` table in the Codex config. An unreadable config error names the file. `ig agent doctor` fails when a detected client has an invalid config, instead of reporting a healthy setup.
+- `ig agent doctor` checks a Cursor config that has comments or trailing commas. `ig agent install cursor` does not edit that config and shows the entry to set by hand.
 - `-n` limits result files, not matches, in CLI regex, reference, and caller searches. One file with many matches could use the whole limit. These searches read 20 matches per requested file, from 200 to 1,000 in total, so a file with more matches can still hide later files.
 
 ### Security
