@@ -306,7 +306,7 @@ directory containing it, or the filesystem root. Confirm with `y` or `yes`.
 Without an interactive terminal, the command stops unless you pass `--yes`.
 An already indexed, healthy directory does not prompt on a plain `ig --add`.
 `ig --add --force` rebuilds it, and `--skip-gitignore` may add ignored files,
-so those cases prompt too.
+so those cases prompt too. MCP `ig_search` returns an error instead of building or expanding such an index.
 
 The same confirmation applies when `--all --skip-gitignore` expands a broad index or a linked worktree needs to build or expand one for its main checkout.
 

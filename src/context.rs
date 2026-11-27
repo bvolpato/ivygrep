@@ -4,9 +4,10 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use anyhow::Result;
+use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -33,6 +34,7 @@ use crate::workspace::Workspace;
 const MAX_ITEMS: usize = 20;
 const TARGET_CONTEXT_ITEMS: usize = 14;
 const MAX_ANCHOR_SYMBOLS: usize = 3;
+const MAX_INPUT_SEEDS: usize = 24;
 const RRF_K: f64 = 10.0;
 const SEED_CHUNK_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const GRAPH_HYDRATION_CACHE_ENTRIES: usize = 64;
@@ -189,6 +191,17 @@ struct Candidate {
     roles: BTreeSet<ContextRole>,
     reasons: BTreeSet<String>,
     fused_score: f64,
+    /// Line that a shortened preview must keep.
+    focus_line: Option<usize>,
+    claims: Vec<LineClaim>,
+}
+
+/// A role and reason that hold only while the preview shows `line`.
+#[derive(Debug, Clone)]
+struct LineClaim {
+    role: ContextRole,
+    reason: String,
+    line: usize,
 }
 
 pub fn build_context_bundle(
@@ -276,7 +289,7 @@ pub(crate) fn build_context_bundle_with_search_context(
     let mut fallback_input_count = 0usize;
 
     let seeds_timer = crate::performance::StageTimer::start("context_seeds");
-    for seed in input.seeds.iter().take(24) {
+    for seed in input.seeds.iter().take(MAX_INPUT_SEEDS) {
         let Some(hit) = context_seed_hit(&workspace.root, seed, task)? else {
             continue;
         };
@@ -291,14 +304,29 @@ pub(crate) fn build_context_bundle_with_search_context(
         let task_relevant =
             seed.source == "task_input" || explicit_match || hit_matches_task(&hit, task);
         if !task_relevant {
-            if fallback_input_count == 4 {
+            fallback_input_count += 1;
+            if fallback_input_count > 4 {
+                // Further unrelated changes are evidence, but must not displace
+                // retrieved files as anchors or graph seeds.
+                add_candidate(
+                    &mut candidates,
+                    hit,
+                    ContextRole::Related,
+                    seed.reason.clone(),
+                    0.02,
+                );
                 continue;
             }
-            fallback_input_count += 1;
         }
         primary_hits.push(hit.clone());
-        input_graph_seeds.push(seed.clone());
-        add_candidate(
+        let first_of_file = !input_graph_seeds
+            .iter()
+            .any(|known: &ContextSeed| known.file_path == seed.file_path);
+        if first_of_file {
+            input_graph_seeds.push(seed.clone());
+        }
+        let hit = focus_hit_on_line(hit, seed.line, item_token_budget(budget_tokens), task);
+        let candidate = add_candidate(
             &mut candidates,
             hit.clone(),
             if task_relevant {
@@ -307,12 +335,19 @@ pub(crate) fn build_context_bundle_with_search_context(
                 ContextRole::Related
             },
             seed.reason.clone(),
-            if task_relevant {
+            if !task_relevant {
+                0.03
+            } else if first_of_file {
                 0.20 + f64::from(seed.priority) * 0.10
             } else {
-                0.03
+                0.0
             },
         );
+        if !first_of_file {
+            // Further lines of a file rank below the first line of each named file.
+            candidate.fused_score = candidate.fused_score.max(0.30);
+        }
+        candidate.focus_line = candidate.focus_line.or(seed.line);
         if let Some(role) = classify_file_role(&hit) {
             add_candidate(
                 &mut candidates,
@@ -348,13 +383,7 @@ pub(crate) fn build_context_bundle_with_search_context(
         let mut options = base_options.clone();
         options.limit = Some(candidate_limit);
         options.context = context_lines;
-        let hits = hybrid_search_with_context(
-            search_context,
-            workspace,
-            &query,
-            embedding_model,
-            &options,
-        )?;
+        let hits = search_task_text(search_context, workspace, &query, embedding_model, &options)?;
         if requested_role == ContextRole::Primary {
             primary_hits.extend(hits.clone());
         }
@@ -405,9 +434,11 @@ pub(crate) fn build_context_bundle_with_search_context(
         ) {
             Ok(hits) => {
                 for (rank, hit) in hits.into_iter().enumerate() {
-                    add_candidate(
+                    add_symbol_candidate(
                         &mut candidates,
                         focus_hit_on_symbol(hit, symbol, symbol_options.context, false),
+                        symbol,
+                        false,
                         ContextRole::Definition,
                         format!("defines {symbol}"),
                         0.82 / (RRF_K + rank as f64 + 1.0),
@@ -437,9 +468,11 @@ pub(crate) fn build_context_bundle_with_search_context(
                     ),
                 ] {
                     for (rank, hit) in hits.into_iter().enumerate() {
-                        add_candidate(
+                        add_symbol_candidate(
                             &mut candidates,
                             focus_hit_on_symbol(hit, symbol, symbol_options.context, prefer_last),
+                            symbol,
+                            prefer_last,
                             role,
                             format!("{verb} {symbol}"),
                             weight / (RRF_K + rank as f64 + 1.0),
@@ -457,13 +490,7 @@ pub(crate) fn build_context_bundle_with_search_context(
         options.limit = Some(candidate_limit.min(12));
         options.context = 8;
         let query = format!("test {}", anchor_symbols.join(" "));
-        match hybrid_search_with_context(
-            search_context,
-            workspace,
-            &query,
-            embedding_model,
-            &options,
-        ) {
+        match search_task_text(search_context, workspace, &query, embedding_model, &options) {
             Ok(hits) => {
                 for (rank, hit) in hits.into_iter().enumerate() {
                     if classify_file_role(&hit) != Some(ContextRole::Test)
@@ -592,7 +619,7 @@ pub(crate) fn build_context_bundle_with_search_context(
     drop(hydration);
     drop(graph_timer);
     let _timer = crate::performance::StageTimer::start("context_budget");
-    Ok(assemble_bundle(
+    let mut bundle = assemble_bundle(
         task,
         &workspace.root,
         budget_tokens,
@@ -600,7 +627,36 @@ pub(crate) fn build_context_bundle_with_search_context(
         input.change_scope,
         input.referenced_paths,
         candidates.into_values().collect(),
-    ))
+    );
+    if input.seeds.len() > MAX_INPUT_SEEDS && !bundle.truncated {
+        bundle.truncated = true;
+        finalize_bundle_metrics(&mut bundle);
+    }
+    Ok(bundle)
+}
+
+/// Searches for task prose. Operator words that do not form a Boolean query
+/// are words here, so they must not fail the pack.
+fn search_task_text(
+    search_context: &SearchContext,
+    workspace: &Workspace,
+    query: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    static OPERATOR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\b(?:AND|OR|NOT)\b").expect("valid operator regex"));
+    let search = |query: &str| {
+        hybrid_search_with_context(search_context, workspace, query, embedding_model, options)
+    };
+    search(query).or_else(|error| {
+        let prose =
+            OPERATOR.replace_all(query, |word: &regex::Captures<'_>| word[0].to_lowercase());
+        if prose == query {
+            return Err(error);
+        }
+        search(&prose)
+    })
 }
 
 fn context_seed_hit(root: &Path, seed: &ContextSeed, task: &str) -> Result<Option<SearchHit>> {
@@ -636,18 +692,13 @@ fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String
         if file.metadata()?.len() > MAX_CONTEXT_FILE_BYTES {
             return Ok(None);
         }
-        let mut content = String::new();
-        return match file
-            .take(MAX_CONTEXT_FILE_BYTES + 1)
-            .read_to_string(&mut content)
-        {
-            Ok(bytes) if bytes as u64 <= MAX_CONTEXT_FILE_BYTES && !content.trim().is_empty() => {
-                Ok(Some(content))
-            }
-            Ok(_) => Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(None),
-            Err(error) => Err(error.into()),
-        };
+        let mut content = Vec::new();
+        file.take(MAX_CONTEXT_FILE_BYTES + 1)
+            .read_to_end(&mut content)?;
+        if content.len() as u64 > MAX_CONTEXT_FILE_BYTES {
+            return Ok(None);
+        }
+        return Ok(decode_seed_content(&seed.file_path, content));
     }
     let Some(revision) = seed.git_revision.as_deref() else {
         return Ok(None);
@@ -683,11 +734,17 @@ fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String
     if !output.status.success() {
         return Ok(None);
     }
-    let content = match String::from_utf8(output.stdout) {
-        Ok(content) if !content.trim().is_empty() => content,
-        _ => return Ok(None),
-    };
-    Ok(Some(content))
+    Ok(decode_seed_content(&seed.file_path, output.stdout))
+}
+
+/// Accepts and decodes the same content as the indexer.
+fn decode_seed_content(path: &Path, content: Vec<u8>) -> Option<String> {
+    if !crate::chunking::is_indexable_file(path, &content) {
+        return None;
+    }
+    let content = String::from_utf8(content)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
+    (!content.trim().is_empty()).then_some(content)
 }
 
 #[cfg(unix)]
@@ -959,6 +1016,30 @@ fn graph_context_role(kind: FileEdgeKind, outgoing: bool) -> ContextRole {
     }
 }
 
+/// Cuts a hit that does not fit into one item to the lines around `line`.
+fn focus_hit_on_line(
+    mut hit: SearchHit,
+    line: Option<usize>,
+    token_budget: usize,
+    task: &str,
+) -> SearchHit {
+    let Some(line) = line.filter(|line| (hit.start_line..=hit.end_line).contains(line)) else {
+        return hit;
+    };
+    let (preview, _, start) = truncate_around_line(
+        &hit.preview,
+        token_budget,
+        task,
+        Some(line - hit.start_line),
+    );
+    if !preview.is_empty() {
+        hit.start_line += start;
+        hit.end_line = hit.start_line + preview.lines().count().saturating_sub(1);
+        hit.preview = preview;
+    }
+    hit
+}
+
 fn focus_hit_on_symbol(
     mut hit: SearchHit,
     symbol: &str,
@@ -996,13 +1077,48 @@ fn focus_hit_on_symbol(
     hit
 }
 
+/// Adds a hit of [`focus_hit_on_symbol`] with a claim about its symbol line.
+#[allow(clippy::too_many_arguments)]
+fn add_symbol_candidate(
+    candidates: &mut BTreeMap<(PathBuf, usize, usize), Candidate>,
+    hit: SearchHit,
+    symbol: &str,
+    prefer_last: bool,
+    role: ContextRole,
+    reason: String,
+    fused_score: f64,
+) {
+    let symbol_line = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        let mut lines = hit.preview.lines().enumerate().filter_map(|(index, line)| {
+            line.to_ascii_lowercase()
+                .contains(&name)
+                .then_some(hit.start_line + index)
+        });
+        if prefer_last {
+            lines.last()
+        } else {
+            lines.next()
+        }
+    };
+    let line = symbol_line(symbol).or_else(|| terminal_symbol_member(symbol).and_then(symbol_line));
+    let candidate = add_candidate(candidates, hit, role, reason.clone(), fused_score);
+    if let Some(line) = line {
+        // A hit that merged into other evidence keeps the focus of that evidence.
+        if candidate.reasons.len() == 1 && candidate.claims.is_empty() {
+            candidate.focus_line.get_or_insert(line);
+        }
+        candidate.claims.push(LineClaim { role, reason, line });
+    }
+}
+
 fn add_candidate(
     candidates: &mut BTreeMap<(PathBuf, usize, usize), Candidate>,
     hit: SearchHit,
     role: ContextRole,
     reason: String,
     fused_score: f64,
-) {
+) -> &mut Candidate {
     let key = candidates
         .keys()
         .find(|(path, start, end)| {
@@ -1016,6 +1132,8 @@ fn add_candidate(
         roles: BTreeSet::new(),
         reasons: BTreeSet::new(),
         fused_score: 0.0,
+        focus_line: None,
+        claims: Vec::new(),
     });
     candidate.hit.sources.extend(hit.sources);
     candidate.hit.sources.sort();
@@ -1023,6 +1141,7 @@ fn add_candidate(
     candidate.roles.insert(role);
     candidate.reasons.insert(reason);
     candidate.fused_score += fused_score;
+    candidate
 }
 
 fn ranges_substantially_overlap(
@@ -1050,13 +1169,24 @@ fn assemble_bundle(
     budget_tokens: usize,
     mut anchor_symbols: Vec<String>,
     change_scope: Option<ContextChangeScope>,
-    mut referenced_paths: Vec<ContextInputPath>,
+    referenced_paths: Vec<ContextInputPath>,
     mut candidates: Vec<Candidate>,
 ) -> ContextBundle {
     let mut change_scope = change_scope.map(|scope| bound_change_scope(scope, budget_tokens));
     let referenced_path_limit = (budget_tokens / 64).clamp(1, 32);
     let mut truncated = referenced_paths.len() > referenced_path_limit;
-    referenced_paths.truncate(referenced_path_limit);
+    // The first line of each file precedes the second line of any file, so that
+    // the lines of one file cannot use up the limit.
+    let mut ranked_paths = referenced_paths
+        .chunk_by(|left, right| left.file_path == right.file_path)
+        .flat_map(|lines| lines.iter().cloned().enumerate())
+        .collect::<Vec<_>>();
+    ranked_paths.sort_by_key(|(rank, _)| *rank);
+    let mut referenced_paths = ranked_paths
+        .into_iter()
+        .map(|(_, path)| path)
+        .take(referenced_path_limit)
+        .collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let estimate_header = |task: &str,
                            anchors: &[String],
@@ -1078,7 +1208,7 @@ fn assemble_bundle(
         change_scope.as_ref(),
         &referenced_paths,
     );
-    let per_item_budget = (budget_tokens / 4).clamp(96, 400);
+    let per_item_budget = item_token_budget(budget_tokens);
     // When the header already overflows, reserve space for a snippet plus its path and reasons.
     let header_budget = if !candidates.is_empty()
         && fixed_header_tokens.saturating_add(estimate_tokens(task).min(1_024)) > budget_tokens
@@ -1109,8 +1239,15 @@ fn assemble_bundle(
             &referenced_paths,
         );
     }
+    referenced_paths.sort_by(|left, right| left.file_path.cmp(&right.file_path));
     let task_budget = header_budget.saturating_sub(fixed_header_tokens).min(1_024);
-    let (output_task, task_truncated, _) = truncate_to_token_budget(task, task_budget, task);
+    let (mut output_task, task_truncated, _) =
+        truncate_to_token_budget(task.trim(), task_budget, task);
+    if let Some(fence) = open_code_fence(&format!("Task: {output_task}")) {
+        // An open fence would turn the evidence into a code block.
+        output_task.push('\n');
+        output_task.push_str(&fence);
+    }
     candidates.sort_by(|left, right| {
         right
             .fused_score
@@ -1170,9 +1307,16 @@ fn assemble_bundle(
             truncated = true;
             break;
         }
-        if file_counts
-            .get(&candidate.hit.file_path)
-            .is_some_and(|count| *count >= 3)
+        // Lines that the task names have a limit of their own.
+        let named = candidate
+            .hit
+            .sources
+            .iter()
+            .any(|source| source == "task_input");
+        if !named
+            && file_counts
+                .get(&candidate.hit.file_path)
+                .is_some_and(|count| *count >= 3)
             || items
                 .iter()
                 .any(|item| substantially_overlaps(item, &candidate.hit))
@@ -1199,8 +1343,15 @@ fn assemble_bundle(
             truncated = true;
             continue;
         }
-        let (preview, preview_truncated, start_offset) =
-            truncate_to_token_budget(&candidate.hit.preview, per_item_budget.min(remaining), task);
+        let focus_line = candidate
+            .focus_line
+            .and_then(|line| line.checked_sub(item.start_line));
+        let (preview, preview_truncated, start_offset) = truncate_around_line(
+            &candidate.hit.preview,
+            per_item_budget.min(remaining),
+            task,
+            focus_line,
+        );
         if preview_truncated && estimate_tokens(&preview) < 32 {
             truncated = true;
             continue;
@@ -1210,6 +1361,7 @@ fn assemble_bundle(
         item.end_line = item
             .start_line
             .saturating_add(item.preview.lines().count().saturating_sub(1));
+        drop_unsupported_claims(&mut item, &candidate.claims);
         item.estimated_tokens = estimate_tokens(&render_markdown_item(item_number, &item));
         if item.preview.trim().is_empty()
             || item.estimated_tokens > budget_tokens.saturating_sub(used_tokens)
@@ -1242,6 +1394,56 @@ fn assemble_bundle(
         finalize_bundle_metrics(&mut bundle);
     }
     bundle
+}
+
+/// A preview cut can remove the line that a role and its reason describe.
+fn drop_unsupported_claims(item: &mut ContextItem, claims: &[LineClaim]) {
+    let lines = item.start_line..=item.end_line;
+    let (shown, hidden): (Vec<_>, Vec<_>) =
+        claims.iter().partition(|claim| lines.contains(&claim.line));
+    for claim in hidden {
+        if !shown.iter().any(|other| other.reason == claim.reason) {
+            item.reasons.retain(|reason| *reason != claim.reason);
+        }
+        if !shown.iter().any(|other| other.role == claim.role) {
+            item.roles.retain(|role| *role != claim.role);
+        }
+    }
+    if item.roles.is_empty() {
+        item.roles.push(ContextRole::Related);
+    }
+}
+
+fn item_token_budget(budget_tokens: usize) -> usize {
+    (budget_tokens / 4).clamp(96, 400)
+}
+
+/// The closing fence that Markdown text still needs.
+fn open_code_fence(text: &str) -> Option<String> {
+    let mut open: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let content = line.trim_start_matches(' ');
+        if line.len() - content.len() > 3 {
+            continue;
+        }
+        let Some(marker) = content.chars().next().filter(|ch| matches!(ch, '`' | '~')) else {
+            continue;
+        };
+        let length = content.chars().take_while(|ch| *ch == marker).count();
+        let info = &content[length..];
+        match open {
+            Some((open_marker, open_length))
+                if marker == open_marker && length >= open_length && info.trim().is_empty() =>
+            {
+                open = None;
+            }
+            None if length >= 3 && !(marker == '`' && info.contains('`')) => {
+                open = Some((marker, length));
+            }
+            _ => {}
+        }
+    }
+    open.map(|(marker, length)| marker.to_string().repeat(length))
 }
 
 fn context_roles_covered(items: &[ContextItem], required_roles: &BTreeSet<ContextRole>) -> bool {
@@ -1378,11 +1580,7 @@ fn classify_file_role(hit: &SearchHit) -> Option<ContextRole> {
     }) || file.contains("_test.")
         || file.contains(".test.")
         || file.contains(".spec.")
-        || preview_lower.contains("#[test]")
-        || preview_lower.contains("@test")
-        || preview_lower.contains("def test_")
-        || preview_lower.contains("describe(")
-        || preview_lower.contains("it(");
+        || has_test_marker(&preview_lower);
     if is_test {
         return Some(ContextRole::Test);
     }
@@ -1404,6 +1602,18 @@ fn classify_file_role(hit: &SearchHit) -> Option<ContextRole> {
         return Some(ContextRole::Config);
     }
     None
+}
+
+/// Markers are whole words: `split(`, `user@test.com`, and `frame.describe(`
+/// are not tests.
+fn has_test_marker(preview_lower: &str) -> bool {
+    static MARKER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r##"#\[test\]|\bdef test_|(?:^|[^\w$.@])(?:@test(?:[^\w./-]|$)|describe\(|it\((?:\s*["'`]|\s*$))"##,
+        )
+        .expect("valid test marker regex")
+    });
+    preview_lower.lines().any(|line| MARKER.is_match(line))
 }
 
 fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
@@ -1437,7 +1647,10 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         let mut names = if is_test {
             likely_test_subject_names(&hit.preview)
         } else {
-            likely_definition_names(&hit.preview)
+            likely_definition_names(
+                &hit.preview,
+                crate::chunking::language_for_path(&hit.file_path).unwrap_or_default(),
+            )
         };
         let mut seen_names = HashSet::new();
         names.retain(|name| seen_names.insert(name.clone()));
@@ -2044,6 +2257,15 @@ pub fn estimate_tokens(text: &str) -> usize {
 }
 
 fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, bool, usize) {
+    truncate_around_line(text, budget, task, None)
+}
+
+fn truncate_around_line(
+    text: &str,
+    budget: usize,
+    task: &str,
+    focus_line: Option<usize>,
+) -> (String, bool, usize) {
     if text.trim().is_empty() {
         return (String::new(), false, 0);
     }
@@ -2057,28 +2279,32 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
         .into_iter()
         .map(|symbol| symbol.to_ascii_lowercase())
         .collect::<Vec<_>>();
-    let focus = lines
-        .iter()
-        .enumerate()
-        .max_by_key(|(index, line)| {
-            let lower = line.to_ascii_lowercase();
-            let exact_identifier_bonus =
-                if explicit_symbols.iter().any(|symbol| lower.contains(symbol)) {
-                    100
-                } else {
-                    0
-                };
-            let score = exact_identifier_bonus
-                + terms
-                    .iter()
-                    .filter(|term| lower.contains(term.as_str()))
-                    .map(String::len)
-                    .sum::<usize>();
-            // `max_by_key` keeps the last maximum; the earliest line keeps
-            // signatures when no line matches the task.
-            (score, std::cmp::Reverse(*index))
+    let focus = focus_line
+        .filter(|line| *line < lines.len())
+        .or_else(|| {
+            lines
+                .iter()
+                .enumerate()
+                .max_by_key(|(index, line)| {
+                    let lower = line.to_ascii_lowercase();
+                    let exact_identifier_bonus =
+                        if explicit_symbols.iter().any(|symbol| lower.contains(symbol)) {
+                            100
+                        } else {
+                            0
+                        };
+                    let score = exact_identifier_bonus
+                        + terms
+                            .iter()
+                            .filter(|term| lower.contains(term.as_str()))
+                            .map(String::len)
+                            .sum::<usize>();
+                    // `max_by_key` keeps the last maximum; the earliest line keeps
+                    // signatures when no line matches the task.
+                    (score, std::cmp::Reverse(*index))
+                })
+                .map(|(index, _)| index)
         })
-        .map(|(index, _)| index)
         .unwrap_or(lines.len() / 2);
     let mut start = focus;
     let mut end = focus.saturating_add(1).min(lines.len());
@@ -2091,7 +2317,7 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
             }
             output.push(character);
         }
-        return (output.trim().to_string(), true, focus);
+        return (output.trim_end().to_string(), true, focus);
     }
     loop {
         let mut changed = false;
@@ -2117,11 +2343,15 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
     (preview, true, start.saturating_add(removed_lines))
 }
 
-/// Trims a preview and reports how many leading lines were removed.
+/// Removes blank leading lines and reports how many. The first line that stays
+/// keeps its indentation.
 fn trim_leading_lines(text: &str) -> (String, usize) {
-    let trimmed = text.trim_start();
-    let removed_lines = text[..text.len() - trimmed.len()].matches('\n').count();
-    (trimmed.trim_end().to_string(), removed_lines)
+    let blank = &text[..text.len() - text.trim_start().len()];
+    let start = blank.rfind('\n').map_or(0, |newline| newline + 1);
+    (
+        text[start..].trim_end().to_string(),
+        blank.matches('\n').count(),
+    )
 }
 
 pub fn render_markdown(bundle: &ContextBundle) -> String {
@@ -2409,6 +2639,258 @@ mod tests {
         assert!(edited[0].text.contains("after_"));
     }
 
+    fn pack(files: &[(&str, String)], task: &str) -> ContextBundle {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path().canonicalize().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let git = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(git.success());
+        for (path, content) in files {
+            fs::write(root.join(path), content).unwrap();
+        }
+        let workspace = Workspace::resolve(&root).unwrap();
+        let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+        build_context_bundle(&workspace, task, None, &SearchOptions::default(), 8_000).unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn trace_lines_of_one_long_function_all_reach_the_pack() {
+        let mut lines = vec!["def process_records(records, output):".to_string()];
+        lines.extend((0..105).map(|index| format!("    v{index} = records[{index}].size(output)")));
+        lines.push("    return v1".to_string());
+        let source = lines.join("\n") + "\n";
+        assert_eq!(chunk_count(&source), 1);
+
+        let bundle = pack(
+            &[("worker.py", source)],
+            "File \"worker.py\", line 60, in process_records\n\
+             File \"worker.py\", line 31, in process_records\n\
+             File \"worker.py\", line 104, in process_records\nZeroDivisionError",
+        );
+
+        // The definition of the function is one more item of this file.
+        for line in [31, 60, 104] {
+            assert!(
+                bundle
+                    .items
+                    .iter()
+                    .any(|item| (item.start_line..=item.end_line).contains(&line)
+                        && item.preview.contains(&format!("v{} = ", line - 2))),
+                "line {line}: {:?}",
+                bundle
+                    .items
+                    .iter()
+                    .map(|item| (item.start_line, item.end_line))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn lines_of_one_file_do_not_displace_other_named_files() {
+        let files = [
+            "auth", "billing", "cache", "database", "events", "files", "gateway", "health",
+            "invoice", "jobs", "kafka", "ledger",
+        ]
+        .map(|name| {
+            let source = (0..3)
+                .map(|step| {
+                    let body = (0..14)
+                        .map(|key| {
+                            format!("    value_{key} = session.lookup(payload, {step}, retries)\n")
+                        })
+                        .collect::<String>();
+                    format!("def {name}_step_{step}(session, payload, retries):\n{body}\n")
+                })
+                .collect::<String>();
+            (format!("{name}.py"), source)
+        });
+        let task = files
+            .iter()
+            .flat_map(|(path, _)| [10, 28, 46].map(|line| format!("{path}:{line}: error\n")))
+            .collect::<String>();
+        let files = files
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.clone()))
+            .collect::<Vec<_>>();
+
+        let bundle = pack(&files, &task);
+
+        assert_eq!(bundle.coverage.files, files.len());
+        let referenced = bundle
+            .referenced_paths
+            .iter()
+            .map(|reference| &reference.file_path)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(referenced.len(), files.len());
+        assert!(
+            bundle
+                .referenced_paths
+                .is_sorted_by_key(|path| &path.file_path)
+        );
+    }
+
+    fn chunk_count(source: &str) -> usize {
+        crate::chunking::chunk_source(Path::new("worker.py"), source).len()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn changed_files_that_share_no_word_with_the_task_fill_the_remaining_budget() {
+        let files = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+        ]
+        .map(|name| {
+            (
+                format!("{name}.py"),
+                format!("def {name}_handler():\n    return 1\n"),
+            )
+        });
+        let files = files
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.clone()))
+            .collect::<Vec<_>>();
+
+        let bundle = pack(&files, "Review this branch before merge");
+
+        assert_eq!(bundle.coverage.files, files.len(), "{:?}", bundle.items);
+        assert!(!bundle.truncated);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn operator_words_in_a_task_do_not_fail_the_pack() {
+        let bundle = pack(
+            &[("orders.py", "def load_order():\n    return 1\n".to_string())],
+            "fix load_order AND",
+        );
+        assert_eq!(bundle.items[0].file_path, Path::new("orders.py"));
+    }
+
+    #[test]
+    fn seed_content_matches_what_the_indexer_accepts() {
+        let path = Path::new("notes.py");
+        assert_eq!(decode_seed_content(path, b"\x00\x01bin".to_vec()), None);
+        assert_eq!(
+            decode_seed_content(path, b"# Ren\xe9\nvalue = 1\n".to_vec()).as_deref(),
+            Some("# Ren\u{fffd}\nvalue = 1\n")
+        );
+    }
+
+    #[test]
+    fn calls_that_end_like_test_functions_are_not_tests() {
+        let role = |text: &str| {
+            classify_file_role(&candidate("src/orders.ts", 1, ContextRole::Primary, text, 1.0).hit)
+        };
+        for text in [
+            "parts = raw.split(\",\")",
+            "session.commit(\"order\")",
+            "audit(\"order\")",
+            "list.forEach { it(order) }",
+            "frame.describe(\"order\")",
+            "owner = \"user@test.com\"",
+            "import { x } from \"@test/support\"",
+        ] {
+            assert_eq!(role(text), None, "{text}");
+        }
+        for text in [
+            "it(\"loads an order\", () => {})",
+            "  describe(OrderList, () => {",
+            "it(\n  'loads',\n",
+            "@Test\npublic void loads() {}",
+            "@Test(timeout = 1) fun loads() {}",
+            "#[test]\nfn loads() {}",
+            "def test_loads():",
+        ] {
+            assert_eq!(role(text), Some(ContextRole::Test), "{text}");
+        }
+    }
+
+    #[test]
+    fn cut_previews_drop_roles_whose_line_is_hidden() {
+        let text = (1..=60)
+            .map(|line| format!("statement_{line}(session, card, cents, retries, output)"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut evidence = candidate("shop.py", 1, ContextRole::Primary, &text, 1.0);
+        for (role, reason, line) in [
+            (ContextRole::Definition, "defines statement_1", 1),
+            (ContextRole::Caller, "calls statement_1", 58),
+        ] {
+            evidence.roles.insert(role);
+            evidence.reasons.insert(reason.to_string());
+            evidence.claims.push(LineClaim {
+                role,
+                reason: reason.to_string(),
+                line,
+            });
+        }
+
+        let bundle = assemble_bundle(
+            "task",
+            Path::new("/repo"),
+            8_000,
+            Vec::new(),
+            None,
+            Vec::new(),
+            vec![evidence],
+        );
+
+        let item = &bundle.items[0];
+        assert!(item.end_line < 58);
+        assert_eq!(
+            item.roles,
+            [ContextRole::Primary, ContextRole::Definition],
+            "{:?}",
+            item.reasons
+        );
+        assert!(
+            !item
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("calls"))
+        );
+        assert_eq!(bundle.coverage.callers, 0);
+    }
+
+    #[test]
+    fn a_shortened_task_does_not_swallow_the_evidence() {
+        let task = format!(
+            "Issue:\n```rust\n{}```\nfix it",
+            "fn a() { let x = 1; }\n".repeat(300)
+        );
+        for budget in [256, 700, 8_000] {
+            let bundle = assemble_bundle(
+                &task,
+                Path::new("/repo"),
+                budget,
+                Vec::new(),
+                None,
+                Vec::new(),
+                vec![candidate(
+                    "a.rs",
+                    1,
+                    ContextRole::Primary,
+                    "fn a() { let x = 1; }",
+                    1.0,
+                )],
+            );
+            let rendered = render_markdown(&bundle);
+            let header = rendered.split("## Evidence").next().unwrap();
+            let fences = header.lines().filter(|line| line.starts_with("```"));
+            assert_eq!(fences.count() % 2, 0, "{budget}: {header}");
+            assert!(estimate_tokens(&rendered) <= budget);
+        }
+    }
+
     fn candidate(path: &str, line: usize, role: ContextRole, text: &str, score: f64) -> Candidate {
         Candidate {
             hit: SearchHit {
@@ -2425,6 +2907,8 @@ mod tests {
             roles: BTreeSet::from([role]),
             reasons: BTreeSet::from([format!("{} evidence", role.label())]),
             fused_score: score,
+            focus_line: None,
+            claims: Vec::new(),
         }
     }
 
@@ -3234,6 +3718,10 @@ mod tests {
         assert_eq!(
             truncate_to_token_budget("\n\nfn a() {}", 100, "task"),
             ("fn a() {}".to_string(), false, 2)
+        );
+        assert_eq!(
+            truncate_to_token_budget("\n    fn a() {\n        b()", 100, "task"),
+            ("    fn a() {\n        b()".to_string(), false, 1)
         );
         let text = ["", "", "fn search_call_sites() {}"]
             .into_iter()

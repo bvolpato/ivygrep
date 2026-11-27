@@ -336,6 +336,31 @@ fn literal_file_limit_ranking_and_unicode_match_locally_and_through_daemon() {
 }
 
 #[test]
+fn multi_line_patterns_explain_their_empty_result() {
+    let tmp = temporary_directory();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("pair.txt"), "first\nsecond\n").unwrap();
+    for (mode, pattern, warns) in [
+        ("--literal", "first\nsecond", true),
+        ("--regex", r"first\nsecond", true),
+        ("--literal", "first\n", false),
+        ("--regex", r"first\n?", false),
+    ] {
+        let output = command(&home, &root)
+            .args([mode, "--hash", "--no-watch", "--json", pattern])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let files: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(files.as_array().unwrap().is_empty(), warns, "{pattern:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.contains("needs a line break"), warns, "{stderr}");
+    }
+}
+
+#[test]
 fn lexical_filename_output_preserves_the_explicit_retrieval_limit() {
     let tmp = temporary_directory();
     let root = tmp.path().join("repo");
@@ -365,6 +390,44 @@ fn lexical_filename_output_preserves_the_explicit_retrieval_limit() {
     args.push("--file-name-only");
     let paths: Vec<PathBuf> = serde_json::from_value(run(&home, &root, &args)).unwrap();
     assert_eq!(paths, ranked);
+}
+
+#[test]
+fn enumerating_file_limit_counts_files_beside_a_file_with_many_hits() {
+    let tmp = temporary_directory();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let dense = (0..40)
+        .map(|i| format!("def timer_{i}():\n    return timer({i}) + timer()\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(root.join("timer.py"), dense).unwrap();
+    for name in ["u", "v", "w", "x", "y"] {
+        std::fs::write(
+            root.join(format!("{name}.py")),
+            format!("def job_{name}(value):\n    log(value)\n    return timer(value)\n"),
+        )
+        .unwrap();
+    }
+    run(
+        &home,
+        &root,
+        &["--add", ".", "--hash", "--no-watch", "--json"],
+    );
+    let check = || {
+        for mode in ["--regex", "--refs", "--callers"] {
+            let mut args = vec![mode, "--no-watch", "--json", "-n", "5", "timer"];
+            let files = result_paths(&run(&home, &root, &args));
+            assert_eq!(files.len(), 5, "{mode}: {files:?}");
+            args.push("--file-name-only");
+            let names: Vec<PathBuf> = serde_json::from_value(run(&home, &root, &args)).unwrap();
+            assert_eq!(names.len(), 5, "{mode}: {names:?}");
+        }
+    };
+    check();
+    let _daemon = start_daemon(&home, &root);
+    check();
 }
 
 #[test]
@@ -403,6 +466,18 @@ fn filename_searches_deduplicate_overlapping_workspaces_before_limiting_files() 
         );
         assert_eq!(result_paths(&files), expected);
         assert_eq!(files[1]["hit_count"], 3);
+        let hybrid = run(
+            &home,
+            &root,
+            &["--hash", "--no-watch", "--all-indices", "--json", "needle"],
+        );
+        let nested_file = hybrid
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["file_path"] == expected[1].to_str().unwrap())
+            .unwrap();
+        assert_eq!(nested_file["hit_count"], 1);
         for mode in ["--literal", "--regex"] {
             let names: Vec<PathBuf> = serde_json::from_value(run(
                 &home,

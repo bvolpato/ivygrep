@@ -38,7 +38,7 @@ Options:
       --refs                  Find exact symbol references
       --callers               Find functions or methods that call the named symbol
       --json                  Emit machine-readable JSON without ANSI styling
-  -C, --context <LINES>       Lines before and after the focused match to include in each snippet. This changes output size, not retrieval ranking [default: 2]
+  -C, --context <LINES>       Lines before and after the focused match to include in each snippet. This changes output size, not retrieval ranking. --refs shows one line. --symbol and --callers show the complete chunk [default: 2]
       --type <TYPE_FILTER>    Filter by language name, extension, or alias (e.g. rust, rs, py, python, c++, bash, md)
       --all-indices           Search every tracked workspace instead of resolving one PATH
       --include <GLOBS>       Include only comma-separated path globs. May be repeated
@@ -48,7 +48,7 @@ Options:
       --no-watch              Index once without starting or registering a filesystem watcher
       --first-line-only       Return only the first non-empty preview line. Ranking is unchanged
       --file-name-only        Return only file paths. Without --limit, this also uses maximum candidate budgets; combine with --limit for a bounded path list
-      --verbose               Include source-signal explanations and detailed progress diagnostics
+      --verbose               Include source-signal explanations
       --skip-gitignore        Include files excluded by .gitignore and other standard ignore files
       --hash                  Use lightweight hash-based embeddings instead of the default neural model. Faster startup, no model download, lower quality
       --lexical-only          Use BM25/path/signature retrieval without vector search
@@ -66,3 +66,4 @@ Examples:
   ig --add . --wait-for-enhancement
   ig --status
   ig --web
+  ig -- context    # search for a word that is also a command

@@ -255,9 +255,14 @@ fn fallback_file_launch(path: &Path) -> Result<LaunchCommand> {
 
 #[cfg(target_os = "macos")]
 fn fallback_file_launch(path: &Path) -> Result<LaunchCommand> {
+    let mut args = vec![path.as_os_str().to_owned()];
+    // `open` runs a file such as `evil.command`. `-t` opens it as text.
+    if !path.is_dir() {
+        args.insert(0, OsString::from("-t"));
+    }
     Ok(LaunchCommand {
         program: OsString::from("open"),
-        args: vec![path.as_os_str().to_owned()],
+        args,
     })
 }
 
@@ -755,6 +760,21 @@ mod tests {
         let launch = fallback_file_launch(path).unwrap();
         assert_eq!(launch.program, OsString::from("notepad.exe"));
         assert_eq!(launch.args, vec![path.as_os_str().to_owned()]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_file_fallback_opens_text_instead_of_running_the_file() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("evil.command");
+        std::fs::write(&script, "exit 0\n").unwrap();
+
+        let launch = fallback_file_launch(&script).unwrap();
+        assert_eq!(launch.program, OsString::from("open"));
+        assert_eq!(launch.args, vec![OsString::from("-t"), script.into()]);
+
+        let launch = fallback_file_launch(root.path()).unwrap();
+        assert_eq!(launch.args, vec![root.path().as_os_str().to_owned()]);
     }
 
     #[cfg(not(windows))]

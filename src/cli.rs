@@ -1,9 +1,10 @@
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use colored::Colorize;
 use tracing_subscriber::EnvFilter;
 
@@ -11,10 +12,10 @@ use crate::config;
 use crate::daemon;
 use crate::embedding::create_model;
 use crate::indexer::{
-    index_workspace, remove_workspace_index, workspace_index_matches_skip_gitignore,
-    workspace_is_indexed,
+    IndexingSummary, index_workspace, remove_workspace_index,
+    workspace_index_matches_skip_gitignore, workspace_is_indexed,
 };
-use crate::jobs::{self, JobKind, JobUpdate};
+use crate::jobs::{self, JobKind};
 use crate::mcp;
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::{
@@ -32,8 +33,8 @@ use crate::search::{
 };
 use crate::search_service::{FileSearchBatch, HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
-    Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
-    resolve_workspace_and_scope_with_base,
+    Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces_with_warnings,
+    resolve_workspace_and_scope_with_base, root_is_gone,
 };
 
 fn parse_context_lines(value: &str) -> std::result::Result<usize, String> {
@@ -66,7 +67,7 @@ fn parse_result_limit(value: &str) -> std::result::Result<usize, String> {
     version,
     about = "Semantic grep that stays local",
     long_about = None,
-    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --since main --budget 8000\n  printf 'panic at src/auth.rs:42' | ig context -\n  ig agent install claude\n  ig hardware\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
+    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --since main --budget 8000\n  printf 'panic at src/auth.rs:42' | ig context -\n  ig agent install claude\n  ig hardware\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web\n  ig -- context    # search for a word that is also a command"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -141,7 +142,11 @@ pub struct Cli {
     pub yes: bool,
 
     /// Launch the interactive terminal UI.
-    #[arg(long = "interactive", visible_alias = "ui")]
+    #[arg(
+        long = "interactive",
+        visible_alias = "ui",
+        conflicts_with_all = ["literal", "regex", "symbol", "refs", "callers", "lexical_only", "json"]
+    )]
     pub ui: bool,
 
     /// Fast exact-match search backed by the index. Bounded searches show up to
@@ -170,7 +175,8 @@ pub struct Cli {
     pub json: bool,
 
     /// Lines before and after the focused match to include in each snippet.
-    /// This changes output size, not retrieval ranking.
+    /// This changes output size, not retrieval ranking. --refs shows one line.
+    /// --symbol and --callers show the complete chunk.
     #[arg(
         short = 'C',
         long,
@@ -226,7 +232,7 @@ pub struct Cli {
     #[arg(long)]
     pub file_name_only: bool,
 
-    /// Include source-signal explanations and detailed progress diagnostics.
+    /// Include source-signal explanations.
     #[arg(long)]
     pub verbose: bool,
 
@@ -313,8 +319,8 @@ pub struct ContextArgs {
     #[arg(long)]
     pub no_watch: bool,
 
-    /// Include detailed progress diagnostics.
-    #[arg(long)]
+    /// Accepted for compatibility. A context pack always explains its selection.
+    #[arg(long, hide = true)]
     pub verbose: bool,
 
     /// Include files excluded by .gitignore.
@@ -376,6 +382,51 @@ fn normalize_glob_args(cli: &mut Cli) {
         .collect();
 }
 
+/// Options that search for exact text or a symbol. No subcommand accepts them.
+const SEARCH_MODE_FLAGS: [&str; 5] = ["--literal", "--regex", "--symbol", "--refs", "--callers"];
+const SUBCOMMAND_WORDS: [&str; 4] = ["context", "agent", "hardware", "help"];
+
+/// Whether `argument` is a search-mode flag, alone or in a group of short
+/// options such as `-fl`. The rest of a group after `C` or `n` is a value.
+fn is_search_mode_flag(argument: &OsStr) -> bool {
+    let Some(argument) = argument.to_str() else {
+        return false;
+    };
+    match argument.strip_prefix('-') {
+        Some(long) if long.starts_with('-') => SEARCH_MODE_FLAGS.contains(&argument),
+        Some(short) => short
+            .chars()
+            .take_while(|flag| !matches!(flag, 'C' | 'n'))
+            .any(|flag| flag == 'l'),
+        None => false,
+    }
+}
+
+/// Whether a search-mode flag precedes the first word that is also a
+/// subcommand, so that the word is a query or a path.
+fn searches_subcommand_word(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .position(|argument| SUBCOMMAND_WORDS.iter().any(|word| argument == word))
+        .is_some_and(|word| {
+            arguments[..word]
+                .iter()
+                .any(|argument| is_search_mode_flag(argument))
+        })
+}
+
+fn parse_cli(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> std::result::Result<Cli, clap::Error> {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    let mut command = Cli::command();
+    if searches_subcommand_word(&arguments) {
+        command = command.args_conflicts_with_subcommands(true);
+    }
+    Cli::from_arg_matches(&command.try_get_matches_from(arguments)?)
+}
+
 pub async fn run() -> Result<()> {
     init_tracing();
 
@@ -383,7 +434,7 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let mut cli = Cli::parse();
+    let mut cli = parse_cli(env::args_os()).unwrap_or_else(|error| error.exit());
     let mut agent_command = None;
     let mut hardware = false;
     let context_args = match cli.command.take() {
@@ -411,10 +462,8 @@ pub async fn run() -> Result<()> {
     normalize_glob_args(&mut cli);
 
     // Resolve --type aliases: "rs" → "rust", "py" → "python", "c++" → "cpp", etc.
-    if let Some(ref tf) = cli.type_filter
-        && let Some(canonical) = crate::chunking::resolve_type_alias(tf)
-    {
-        cli.type_filter = Some(canonical.to_string());
+    if let Some(ref tf) = cli.type_filter {
+        cli.type_filter = Some(crate::chunking::require_type_alias(tf)?.to_string());
     }
     let action_count = [
         cli.add_path.is_some(),
@@ -541,7 +590,14 @@ pub async fn run() -> Result<()> {
             Some(DaemonResponse::Error { message }) => {
                 bail!("could not start ivygrep web server: {message}");
             }
-            _ => bail!("could not start ivygrep web server"),
+            Some(other) => bail!("could not start ivygrep web server: {other:?}"),
+            None if env::var_os("IVYGREP_NO_AUTOSPAWN").is_some() => bail!(
+                "could not start ivygrep web server: no daemon runs, and IVYGREP_NO_AUTOSPAWN prevents starting one"
+            ),
+            None => bail!(
+                "could not start ivygrep web server: no daemon answered; see {}",
+                config::app_home()?.join("daemon.log").display()
+            ),
         };
         println!("ivygrep web listening at {url}");
         std::io::stdout().flush().ok();
@@ -569,7 +625,7 @@ pub async fn run() -> Result<()> {
             .query_path
             .as_deref()
             .or_else(|| cli.query.as_deref().map(Path::new));
-        run_doctor(path, cli.fix, cli.deep, cli.json)?;
+        run_doctor(path, cli.fix, cli.deep, cli.json, cli.yes)?;
         return Ok(());
     }
 
@@ -594,6 +650,7 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_hash_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
+        let job = jobs::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Hash);
         // Wait for a place among the running workers before touching stores.
         let Some(_worker_slot) = crate::indexer::admit_worker(
             &workspace,
@@ -601,11 +658,13 @@ pub async fn run() -> Result<()> {
             crate::indexer::WorkerStage::HashPass,
         )?
         else {
+            job.abandon("abandoned");
             release_abandoned_enhancement(&workspace);
             return Ok(());
         };
         let (completion_snapshot, setup_lock) =
             crate::indexer::EnhancementSnapshot::begin(&workspace)?;
+        job.claim();
         drop(setup_lock);
         let hash_model = crate::embedding::create_hash_model();
         let result = crate::indexer::enhance_workspace_hash_for_job(
@@ -615,9 +674,13 @@ pub async fn run() -> Result<()> {
         );
         let cleanup_lock = match completion_snapshot.lock_current(&workspace) {
             Ok(lock) => lock,
-            Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => return Ok(()),
+            Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => {
+                job.abandon("superseded");
+                return Ok(());
+            }
             Err(error) => return Err(error),
         };
+        job.stop();
         if std::fs::read_to_string(workspace.enhancing_pid_path())
             .ok()
             .is_some_and(|owner| owner.trim() != std::process::id().to_string())
@@ -654,6 +717,7 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
+        let job = jobs::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Neural);
         // Wait for a place among the running workers before opening stores.
         // The run starts with the hash pass, so only the guards of that pass
         // count here: hash vectors are built on battery too.
@@ -663,6 +727,7 @@ pub async fn run() -> Result<()> {
             crate::indexer::WorkerStage::HashPass,
         )?
         else {
+            job.abandon("abandoned");
             release_abandoned_enhancement(&workspace);
             return Ok(());
         };
@@ -672,64 +737,8 @@ pub async fn run() -> Result<()> {
         // Write PID file so --status can show "enhancing..."
         let pid_path = workspace.enhancing_pid_path();
         let _ = std::fs::write(&pid_path, std::process::id().to_string());
-        let heartbeat_nonce = jobs::start_job(&workspace, JobKind::Enhancement, "starting", 1)
-            .ok()
-            .and_then(|record| record.nonce);
-        let completion_nonce = heartbeat_nonce.clone();
+        job.claim();
         drop(setup_lock);
-        let stop_heartbeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let heartbeat_stop = stop_heartbeat.clone();
-        let heartbeat_workspace = workspace.clone();
-        std::thread::spawn(move || {
-            while !heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                if heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-
-                let progress =
-                    std::fs::read_to_string(heartbeat_workspace.enhancing_progress_path())
-                        .ok()
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty());
-                let stage = std::fs::read_to_string(heartbeat_workspace.enhancing_phase_path())
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty());
-                let paused_reason =
-                    std::fs::read_to_string(heartbeat_workspace.enhancing_paused_path())
-                        .ok()
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty());
-                let mut update = JobUpdate {
-                    phase: Some(if paused_reason.is_some() {
-                        "paused".to_string()
-                    } else if progress.is_some() {
-                        "running".to_string()
-                    } else {
-                        "starting".to_string()
-                    }),
-                    ..Default::default()
-                };
-                if let Some(progress) = progress {
-                    update.details.insert("progress".to_string(), progress);
-                }
-                if let Some(stage) = stage {
-                    update.details.insert("stage".to_string(), stage);
-                }
-                if let Some(reason) = paused_reason {
-                    update.details.insert("paused_reason".to_string(), reason);
-                }
-                if let Some(nonce) = &heartbeat_nonce {
-                    let _ = jobs::heartbeat_job_if_current(
-                        &heartbeat_workspace,
-                        JobKind::Enhancement,
-                        nonce,
-                        update,
-                    );
-                }
-            }
-        });
 
         let result = (|| {
             let hash_model = crate::embedding::create_hash_model();
@@ -755,15 +764,16 @@ pub async fn run() -> Result<()> {
                 &completion_snapshot,
             )
         })();
-        stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+        job.stop();
         let cleanup_lock = match completion_snapshot.lock_current(&workspace) {
             Ok(lock) => lock,
             Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => {
+                job.abandon("superseded");
                 std::process::exit(0)
             }
             Err(error) => return Err(error),
         };
-        if completion_nonce.as_deref().is_some_and(|nonce| {
+        if job.nonce().as_deref().is_some_and(|nonce| {
             jobs::job_status(
                 &workspace,
                 JobKind::Enhancement,
@@ -789,7 +799,6 @@ pub async fn run() -> Result<()> {
         // Neural model teardown can fail in multithreaded enhancement handlers.
         // We'll intentionally skip proper Rust panic runtime teardown and forcefully exit.
         if let Err(e) = result {
-            stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = jobs::finish_job(
                 &workspace,
                 JobKind::Enhancement,
@@ -802,7 +811,6 @@ pub async fn run() -> Result<()> {
             eprintln!("Background enhancement failed: {:?}", e);
             std::process::exit(1);
         }
-        stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = jobs::finish_job(&workspace, JobKind::Enhancement, "completed", None);
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
@@ -843,7 +851,10 @@ async fn run_status(json: bool) -> Result<()> {
     // Read status directly from the filesystem — no need to route through
     // the daemon socket. Status data (SQLite stats, PID files, metadata)
     // is all local. This avoids blocking when the daemon is busy.
-    let workspaces = list_workspaces()?;
+    let (workspaces, warnings) = list_workspaces_with_warnings()?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
 
     if json {
         let mut payload = serde_json::to_value(&workspaces)?;
@@ -926,7 +937,15 @@ async fn run_status(json: bool) -> Result<()> {
 
                 // Daemon/watcher
                 if ws.watch_enabled && ws.watcher_alive {
-                    println!("{prefix}  Watch:  {}", "● configured + live".green());
+                    if let Some(error) = &ws.watcher_error {
+                        println!(
+                            "{prefix}  Watch:  {}",
+                            "◐ configured, last update failed".yellow().bold()
+                        );
+                        println!("{prefix}          {}", error.dimmed());
+                    } else {
+                        println!("{prefix}  Watch:  {}", "● configured + live".green());
+                    }
                 } else if ws.watch_enabled {
                     println!(
                         "{prefix}  Watch:  {}",
@@ -1012,7 +1031,7 @@ async fn run_status(json: bool) -> Result<()> {
                 } else if ws.enhancing_stalled {
                     println!(
                         "{prefix}  Search: {} (run `ig --doctor` or retry a query)",
-                        "⚠ stalled neural upgrade".red().bold()
+                        "⚠ stalled enhancement".red().bold()
                     );
                 } else if !ws.statistics_unavailable && ws.has_neural_vectors {
                     let pct = format!("{:.0}%", ws.neural_coverage_percent);
@@ -1252,21 +1271,20 @@ async fn run_add(
 
     ensure_no_nested_workspaces(&workspace.root)?;
 
-    let mut meta =
-        workspace
-            .read_metadata()?
-            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-                id: workspace.id.clone(),
-                root: workspace.root.clone(),
-                created_at_unix: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                last_indexed_at_unix: None,
-                watch_enabled: watch,
-                skip_gitignore,
-                index_generation: 0,
-            });
+    let mut meta = workspace.read_undamaged_metadata()?.unwrap_or_else(|| {
+        crate::workspace::WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_indexed_at_unix: None,
+            watch_enabled: watch,
+            skip_gitignore,
+            index_generation: 0,
+        }
+    });
     meta.watch_enabled = watch;
     meta.skip_gitignore = skip_gitignore;
     workspace.ensure_dirs()?;
@@ -1304,7 +1322,23 @@ async fn run_add(
     if let Some(response) =
         daemon::request::<fn(String, usize, usize)>(&request, watch, None).await?
     {
-        print_daemon_response(response, json)?;
+        match response {
+            // Without a summary, another run had already covered this request.
+            DaemonResponse::Ack { summary, .. } if json => {
+                let summary = summary.unwrap_or_else(|| {
+                    Box::new(IndexingSummary {
+                        workspace_id: workspace.id.clone(),
+                        indexed_files: 0,
+                        deleted_files: 0,
+                        total_chunks: workspace.quick_index_health().chunk_count as usize,
+                        phase_timings: Default::default(),
+                        warning: None,
+                    })
+                });
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            response => print_daemon_response(response, json)?,
+        }
         if wait_for_enhancement {
             trigger_workspace_enhancement(&workspace, hash, true).await?;
         }
@@ -1351,6 +1385,10 @@ async fn trigger_workspace_enhancement(
         }
         return Ok(());
     }
+    if wait {
+        // An error that a worker left before this wait is not its result.
+        let _ = std::fs::remove_file(workspace.index_dir.join(".enhancing.error"));
+    }
     if hash_only {
         if !active {
             workspace.trigger_background_hash_enhancement()?;
@@ -1368,6 +1406,9 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
     let terminal_error;
     let mut reported_queue = false;
     loop {
+        // Read this first, so that the status holds the result of a worker
+        // that has ended.
+        let active = workspace.is_enhancing_active();
         let workspaces = crate::workspace::list_workspaces()?;
         let status = workspaces
             .iter()
@@ -1388,8 +1429,12 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
                     .unwrap_or_default()
             );
         }
-        if !workspace.is_enhancing_active() {
-            if !hash_only && workspace.needs_neural_enhancement() {
+        if !active {
+            // A neural run can follow a hash-only run, but not a failed one.
+            if status.enhancing_error.is_none()
+                && !hash_only
+                && workspace.needs_neural_enhancement()
+            {
                 workspace.trigger_background_enhancement()?;
                 if workspace.is_enhancing_active() {
                     continue;
@@ -1515,17 +1560,15 @@ async fn run_gc(json: bool) -> Result<()> {
 }
 
 async fn run_remove(path: &Path, json: bool) -> Result<()> {
-    let workspace = Workspace::resolve(path)?;
+    let workspace = Workspace::resolve_for_removal(path)?;
     let request = DaemonRequest::Remove {
         path: workspace.root.clone(),
     };
-    if let Some(response) =
-        daemon::request::<fn(String, usize, usize)>(&request, false, None).await?
-    {
-        return print_daemon_response(response, json);
+    match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
+        Some(DaemonResponse::Ack { .. }) if json => {}
+        Some(response) => return print_daemon_response(response, json),
+        None => remove_workspace_index(&workspace)?,
     }
-
-    remove_workspace_index(&workspace)?;
 
     if json {
         println!("{}", serde_json::json!({"removed": workspace.id}));
@@ -1534,6 +1577,16 @@ async fn run_remove(path: &Path, json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Hits to request for a file limit when a search enumerates matches. One dense
+/// file can hold many of them; rendering keeps the limit on files. Ranked searches
+/// keep the limit itself, because their candidate depth follows it.
+fn enumerating_hit_limit(file_limit: Option<usize>) -> Option<usize> {
+    file_limit.map(|files| match files {
+        usize::MAX => usize::MAX,
+        files => crate::mcp::hits_mode_hit_budget(files, false),
+    })
 }
 
 async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
@@ -1824,20 +1877,6 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         let first_run = matches!(initial_index_state, Some(WorkspaceIndexState::NotIndexed));
         let needs_repair = matches!(initial_index_state, Some(WorkspaceIndexState::Unhealthy));
         if first_run || needs_repair {
-            let msg = if needs_repair {
-                "Index unhealthy — rebuilding"
-            } else if workspace.is_worktree() {
-                "First run — computing worktree overlay"
-            } else {
-                "First run — indexing"
-            };
-            eprintln!(
-                "{} {} {}",
-                "⟐".bold(),
-                msg.bold(),
-                workspace.root.display().to_string().dimmed()
-            );
-
             if needs_repair {
                 // A first run made this check before it tried the daemon. A
                 // repair makes it only here: the daemon rebuilds an unhealthy
@@ -1984,6 +2023,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         std::process::exit(0);
     }
 
+    if (cli.literal || cli.regex) && crate::search::pattern_needs_line_break(query, cli.regex) {
+        eprintln!("warning: {}", crate::search::MULTI_LINE_PATTERN_WARNING);
+    }
+
     let mut file_results = None;
     let hits = if cli.symbol || cli.refs || cli.callers {
         let mode = if cli.symbol {
@@ -1994,7 +2037,11 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             crate::symbols::SymbolSearchMode::Callers
         };
         let options = SearchOptions {
-            limit,
+            limit: if cli.symbol {
+                limit
+            } else {
+                enumerating_hit_limit(limit)
+            },
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2086,10 +2133,16 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         file_results = Some(files);
         Vec::new()
     } else if cli.regex {
+        // Filename-only regex search limits files itself.
+        let hit_limit = if cli.file_name_only {
+            limit
+        } else {
+            enumerating_hit_limit(limit)
+        };
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
-            limit,
+            limit: hit_limit,
             file_name_only: cli.file_name_only,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
@@ -2100,7 +2153,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             skip_gitignore: cli.skip_gitignore,
         };
         let local_options = SearchOptions {
-            limit,
+            limit: hit_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -2357,6 +2410,20 @@ fn render_file_results(
         }
     }
 
+    if first_line_only {
+        for file in &mut grouped {
+            for hit in &mut file.hits {
+                hit.preview = hit
+                    .preview
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+
     if file_name_only {
         if json {
             let files = grouped
@@ -2410,17 +2477,8 @@ fn render_file_results(
                 println!("    {} {}", "reason:".dimmed(), hit.reason.trim());
             }
 
-            let rendered_preview = if first_line_only {
-                hit.preview
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            } else {
-                hit.preview.trim().to_string()
-            };
-            for line in rendered_preview.lines() {
+            let preview = hit.preview.trim_end();
+            for line in preview.lines().skip_while(|line| line.trim().is_empty()) {
                 println!("    {}", line);
             }
         }
@@ -2456,7 +2514,7 @@ fn report_search_warnings(warnings: &[String]) {
 
 fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
     match response {
-        DaemonResponse::Ack { message } => {
+        DaemonResponse::Ack { message, .. } => {
             if json {
                 println!("{}", serde_json::json!({"message": message}));
             } else {
@@ -2501,13 +2559,33 @@ fn init_tracing() {
         .try_init();
 }
 
-fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<()> {
+fn run_doctor(
+    path: Option<&Path>,
+    fix: bool,
+    deep: bool,
+    json: bool,
+    assume_yes: bool,
+) -> Result<()> {
     let target = match path {
         Some(path) => path.to_path_buf(),
         None => env::current_dir()?,
     };
-    let workspace = Workspace::resolve(&target)?;
-    let report = crate::doctor::inspect_and_maybe_fix(&workspace, fix, deep)?;
+    // The index that a search of this path uses.
+    let (workspace, _, base) = resolve_workspace_and_scope_with_base(&target)?;
+    let report =
+        crate::doctor::inspect_and_fix_if_confirmed(&workspace, fix, deep, &mut |state| {
+            // A first index must not hold a second copy of a workspace below
+            // it. A repair keeps the root that it repairs.
+            if state == WorkspaceIndexState::NotIndexed {
+                ensure_no_nested_workspaces(&workspace.root)?;
+            }
+            if let Some(base) = &base
+                && !assume_yes
+            {
+                confirm_broad_build(base, false, false)?;
+            }
+            confirm_broad_index(&workspace.root, assume_yes)
+        })?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2576,7 +2654,7 @@ fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<
 }
 
 fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
-    let args = env::args().skip(1).collect::<Vec<_>>();
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         return Ok(false);
     }
@@ -2919,7 +2997,9 @@ fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
 ///
 /// The walker does not enter a separate checkout below a Git workspace, so a
 /// workspace at or below a linked worktree or a nested clone is not a
-/// conflict. A target that is not a Git checkout keeps everything below it.
+/// conflict. It enters a submodule, but a search in a submodule always uses the
+/// index of the submodule, so that one is not a conflict either. A target that
+/// is not a Git checkout keeps everything below it.
 fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut below = workspace_roots
         .into_iter()
@@ -2928,19 +3008,41 @@ fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>)
     if below.peek().is_none() {
         return Vec::new();
     }
-    let nested_checkouts = crate::workspace::NestedCheckouts::new(target_root);
+    use crate::workspace::{NestedCheckouts, is_git_workspace_root};
+
+    let nested_checkouts = NestedCheckouts::new(target_root);
+    let is_git_target = is_git_workspace_root(target_root);
     below
-        .filter(|root| !nested_checkouts.contains(target_root, root))
+        .filter(|root| {
+            !(is_git_target && is_git_workspace_root(root))
+                && !nested_checkouts.contains(target_root, root)
+        })
         .collect()
 }
 
+/// `path` as one shell argument.
+fn shell_quoted(path: &Path) -> String {
+    let path = path.display().to_string();
+    #[cfg(not(windows))]
+    if let Ok(quoted) = shlex::try_quote(&path) {
+        return quoted.into_owned();
+    }
+    #[cfg(windows)]
+    if path.contains(' ') {
+        return format!("\"{path}\"");
+    }
+    path
+}
+
 fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
-    if let Ok(workspace_roots) = list_workspace_roots() {
+    if let Ok(mut workspace_roots) = list_workspace_roots() {
+        // A saved index of a deleted directory holds no file of the target.
+        workspace_roots.retain(|root| !root_is_gone(root));
         let conflicts = nested_workspace_conflicts(target_root, workspace_roots);
         if !conflicts.is_empty() {
             let conflict_msgs: Vec<String> = conflicts
                 .iter()
-                .map(|p| format!("ig --rm {}", p.display()))
+                .map(|p| format!("ig --rm {}", shell_quoted(p)))
                 .collect();
             let paths_list: Vec<String> = conflicts
                 .iter()
@@ -2995,6 +3097,10 @@ fn current_broad_root(root: &Path) -> Option<BroadRoot> {
     broad_root(root, home.as_deref())
 }
 
+pub(crate) fn is_broad_root(root: &Path) -> bool {
+    current_broad_root(root).is_some()
+}
+
 fn is_affirmative(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
@@ -3040,15 +3146,43 @@ fn adds_ignored_files(workspace: &Workspace, skip_gitignore: bool) -> bool {
     skip_gitignore && !workspace_index_matches_skip_gitignore(workspace, true)
 }
 
+/// The kind of broad directory `root` is, if this request builds its index or
+/// adds ignored files to it.
+fn pending_broad_build(
+    root: &Path,
+    force: bool,
+    skip_gitignore: bool,
+) -> Result<Option<BroadRoot>> {
+    let Some(broad) = current_broad_root(root) else {
+        return Ok(None);
+    };
+    let workspace = Workspace::resolve_registered(root)?;
+    let builds = force
+        || adds_ignored_files(&workspace, skip_gitignore)
+        || !workspace_is_indexed(&workspace);
+    Ok(builds.then_some(broad))
+}
+
 fn confirm_broad_build(root: &Path, force: bool, skip_gitignore: bool) -> Result<()> {
-    if current_broad_root(root).is_some() {
-        let workspace = Workspace::resolve_registered(root)?;
-        if force
-            || adds_ignored_files(&workspace, skip_gitignore)
-            || !workspace_is_indexed(&workspace)
-        {
-            confirm_broad_index(root, false)?;
-        }
+    if pending_broad_build(root, force, skip_gitignore)?.is_some() {
+        confirm_broad_index(root, false)?;
+    }
+    Ok(())
+}
+
+/// [`confirm_broad_build`] for an MCP request, which cannot ask the user.
+pub(crate) fn refuse_broad_build(root: &Path, skip_gitignore: bool) -> Result<()> {
+    if let Some(broad) = pending_broad_build(root, false, skip_gitignore)? {
+        let flag = if skip_gitignore {
+            " --skip-gitignore"
+        } else {
+            ""
+        };
+        bail!(
+            "did not index {root}: it is {}. Pass the absolute path of a project as `path`. To index this directory on purpose, the user can run `ig --add {root}{flag} --yes`.",
+            broad.describe(),
+            root = root.display(),
+        );
     }
     Ok(())
 }
@@ -3143,10 +3277,10 @@ mod tests {
         registered.extend([root.clone(), tmp.path().join("sibling")]);
 
         // The walker stops at the nested clone, so it reaches nothing below
-        // it. It enters a plain directory and a submodule.
+        // it. It enters a plain directory. A submodule has its own index.
         assert_eq!(
             nested_workspace_conflicts(&root, registered.clone()),
-            [root.join("docs"), root.join("vendor/lib")]
+            [root.join("docs")]
         );
 
         // A root that is not a Git checkout keeps everything below it.
@@ -3223,6 +3357,37 @@ mod tests {
         for answer in ["", "\n", "n", "no", "yep", "y es"] {
             assert!(!is_affirmative(answer), "{answer:?}");
         }
+    }
+
+    #[test]
+    fn search_mode_flags_make_subcommand_words_searchable() {
+        let parse = |arguments: &[&str]| parse_cli(arguments.iter().map(OsString::from));
+        for (arguments, query, path) in [
+            (&["ig", "--literal", "context"][..], "context", None),
+            (
+                &["ig", "--symbol", "context", "-n", "5", "src"],
+                "context",
+                Some("src"),
+            ),
+            (&["ig", "-fl", "needle", "agent"], "needle", Some("agent")),
+            (&["ig", "--refs", "help"], "help", None),
+            (&["ig", "--callers", "hardware"], "hardware", None),
+            (&["ig", "--literal", "--", "context"], "context", None),
+        ] {
+            let cli = parse(arguments).unwrap();
+            assert!(cli.command.is_none(), "{arguments:?}");
+            assert_eq!(cli.query.as_deref(), Some(query), "{arguments:?}");
+            assert_eq!(cli.query_path.as_deref(), path.map(Path::new));
+        }
+        // Without a search-mode flag before it, the word is a subcommand.
+        for arguments in [
+            &["ig", "context", "task"][..],
+            &["ig", "--hash", "-C2", "context", "task"],
+            &["ig", "hardware"],
+        ] {
+            assert!(parse(arguments).unwrap().command.is_some(), "{arguments:?}");
+        }
+        assert!(parse(&["ig", "context", "task", "--literal"]).is_err());
     }
 
     #[test]
