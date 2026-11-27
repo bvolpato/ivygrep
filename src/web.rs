@@ -683,9 +683,9 @@ fn build_search_request_for_path(
     path: Option<PathBuf>,
 ) -> Result<DaemonRequest> {
     let query = param(params, "q").unwrap_or_default();
-    // Spaces are part of a regex pattern.
+    // Spaces are part of a pattern.
     let query = match param(params, "mode") {
-        Some("regex") => query.trim_matches(['\r', '\n']),
+        Some("literal" | "regex") => query.trim_matches(['\r', '\n']),
         _ => query.trim(),
     }
     .to_string();
@@ -2086,6 +2086,13 @@ mod tests {
         assert_eq!(pattern, "foo ");
         assert_eq!(scope_path, Some(PathBuf::from(" dir ")));
         assert_eq!(include_globs, ["**/*.{rs,ts}", "src/**"]);
+
+        let (_, params) = parse_target("/api/search?q=%20foo%20%0D%0A&mode=literal").unwrap();
+        let request = build_search_request(&params).unwrap();
+        assert!(
+            matches!(&request, DaemonRequest::LiteralSearch { query, .. } if query == " foo "),
+            "{request:?}"
+        );
     }
 
     #[test]

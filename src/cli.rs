@@ -1953,6 +1953,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         std::process::exit(0);
     }
 
+    if (cli.literal || cli.regex) && crate::search::pattern_needs_line_break(query, cli.regex) {
+        eprintln!("warning: {}", crate::search::MULTI_LINE_PATTERN_WARNING);
+    }
+
     let mut file_results = None;
     let hits = if cli.symbol || cli.refs || cli.callers {
         let mode = if cli.symbol {

@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { searchQuery, uniqueHits, workspaceForPath } from "./ui-utils";
 
 describe("search input", () => {
-  it("keeps spaces only in regex patterns", () => {
+  it("keeps spaces only in patterns", () => {
     expect(searchQuery("regex", "\n foo \r\n")).toBe(" foo ");
+    expect(searchQuery("literal", "\n foo \r\n")).toBe(" foo ");
     expect(searchQuery("hybrid", " foo \n")).toBe("foo");
   });
 });

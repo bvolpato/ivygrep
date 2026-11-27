@@ -52,6 +52,9 @@ All notable changes to ivygrep are documented in this file.
 - Python module docstrings and imports no longer register words such as `provides` or `import` as symbols.
 - Previews of exact symbol hits show the definition line when a multi-line decorator or annotation precedes it.
 - Index format v31 rebuilds existing indexes once to pick up the symbol and chunking changes above.
+- Literal search keeps leading and trailing spaces in the pattern, also in the Web UI, so `--literal 'if '` no longer matches `diff`.
+- The CLI and MCP warn that a literal or regex pattern that needs a line break has no results, because both modes search one line at a time. One trailing line break is ignored.
+- Regex context lines of UTF-16 files are decoded like the matching lines.
 - `-n` limits result files, not matches, in CLI regex, reference, and caller searches. One file with many matches could use the whole limit. These searches read 20 matches per requested file, from 200 to 1,000 in total, so a file with more matches can still hide later files.
 
 ### Security
