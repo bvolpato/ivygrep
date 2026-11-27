@@ -25,6 +25,33 @@ All notable changes to ivygrep are documented in this file.
 - Identical Web results are shown once, so arrow keys and Pin reach every result. The Enter key of an input method no longer starts a search.
 - The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
 - Malformed Web requests get a 400 or 431 response instead of a closed connection.
+- Search ranks a file such as `src/handler_tests.rs` as a test, like `src/handler_test.rs`. It competed with source files at full weight.
+- A file without read permission no longer fails an index run and no longer makes the workspace unsearchable. ivygrep skips the file with a warning, keeps the chunks that the index has for it, and tries again on the next run. This changes the rule of v1.3.1, where a permission error failed the update. Other I/O errors, an unreadable `.gitignore` or `.ignore` file, a file replaced by a symlink, and a missing workspace root still fail the update, but a failure before the first commit now leaves the index queryable.
+- `ig --add` finds sources that Git status cannot report as changed: the files of a submodule after `git submodule update --init` or `deinit`, a tracked directory that gets or loses its own `.git` entry, and a tracked file that was missing only while the first scan ran. The clean-checkout shortcut kept the older index until the next commit.
+- `ig --add` and `ig --add --force` rebuild an index whose `workspace.json` or `index_incarnation` file is damaged. They stopped with a JSON or UTF-8 error.
+- `ig --doctor` and searches no longer rebuild the index of a directory whose only text files are larger than 16 MiB.
+- A search answers while files in the workspace keep changing. After a daemon start or a first index, steady writes such as a log file kept the watcher in its startup state, and each search waited for the 60-second deadline and returned no results.
+- Concurrent daemon searches no longer remove each other's stores when an index needs a rebuild. `--all-indices` and Web searches could fail or return no results, and the rebuild could turn the watcher of the workspace off.
+- The daemon watches a plain directory again after another directory takes its place, for example after `rm -rf` and an extracted archive. Edits stayed out of search results while `ig --status` showed a live watcher.
+- A daemon that a query starts no longer keeps the standard input and the working directory of that query. `producer | ig QUERY` could wait forever, and a volume could not be ejected.
+- The watcher updates files in a directory named `.ivygrep`, which the indexer already included.
+- A daemon exits within seconds after its app home is deleted or replaced. Such a daemon recreated deleted indexes, and it later removed the socket of the daemon that replaced it.
+- On macOS, a process recognizes running watchers and workers that started with another locale or time zone. `ig --status` reported a live watcher as offline, and `--wait-for-enhancement` failed with `background enhancement stalled` after a second process started a second worker.
+- `ig --status` shows a hash worker, and a worker that waits for its start, after an earlier worker of the workspace finished. It also keeps the pause reason. A process that received the PID of a dead worker no longer blocks enhancement.
+- `ig --add --force`, `ig --rm`, and other index removals no longer fail with `Directory not empty` or `No such file or directory` while another process reads or updates the index.
+- An `--all-indices` search warns about each workspace that it skips because the index of that workspace is not complete. During a rebuild it returned no results without a message.
+- `ig --status` reports the error when the updates of a live watcher fail. It reported `configured + live`.
+- `ig --doctor` reports a burst of watcher events only while events wait. The finding stayed until the daemon restarted.
+- A query warns when the path of the daemon socket is too long for a Unix socket. Only `daemon.log` named the reason why no daemon and no watcher ran.
+- Search works inside a Git submodule. A submodule, a clone made with `git clone --separate-git-dir`, and a linked worktree of either are standalone workspaces. ivygrep took their Git directory for the main checkout: every search in a submodule failed with `base index format incompatible`, and a separate Git directory was indexed as a workspace. When ivygrep rebuilds the checkout, it removes that index. An index of a submodule no longer prevents an index of its parent repository.
+- `.gitignore` and `info/exclude` rules above a Git repository no longer apply to its files, as in Git. A rule such as `*` or `.worktrees/**` in a directory above a repository or a linked worktree left its index empty. A submodule inside a workspace also stops the rules of its parent repository, except the `info/exclude` rules of a workspace whose root has a `.git` file. Its own `info/exclude` rules apply. `.ignore` files above a repository and all rules above a plain directory still apply. An index with such rules above its repository rebuilds on first use. The next `ig --add` adds the submodule files that rules of the parent hid.
+- C and C++ symbol lookups return definitions only. A mention such as `struct node *next` no longer counts as a definition of `node`, so a common type no longer hides its own definition. `typedef` and `using` names and C++ unions are found.
+- C++ classes and methods in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
+- Several definitions on one line, such as `int getA() { ... } int getB() { ... }`, are all found.
+- In C and C++ code that the grammar cannot parse because of a macro, types with a body are found. A `typedef` in such code can be missing.
+- Python module docstrings and imports no longer register words such as `provides` or `import` as symbols.
+- Previews of exact symbol hits show the definition line when a multi-line decorator or annotation precedes it.
+- Index format v31 rebuilds existing indexes once to pick up the symbol and chunking changes above.
 - Literal search keeps leading and trailing spaces in the pattern, also in the Web UI, so `--literal 'if '` no longer matches `diff`.
 - The CLI and MCP warn that a literal or regex pattern that needs a line break has no results, because both modes search one line at a time. One trailing line break is ignored.
 - Regex context lines of UTF-16 files are decoded like the matching lines.

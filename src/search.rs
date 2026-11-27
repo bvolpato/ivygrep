@@ -6231,6 +6231,7 @@ fn is_test_path(path: &str) -> bool {
         || path.starts_with("selftests/")
         // File-level signals (naming conventions across languages)
         || path.contains("_test.")    // Go, Rust: foo_test.go, foo_test.rs
+        || path.contains("_tests.")   // Rust: foo_tests.rs
         || path.contains(".test.")    // JS/TS: foo.test.ts, foo.test.js
         || path.contains("_spec.")    // Ruby, JS: foo_spec.rb, foo.spec.ts
         || path.contains(".spec.")    // JS/TS: foo.spec.ts
@@ -10166,6 +10167,7 @@ export function registerCommands(p: Plugin) {
         // Filename conventions
         assert!(is_test_path("src/handler_test.go"));
         assert!(is_test_path("src/handler_test.rs"));
+        assert!(is_test_path("src/handler_tests.rs"));
         assert!(is_test_path("src/Button.test.tsx"));
         assert!(is_test_path("src/user_spec.rb"));
         assert!(is_test_path("src/handler.spec.ts"));
@@ -12459,6 +12461,36 @@ export function registerCommands(p: Plugin) {
             chunk_density_exponent(&ChunkBoostContext::new(&header))
                 < chunk_density_exponent(&ChunkBoostContext::new(&benchmark))
         );
+    }
+
+    #[test]
+    fn exact_symbol_preview_skips_annotation_arguments() {
+        for (path, language, symbol, content, line) in [
+            (
+                "api.py",
+                "python",
+                "create_transfer",
+                "@router.post(\n    \"/transfers\",\n    status_code=201,\n)\nasync def create_transfer(body):\n    return body\n",
+                5,
+            ),
+            (
+                "shell.ts",
+                "typescript",
+                "AppShell",
+                "@Component({\n  selector: \"x-app\",\n})\nexport class AppShell {}\n",
+                4,
+            ),
+        ] {
+            let lines = line_spans(content);
+            let mut chunk = make_test_chunk(symbol, path, content, "Class");
+            chunk.language = language.to_string();
+            let query = PresentationQuery::new(symbol);
+            assert_eq!(
+                find_focus_line(&chunk, &query, content, &lines),
+                line,
+                "{path}"
+            );
+        }
     }
 
     #[test]

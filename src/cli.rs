@@ -14,7 +14,7 @@ use crate::indexer::{
     index_workspace, remove_workspace_index, workspace_index_matches_skip_gitignore,
     workspace_is_indexed,
 };
-use crate::jobs::{self, JobKind, JobUpdate};
+use crate::jobs::{self, JobKind};
 use crate::mcp;
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::{
@@ -594,6 +594,7 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_hash_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
+        let job = jobs::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Hash);
         // Wait for a place among the running workers before touching stores.
         let Some(_worker_slot) = crate::indexer::admit_worker(
             &workspace,
@@ -601,11 +602,13 @@ pub async fn run() -> Result<()> {
             crate::indexer::WorkerStage::HashPass,
         )?
         else {
+            job.abandon("abandoned");
             release_abandoned_enhancement(&workspace);
             return Ok(());
         };
         let (completion_snapshot, setup_lock) =
             crate::indexer::EnhancementSnapshot::begin(&workspace)?;
+        job.claim();
         drop(setup_lock);
         let hash_model = crate::embedding::create_hash_model();
         let result = crate::indexer::enhance_workspace_hash_for_job(
@@ -615,9 +618,13 @@ pub async fn run() -> Result<()> {
         );
         let cleanup_lock = match completion_snapshot.lock_current(&workspace) {
             Ok(lock) => lock,
-            Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => return Ok(()),
+            Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => {
+                job.abandon("superseded");
+                return Ok(());
+            }
             Err(error) => return Err(error),
         };
+        job.stop();
         if std::fs::read_to_string(workspace.enhancing_pid_path())
             .ok()
             .is_some_and(|owner| owner.trim() != std::process::id().to_string())
@@ -654,6 +661,7 @@ pub async fn run() -> Result<()> {
     if let Some(path) = &cli.enhance_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
+        let job = jobs::EnhancementJob::start(&workspace, crate::indexer::WorkerLane::Neural);
         // Wait for a place among the running workers before opening stores.
         // The run starts with the hash pass, so only the guards of that pass
         // count here: hash vectors are built on battery too.
@@ -663,6 +671,7 @@ pub async fn run() -> Result<()> {
             crate::indexer::WorkerStage::HashPass,
         )?
         else {
+            job.abandon("abandoned");
             release_abandoned_enhancement(&workspace);
             return Ok(());
         };
@@ -672,64 +681,8 @@ pub async fn run() -> Result<()> {
         // Write PID file so --status can show "enhancing..."
         let pid_path = workspace.enhancing_pid_path();
         let _ = std::fs::write(&pid_path, std::process::id().to_string());
-        let heartbeat_nonce = jobs::start_job(&workspace, JobKind::Enhancement, "starting", 1)
-            .ok()
-            .and_then(|record| record.nonce);
-        let completion_nonce = heartbeat_nonce.clone();
+        job.claim();
         drop(setup_lock);
-        let stop_heartbeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let heartbeat_stop = stop_heartbeat.clone();
-        let heartbeat_workspace = workspace.clone();
-        std::thread::spawn(move || {
-            while !heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                if heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-
-                let progress =
-                    std::fs::read_to_string(heartbeat_workspace.enhancing_progress_path())
-                        .ok()
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty());
-                let stage = std::fs::read_to_string(heartbeat_workspace.enhancing_phase_path())
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty());
-                let paused_reason =
-                    std::fs::read_to_string(heartbeat_workspace.enhancing_paused_path())
-                        .ok()
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty());
-                let mut update = JobUpdate {
-                    phase: Some(if paused_reason.is_some() {
-                        "paused".to_string()
-                    } else if progress.is_some() {
-                        "running".to_string()
-                    } else {
-                        "starting".to_string()
-                    }),
-                    ..Default::default()
-                };
-                if let Some(progress) = progress {
-                    update.details.insert("progress".to_string(), progress);
-                }
-                if let Some(stage) = stage {
-                    update.details.insert("stage".to_string(), stage);
-                }
-                if let Some(reason) = paused_reason {
-                    update.details.insert("paused_reason".to_string(), reason);
-                }
-                if let Some(nonce) = &heartbeat_nonce {
-                    let _ = jobs::heartbeat_job_if_current(
-                        &heartbeat_workspace,
-                        JobKind::Enhancement,
-                        nonce,
-                        update,
-                    );
-                }
-            }
-        });
 
         let result = (|| {
             let hash_model = crate::embedding::create_hash_model();
@@ -755,15 +708,16 @@ pub async fn run() -> Result<()> {
                 &completion_snapshot,
             )
         })();
-        stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+        job.stop();
         let cleanup_lock = match completion_snapshot.lock_current(&workspace) {
             Ok(lock) => lock,
             Err(error) if error.is::<crate::indexer::EnhancementSuperseded>() => {
+                job.abandon("superseded");
                 std::process::exit(0)
             }
             Err(error) => return Err(error),
         };
-        if completion_nonce.as_deref().is_some_and(|nonce| {
+        if job.nonce().as_deref().is_some_and(|nonce| {
             jobs::job_status(
                 &workspace,
                 JobKind::Enhancement,
@@ -789,7 +743,6 @@ pub async fn run() -> Result<()> {
         // Neural model teardown can fail in multithreaded enhancement handlers.
         // We'll intentionally skip proper Rust panic runtime teardown and forcefully exit.
         if let Err(e) = result {
-            stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = jobs::finish_job(
                 &workspace,
                 JobKind::Enhancement,
@@ -802,7 +755,6 @@ pub async fn run() -> Result<()> {
             eprintln!("Background enhancement failed: {:?}", e);
             std::process::exit(1);
         }
-        stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = jobs::finish_job(&workspace, JobKind::Enhancement, "completed", None);
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
@@ -926,7 +878,15 @@ async fn run_status(json: bool) -> Result<()> {
 
                 // Daemon/watcher
                 if ws.watch_enabled && ws.watcher_alive {
-                    println!("{prefix}  Watch:  {}", "● configured + live".green());
+                    if let Some(error) = &ws.watcher_error {
+                        println!(
+                            "{prefix}  Watch:  {}",
+                            "◐ configured, last update failed".yellow().bold()
+                        );
+                        println!("{prefix}          {}", error.dimmed());
+                    } else {
+                        println!("{prefix}  Watch:  {}", "● configured + live".green());
+                    }
                 } else if ws.watch_enabled {
                     println!(
                         "{prefix}  Watch:  {}",
@@ -1012,7 +972,7 @@ async fn run_status(json: bool) -> Result<()> {
                 } else if ws.enhancing_stalled {
                     println!(
                         "{prefix}  Search: {} (run `ig --doctor` or retry a query)",
-                        "⚠ stalled neural upgrade".red().bold()
+                        "⚠ stalled enhancement".red().bold()
                     );
                 } else if !ws.statistics_unavailable && ws.has_neural_vectors {
                     let pct = format!("{:.0}%", ws.neural_coverage_percent);
@@ -1252,21 +1212,20 @@ async fn run_add(
 
     ensure_no_nested_workspaces(&workspace.root)?;
 
-    let mut meta =
-        workspace
-            .read_metadata()?
-            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-                id: workspace.id.clone(),
-                root: workspace.root.clone(),
-                created_at_unix: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                last_indexed_at_unix: None,
-                watch_enabled: watch,
-                skip_gitignore,
-                index_generation: 0,
-            });
+    let mut meta = workspace.read_undamaged_metadata()?.unwrap_or_else(|| {
+        crate::workspace::WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_indexed_at_unix: None,
+            watch_enabled: watch,
+            skip_gitignore,
+            index_generation: 0,
+        }
+    });
     meta.watch_enabled = watch;
     meta.skip_gitignore = skip_gitignore;
     workspace.ensure_dirs()?;
@@ -2923,7 +2882,9 @@ fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
 ///
 /// The walker does not enter a separate checkout below a Git workspace, so a
 /// workspace at or below a linked worktree or a nested clone is not a
-/// conflict. A target that is not a Git checkout keeps everything below it.
+/// conflict. It enters a submodule, but a search in a submodule always uses the
+/// index of the submodule, so that one is not a conflict either. A target that
+/// is not a Git checkout keeps everything below it.
 fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut below = workspace_roots
         .into_iter()
@@ -2932,9 +2893,15 @@ fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>)
     if below.peek().is_none() {
         return Vec::new();
     }
-    let nested_checkouts = crate::workspace::NestedCheckouts::new(target_root);
+    use crate::workspace::{NestedCheckouts, is_git_workspace_root};
+
+    let nested_checkouts = NestedCheckouts::new(target_root);
+    let is_git_target = is_git_workspace_root(target_root);
     below
-        .filter(|root| !nested_checkouts.contains(target_root, root))
+        .filter(|root| {
+            !(is_git_target && is_git_workspace_root(root))
+                && !nested_checkouts.contains(target_root, root)
+        })
         .collect()
 }
 
@@ -3147,10 +3114,10 @@ mod tests {
         registered.extend([root.clone(), tmp.path().join("sibling")]);
 
         // The walker stops at the nested clone, so it reaches nothing below
-        // it. It enters a plain directory and a submodule.
+        // it. It enters a plain directory. A submodule has its own index.
         assert_eq!(
             nested_workspace_conflicts(&root, registered.clone()),
-            [root.join("docs"), root.join("vendor/lib")]
+            [root.join("docs")]
         );
 
         // A root that is not a Git checkout keeps everything below it.
