@@ -90,4 +90,41 @@ mod tests {
         kill_watcher_pid(&workspace);
         ivygrep::ipc::cleanup_socket();
     }
+
+    #[test]
+    #[serial]
+    fn spawned_daemon_does_not_hold_the_stdin_of_the_query() {
+        use std::io::Write;
+
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn stdin_marker() {}\n").unwrap();
+
+        let mut query = Command::new(cargo_bin!("ig"))
+            .current_dir(repo.path())
+            .env("IVYGREP_HOME", home.path())
+            .env_remove("IVYGREP_NO_AUTOSPAWN")
+            .arg("stdin_marker")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = query.stdin.take().unwrap();
+        assert!(query.wait().unwrap().success());
+        let pid: i32 = std::fs::read_to_string(home.path().join("daemon.pid"))
+            .expect("the query must have started a daemon")
+            .parse()
+            .unwrap();
+        // Rust ignores SIGPIPE, so a pipe without readers is an error here.
+        let write = stdin.write_all(b"more input");
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        ivygrep::ipc::cleanup_socket();
+        assert_eq!(
+            write.unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "a producer must see that the query ended"
+        );
+    }
 }

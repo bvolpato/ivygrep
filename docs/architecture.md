@@ -110,7 +110,12 @@ to mode `0700` because stored chunks can contain private source text.
 
 Git worktrees share a repository identifier. A secondary worktree records the
 main worktree's index directory as its base and stores only divergent state in
-its own index directory.
+its own index directory. A submodule and a `--separate-git-dir` clone have a
+`.git` file too, but their Git directory has no `commondir`, so they are main
+checkouts. The index of a parent repository holds the sources of its submodules
+too, so a file of a submodule can be in two indexes. A linked worktree has no base when its repository has no main
+checkout that Git can name: a bare repository, a submodule, or a
+`--separate-git-dir` clone.
 
 A checkout nested inside a Git workspace is a workspace of its own, as it is
 for Git and for `Workspace::resolve`. The file walker, the request-local path
@@ -151,7 +156,13 @@ the appropriate stores before local queries use them.
 1. Resolve workspace and acquire its index lock.
 2. Inspect index health and stored format version.
 3. Walk indexable files while applying Git ignore rules unless explicitly
-   disabled.
+   disabled. As in Git, `.gitignore` and `info/exclude` rules stop at the root of
+   a repository, which includes a submodule inside the workspace. They do not
+   stop at a directory whose `.git` or `.jj` entry is not a repository. One rule
+   differs from Git: if the root of the workspace has a `.git` file, its
+   `info/exclude` rules also apply in submodules. A submodule has its own
+   `info/exclude` rules too. `.ignore` files apply from every directory above the
+   workspace. Above a plain directory, all of these rules apply.
 4. Build a flat Merkle snapshot of relative paths and file fingerprints.
 5. Send files through a bounded scanner/chunker producer.
 6. Parse supported languages with Tree-sitter or a bounded text fallback. The
@@ -176,6 +187,8 @@ staged promotion, the indexer asks the daemon to release cached readers of the
 replaced workspace and its dependent worktrees. Unchanged scans retain those
 readers. This ordering lets Windows replace the stores without live SQLite or
 Tantivy handles and prevents searches from reopening them during replacement.
+A search that finds an index it cannot query takes the same exclusive leases
+before it rebuilds the index. Other searches wait and then read the new stores.
 
 ### Incremental indexing
 
@@ -187,11 +200,22 @@ their chunks, graph edges, symbols, lexical documents, and vector keys. In a
 worktree, deletion of a base-backed path is represented by an overlay tombstone;
 see [Worktree overlays](#worktree-overlays).
 
+A regular file that ivygrep has no permission to read does not fail an index
+run. The index keeps the chunks that it has for the file, the run warns with the
+number of such files and the first path, and the snapshot records the file as
+unreadable. Each later run that scans the workspace tries to read it again. Until
+then, the clean-checkout marker is not written. A new or rebuilt worktree overlay
+cannot compare such a file with the base, so it hides the base file. If a scan
+lists a `.gitignore` or `.ignore` file that ivygrep has no permission to read, the
+run fails, because the scan ran without its rules. An unreadable directory, any
+other I/O error, a file replaced by a symlink, and a missing workspace root also
+fail the run.
+
 Watcher events use a targeted refresh only when path-level reconciliation is
 safe. New directories, ignore-file changes, uncertain Git state, and similar
 cases fall back to a full walk. A clean Git workspace whose recorded repository
 state still matches can return without scanning every file. The fingerprint
-includes ancestor `.ignore`/`.gitignore` controls. Reuse is disabled when
+includes ancestor `.ignore` controls. Reuse is disabled when
 independent ignore rules whitelist files Git may ignore, or when assume-unchanged
 flags or present skip-worktree files prevent Git status from observing source
 edits. Those cases use the normal Merkle walk, including during base reuse.
@@ -203,7 +227,7 @@ complete staged recovery, not a replay of an empty or partial Merkle delta.
 These checks add store-opening/counting work even when source discovery is skipped;
 they do not validate every vector payload or compare concurrent enhancement markers.
 
-The clean-checkout reuse marker also certifies that indexed snapshot paths are Git-tracked and still match live source metadata. For paths with Git content-conversion attributes, the marker includes working-file metadata because Git can report a clean checkout after the on-disk text changes. Older certificates require reconciliation. Explicit watcher paths bypass the shortcut.
+The clean-checkout reuse marker also certifies that indexed snapshot paths are Git-tracked and still match live source metadata, and that the snapshot holds each tracked file that the walker reads. The marker includes the list of tracked paths, submodule files among them, and the tracked directories that are separate checkouts. Initializing a submodule, or a `.git` entry that appears or goes away, therefore reconciles the workspace although HEAD and the Git index do not change. For paths with Git content-conversion attributes, the marker includes working-file metadata because Git can report a clean checkout after the on-disk text changes. Older certificates require reconciliation. Explicit watcher paths bypass the shortcut.
 
 Starting with v1.3.1, CLI searches and context requests, the TUI, and `ig --add`
 ask before building an index for the home directory, a directory containing
@@ -213,12 +237,14 @@ healthy directory does not trigger this prompt. `--force` rebuilds it, while
 `--skip-gitignore` can add ignored files, and both prompt when they target a
 broad root.
 
-Main indexes and overlays mark live publication as incomplete before changing
-stores. The marker survives failures and is cleared only after stores, metadata,
-snapshot, and filter state publish successfully. Main recovery rebuilds in staging;
-no-op Git checks, watcher shortcuts, and base reuse cannot trust an unfinished
-publication. Fresh main builds also mark the interval between store promotion
-and snapshot publication.
+Main indexes and overlays mark live publication as incomplete before their first
+commit. A run that fails before that commit, for example on a read error, leaves
+the index queryable. An update that needs more than one commit first opens all
+its sources. After the first commit, the marker survives failures and is cleared
+only after stores, metadata, snapshot, and filter state publish successfully.
+Main recovery rebuilds in staging; no-op Git checks, watcher shortcuts, and base
+reuse cannot trust an unfinished publication. Fresh main builds also mark the
+interval between store promotion and snapshot publication.
 
 Hash and neural vector deletion journals prevent stale embeddings from becoming
 visible when another store fails. Merkle state is saved only after committed
@@ -315,6 +341,14 @@ definition's chunk; signatures skip multi-line annotations; and Java records,
 module-level JavaScript and TypeScript function bindings, and module-level Rust
 `macro_rules!` macros register symbols. A macro declared inside a function stays
 in that function's chunk and does not register a definition.
+
+Format v31 rebuilds once so a C or C++ type mention such as `struct node *next`
+no longer registers a definition or gets its own chunk; `typedef`, `using`, and
+Python `type` names at file or namespace scope and C++ unions register symbols,
+and so do types with a body in C or C++ code that the grammar cannot parse; several
+definitions on one line all register; Python module text and imports, and C++
+destructors and operators, register none; and `.h` files with C++ syntax use the
+C++ grammar. They keep the language name `c`.
 
 ## Search pipeline
 
@@ -612,6 +646,11 @@ Live source reads use `workspace_file.rs` to open regular files beneath the
 selected workspace without following child symlinks. Preview metadata and text
 come from the same opened file; unavailable live previews use indexed text.
 
+Literal and regex searches compare single lines. A pattern keeps its spaces and
+loses one trailing line break. A literal pattern also loses trailing carriage
+returns. A literal pattern with any other line break, or a regex whose every match
+needs one, has no results, and the CLI and MCP say so in a warning.
+
 Literal and regex previews return lines up to 1 KiB unchanged. A longer line,
 such as a minified bundle or source map, keeps a 1 KiB window around its first
 match (context lines keep their start), cut on character boundaries and marked
@@ -636,8 +675,10 @@ enclosing `owner` (class, impl, struct, module, or Go receiver); language and
 kind are read from the joined chunk row, and a `chunk_key` index keeps file
 removal proportional to the file's own symbols. Names come
 from the Tree-sitter capture at chunk time; the line heuristic is only a
-fallback for languages without a grammar, and continuation windows never
-register symbols. Qualified lookups (`Owner.method`, `Owner::method`,
+fallback for languages without a grammar and for module-level code whose query
+does not capture every definition, such as Rust structs. Continuation windows
+register only names without a chunk of their own, such as a C `typedef`.
+Qualified lookups (`Owner.method`, `Owner::method`,
 `Owner#method`, `Owner->method`) filter by owner, preferring exact-case matches
 and falling back to the bare name; reference and caller scans are restricted
 to the languages that define the symbol. C, C++, and Objective-C count as one
@@ -803,7 +844,10 @@ whose error says that the workspace directory no longer exists, so `ig --status`
 keeps showing why the workspace is not watched; later passes leave the record
 alone. The index and `watch_enabled` stay, so the same path checked out again is
 watched by the next request or supervisor pass, and that registration replaces
-the record. A root that exists but cannot be watched or read is not gone: it
+the record. A root that is another directory than the one the watcher
+registered, after a rename or a deletion and a new directory at the same path,
+gets a new watcher from the next search, index request, or supervisor pass. A
+root that exists but cannot be watched or read is not gone: it
 keeps the recorded failure, the retries, and the 30 s to 15 min backoff.
 
 Indexes of workspaces that no longer exist are garbage collected
@@ -859,7 +903,10 @@ and gives memory back as it is freed, and an idle musl daemon stayed between
 174 and 185 MiB through an hour of 64 busy sessions, at the price of an
 allocator lock that every thread shares.
 
-An auto-spawned daemon writes to `daemon.log` in the app home. A client rotates
+A daemon checks every five seconds that the lock file of its app home is still
+the one it holds, and exits without cleanup when the home was deleted or
+replaced. An auto-spawned daemon reads nothing from standard input, runs in the
+app home, and writes to `daemon.log` there. A client rotates
 a log over 10 MiB to `daemon.log.1` when it spawns a daemon, and on Unix a
 running daemon checks once a minute and does the same, redirecting its own
 stdout and stderr to the fresh file. Output that goes to a terminal or a
@@ -907,6 +954,11 @@ progress and sets `statistics_unavailable`. CLI JSON omits those statistics;
 MCP returns `null` counts and readiness. Text and Web status show that statistics
 are temporarily unavailable instead of interpreting placeholders as an empty
 index or complete coverage.
+
+A worker process renews its job record from its start, also while a guard holds
+it back or it waits for a place. The record names the lane, the PID, and the
+start time of the process. A later process with the same PID is therefore not
+mistaken for the worker.
 
 The split of the SQLite store into stored chunks, graph, and auxiliary bytes
 comes from `dbstat`, which reads every page of the store. A status listing
@@ -1115,7 +1167,7 @@ gets a structured version error from the `Version` probe and restarts it.
 
 Version 10 added file-oriented literal results. Version 11 adds the `hash_only` search option. An older client that omits it keeps automatic model selection. A hash-only request uses hash vectors even if the daemon has a neural model loaded, and it can request only hash vectors from the background queue.
 
-Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Earlier literal output modes retain their behavior.
+Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Web literal searches do the same. Earlier literal output modes retain their behavior.
 
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered
@@ -1211,9 +1263,16 @@ Use the workspace root reported by `/api/status`. File paths and context scopes 
 Loopback is default. Every listener, loopback included, requires a generated
 per-daemon session token: any local user can reach a loopback port. API clients
 may send it as a bearer token. Loopback listeners accept only loopback Host
-names. Content Security Policy, security headers, and request, header, file,
-and concurrency limits apply to every listener. Transport is still plain HTTP;
-remote use requires a trusted network or encrypted tunnel.
+names. An API request is rejected if it has a `Sec-Fetch-Site` header other than
+`same-origin`, or an `Origin` header that does not match Host. A browser that supports
+`Sec-Fetch-Site` sends it to a loopback listener, also for a page on another port of
+the same host. A request with neither header is accepted: scripts and older browsers
+send none, and browsers send `Sec-Fetch-Site` only to trustworthy URLs such as
+loopback. On a plain HTTP listener that is not loopback, a page on another port of the
+same host can therefore start a search with the session cookie. Content Security
+Policy, security headers, and request, header, file, and concurrency limits apply to
+every listener. Transport is still plain HTTP; remote use requires a trusted network
+or encrypted tunnel.
 
 `ig --web` prints the tokenized URL to its own stdout. To open a browser it
 writes an HTML redirect page to the app home's `browser/` directory and passes

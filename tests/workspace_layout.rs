@@ -189,3 +189,93 @@ fn local_cli_recovers_main_replaced_by_linked_worktree() {
         assert_source(&home, &main, "new_layout_marker");
     }
 }
+
+fn indexed_roots(home: &Path) -> Vec<PathBuf> {
+    fs::read_dir(home.join("indexes"))
+        .unwrap()
+        .filter_map(|entry| fs::read(entry.unwrap().path().join("workspace.json")).ok())
+        .map(|raw| serde_json::from_slice::<Value>(&raw).unwrap())
+        .map(|metadata| PathBuf::from(metadata["root"].as_str().unwrap()))
+        .collect()
+}
+
+fn clone_with_separate_git_dir(top: &Path) {
+    init_repo(&top.join("upstream"), "upstream_marker");
+    let git_dir = top.join("separate.git");
+    git(
+        top,
+        &[
+            "clone",
+            "--separate-git-dir",
+            git_dir.to_str().unwrap(),
+            "upstream",
+            "separate",
+        ],
+    );
+}
+
+#[test]
+fn submodules_and_separate_git_dirs_are_standalone_workspaces() {
+    let fixture = tempdir().unwrap();
+    let top = fixture.path();
+    clone_with_separate_git_dir(top);
+    let parent = top.join("parent");
+    init_repo(&parent, "parent_marker");
+    git(
+        &parent,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "../upstream",
+            "vendor/sub",
+        ],
+    );
+    let mut roots = Vec::new();
+    for checkout in [parent.join("vendor/sub"), top.join("separate")] {
+        let name = format!("worktree-{}", roots.len());
+        let worktree = top.join(&name);
+        git(
+            &checkout,
+            &["worktree", "add", "-b", &name, worktree.to_str().unwrap()],
+        );
+        roots.extend([checkout, worktree]);
+    }
+
+    for root in roots {
+        let home = tempdir().unwrap();
+        // The second search reads the index that the first one built.
+        assert_source(home.path(), &root, "upstream_marker");
+        assert_source(home.path(), &root, "upstream_marker");
+        assert_eq!(indexed_roots(home.path()), [root.canonicalize().unwrap()]);
+        let status = cli(home.path(), &root, &["--status"]);
+        assert!(status[0]["base_repo_root"].is_null(), "{status}");
+    }
+}
+
+#[test]
+fn local_cli_drops_a_git_directory_that_was_the_base_of_its_checkout() {
+    let fixture = tempdir().unwrap();
+    let top = fixture.path();
+    clone_with_separate_git_dir(top);
+    let home = tempdir().unwrap();
+    let home = home.path();
+    let git_dir = top.join("separate.git");
+    let separate = top.join("separate");
+    cli(home, top, &["--add", "separate.git"]);
+    cli(home, &separate, &["--add", "."]);
+    fs::write(
+        saved_index(home, &separate).join("base_ref.json"),
+        serde_json::json!({
+            "base_index_dir": saved_index(home, &git_dir),
+            "base_workspace_root": git_dir.canonicalize().unwrap(),
+            "base_generation": 1,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    assert_source(home, &separate, "upstream_marker");
+    assert_eq!(indexed_roots(home), [separate.canonicalize().unwrap()]);
+}

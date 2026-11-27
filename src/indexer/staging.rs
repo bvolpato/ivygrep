@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::workspace::Workspace;
 
-const STAGING_DIR_PREFIX: &str = ".fresh-index-staging-";
+pub(super) const STAGING_DIR_PREFIX: &str = ".fresh-index-staging-";
 const BACKUP_DIR_PREFIX: &str = ".fresh-index-backup-";
 /// Marks backups kept after a failed rollback. They may hold the only copy of
 /// the previous generation, so abandoned-staging cleanup keeps them.
