@@ -2039,6 +2039,10 @@ fn execute_ivygrep_search(
         SearchRows::Hits(hits)
     };
 
+    if (literal || regex) && crate::search::pattern_needs_line_break(query, regex) {
+        search_warnings.push(crate::search::MULTI_LINE_PATTERN_WARNING.to_string());
+    }
+
     let BoundedHits {
         files: mut grouped,
         total_matches,
@@ -2181,14 +2185,15 @@ fn local_context_pack(
     Ok(serde_json::to_value(bundle)?)
 }
 
-/// Hit budget requested from the search layer for one hits-mode call.
+/// Hit budget requested from the search layer for `file_limit` result files.
+/// The CLI uses the enumerating budget.
 ///
 /// Ranked modes return score-ordered chunks spread across files, so a small
 /// multiple of `file_limit` fills the file list; the floor matches the CLI
 /// default so the default MCP call costs the same as `ig <query>`. Enumerating
 /// modes can cluster many hits per file. Literal search uses the budget for
 /// counting matching files and bounding previews across the displayed results.
-fn hits_mode_hit_budget(file_limit: usize, ranked_mode: bool) -> usize {
+pub(crate) fn hits_mode_hit_budget(file_limit: usize, ranked_mode: bool) -> usize {
     let budget = if ranked_mode {
         file_limit
             .saturating_mul(RANKED_HIT_OVERFETCH)
@@ -3846,6 +3851,19 @@ impl AccountManager {
         assert_eq!(result["mode"], "literal");
         let count = result["result_count"].as_u64().unwrap();
         assert!(count > 0, "literal search should find results");
+        assert_eq!(result["warnings"], json!([]));
+
+        for mode in ["literal", "regex"] {
+            let args = json!({"query": "amount\nrate", "path": root, mode: true});
+            let response = execute_ivygrep_search(serde_json::from_value(args).unwrap()).unwrap();
+            let result = tool_json_payload(&response);
+            assert_eq!(result["result_count"], 0);
+            assert_eq!(
+                result["warnings"],
+                json!([crate::search::MULTI_LINE_PATTERN_WARNING]),
+                "{mode}"
+            );
+        }
     }
 
     #[test]

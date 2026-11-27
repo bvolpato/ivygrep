@@ -6,10 +6,76 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
+- The stress fixture download uses its next source when a server requests a long retry delay. Such a delay blocked the scheduled cross-platform run until its time limit, and `E2E Summary` now fails when a platform job is cancelled.
+- `install.sh` names an accelerator archive that it cannot reach instead of reporting it as not available. It also selects the Apple Silicon archive from a shell that runs under Rosetta.
+- `install.sh` reports another `ig` that comes first on `PATH`. It no longer asks to add a directory that is already on `PATH` when `IVYGREP_INSTALL_DIR` ends in `/`.
+- The PowerShell installer keeps its strict mode, error preference, functions, and variables out of the session that runs `irm ... | iex`.
+- `ig --web QUERY FILE` runs the search. A scope that is a file, or a folder that no longer exists, stopped the page before its first search.
+- `ig --web` selects the innermost workspace that contains the path. A repository or worktree inside another tracked workspace opened the outer one and found nothing.
+- `ig --web QUERY PATH` reports a path that is not tracked and shows the `ig --add` command. It searched all other indexes without a notice.
+- Web literal search keeps a hit of every matching file, up to the result limit, beside a file with many matches. It reports the matches it leaves out of listed files.
+- The Web include and exclude filters accept brace alternatives, character classes, and escaped commas. Regex queries keep leading and trailing spaces.
+- The Web UI renders files and Markdown code blocks named like object members, such as `constructor`. One of them emptied the result list or the viewer.
+- Code copied from the Web viewer or from a snippet no longer contains `Line N:` labels, and query highlighting no longer changes characters such as `<`.
+- A Web UI result opens the file in the workspace that produced it after a switch to another workspace. Copied JSON describes the search that produced the results.
+- The Web UI URL keeps "All indices" and an empty query after a reload.
+- Links between workspace files in a Markdown preview open in the viewer. Other links open in a new tab.
+- The Web UI reports why a search failed, for example a lost session, and Refresh runs the query again. Warnings that do not mean partial results have their own title.
+- Identical Web results are shown once, so arrow keys and Pin reach every result. The Enter key of an input method no longer starts a search.
+- The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
+- Malformed Web requests get a 400 or 431 response instead of a closed connection.
+- Search ranks a file such as `src/handler_tests.rs` as a test, like `src/handler_test.rs`. It competed with source files at full weight.
+- A file without read permission no longer fails an index run and no longer makes the workspace unsearchable. ivygrep skips the file with a warning, keeps the chunks that the index has for it, and tries again on the next run. This changes the rule of v1.3.1, where a permission error failed the update. Other I/O errors, an unreadable `.gitignore` or `.ignore` file, a file replaced by a symlink, and a missing workspace root still fail the update, but a failure before the first commit now leaves the index queryable.
+- `ig --add` finds sources that Git status cannot report as changed: the files of a submodule after `git submodule update --init` or `deinit`, a tracked directory that gets or loses its own `.git` entry, and a tracked file that was missing only while the first scan ran. The clean-checkout shortcut kept the older index until the next commit.
+- `ig --add` and `ig --add --force` rebuild an index whose `workspace.json` or `index_incarnation` file is damaged. They stopped with a JSON or UTF-8 error.
+- `ig --doctor` and searches no longer rebuild the index of a directory whose only text files are larger than 16 MiB.
+- A search answers while files in the workspace keep changing. After a daemon start or a first index, steady writes such as a log file kept the watcher in its startup state, and each search waited for the 60-second deadline and returned no results.
+- Concurrent daemon searches no longer remove each other's stores when an index needs a rebuild. `--all-indices` and Web searches could fail or return no results, and the rebuild could turn the watcher of the workspace off.
+- The daemon watches a plain directory again after another directory takes its place, for example after `rm -rf` and an extracted archive. Edits stayed out of search results while `ig --status` showed a live watcher.
+- A daemon that a query starts no longer keeps the standard input and the working directory of that query. `producer | ig QUERY` could wait forever, and a volume could not be ejected.
+- The watcher updates files in a directory named `.ivygrep`, which the indexer already included.
+- A daemon exits within seconds after its app home is deleted or replaced. Such a daemon recreated deleted indexes, and it later removed the socket of the daemon that replaced it.
+- On macOS, a process recognizes running watchers and workers that started with another locale or time zone. `ig --status` reported a live watcher as offline, and `--wait-for-enhancement` failed with `background enhancement stalled` after a second process started a second worker.
+- `ig --status` shows a hash worker, and a worker that waits for its start, after an earlier worker of the workspace finished. It also keeps the pause reason. A process that received the PID of a dead worker no longer blocks enhancement.
+- `ig --add --force`, `ig --rm`, and other index removals no longer fail with `Directory not empty` or `No such file or directory` while another process reads or updates the index.
+- An `--all-indices` search warns about each workspace that it skips because the index of that workspace is not complete. During a rebuild it returned no results without a message.
+- `ig --status` reports the error when the updates of a live watcher fail. It reported `configured + live`.
+- `ig --doctor` reports a burst of watcher events only while events wait. The finding stayed until the daemon restarted.
+- A query warns when the path of the daemon socket is too long for a Unix socket. Only `daemon.log` named the reason why no daemon and no watcher ran.
+- Search works inside a Git submodule. A submodule, a clone made with `git clone --separate-git-dir`, and a linked worktree of either are standalone workspaces. ivygrep took their Git directory for the main checkout: every search in a submodule failed with `base index format incompatible`, and a separate Git directory was indexed as a workspace. When ivygrep rebuilds the checkout, it removes that index. An index of a submodule no longer prevents an index of its parent repository.
+- `.gitignore` and `info/exclude` rules above a Git repository no longer apply to its files, as in Git. A rule such as `*` or `.worktrees/**` in a directory above a repository or a linked worktree left its index empty. A submodule inside a workspace also stops the rules of its parent repository, except the `info/exclude` rules of a workspace whose root has a `.git` file. Its own `info/exclude` rules apply. `.ignore` files above a repository and all rules above a plain directory still apply. An index with such rules above its repository rebuilds on first use. The next `ig --add` adds the submodule files that rules of the parent hid.
+- C and C++ symbol lookups return definitions only. A mention such as `struct node *next` no longer counts as a definition of `node`, so a common type no longer hides its own definition. `typedef` and `using` names and C++ unions are found.
+- Several definitions on one line, such as `int getA() { ... } int getB() { ... }`, are all found.
+- In C and C++ code that the grammar cannot parse because of a macro, types with a body are found. A `typedef` in such code can be missing.
+- Python module docstrings and imports no longer register words such as `provides` or `import` as symbols.
+- Previews of exact symbol hits show the definition line when a multi-line decorator or annotation precedes it.
+- Index format v31 rebuilds existing indexes once to pick up the symbol and chunking changes above.
+- Literal search keeps leading and trailing spaces in the pattern, also in the Web UI, so `--literal 'if '` no longer matches `diff`.
+- The CLI and MCP warn that a literal or regex pattern that needs a line break has no results, because both modes search one line at a time. One trailing line break is ignored.
+- Regex context lines of UTF-16 files are decoded like the matching lines.
+- `--callers` and `--refs` search C, C++, and Objective-C together, and JavaScript and TypeScript together. A function defined in a `.h` file has its `.cpp` callers.
+- `--callers` finds Rust calls in macro arguments such as `assert_eq!(parse(x), y)`, Rust macro invocations, Bash commands, Objective-C messages, and `new` expressions in C++, PHP, Scala, and Dart.
+- `--refs` and `--callers` read code in Bash `"$(...)"` and PHP `"{$...}"` strings. `--refs` no longer lists the names that declarations introduce in C, C++, Haskell, and Objective-C `.m` and `.mm` files.
+- The `-C` help states that references show one line, and that definitions and callers show the complete chunk.
+- `ig agent install` and `ig agent doctor` use the configuration file that `CODEX_HOME` or `CLAUDE_CONFIG_DIR` selects. An empty `IVYGREP_AGENT_HOME` no longer writes the file into the current directory.
+- `ig agent install` accepts a JSON config with a UTF-8 byte order mark and an inline `mcp_servers` table in the Codex config. An unreadable config error names the file. `ig agent doctor` fails when a detected client has an invalid config, instead of reporting a healthy setup.
+- `ig agent doctor` checks a Cursor config that has comments or trailing commas. `ig agent install cursor` does not edit that config and shows the entry to set by hand.
+- `-n` limits result files, not matches, in CLI regex, reference, and caller searches. One file with many matches could use the whole limit. These searches read 20 matches per requested file, from 200 to 1,000 in total, so a file with more matches can still hide later files.
+- C++ and Objective-C declarations in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
+- R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
+- A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
+- A source file of unmatched punctuation no longer takes minutes to index.
 - MCP `ig_search` no longer builds an index of the home directory, a directory that contains it, or the filesystem root. It also does not add ignored files to such an index. It returns an error that asks for a project path and names the `ig --add` command that builds the index on purpose. A healthy index of such a directory is searched as before.
 - MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
 - The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
 - MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
+
+### Security
+
+- `install.sh` compares SHA-256 digests directly. The `sha256sum -c` of macOS accepts an empty or malformed checksum file, so the installer could install an archive that it did not verify.
+- The Web API rejects requests with a `Sec-Fetch-Site` header other than `same-origin`. A page on another port of the same host, or a redirect, could start searches with the session cookie and add ignored files to an index. Older browsers, and all browsers on a plain HTTP address outside loopback, do not send this header, so the check does not cover them.
+- On macOS, the Web UI opens a file as text when no editor is configured. It used `open`, which runs files such as `.command` scripts.
 
 ## [1.3.6] - 2026-11-15
 

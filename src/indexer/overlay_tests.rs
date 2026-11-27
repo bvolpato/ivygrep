@@ -609,3 +609,57 @@ fn overlay_snapshot_rejects_edits_between_metadata_and_content_capture() {
 fn recreated_overlay_rolls_back_failed_completion_publication() {
     assert_overlay_publication_recovers(true, PublicationFailure::Completion);
 }
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn unreadable_worktree_file_keeps_inheriting_its_base() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let parent = tempdir().unwrap();
+    let (_, linked) = linked_workspace(parent.path());
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    let workspace = Workspace::resolve(&linked).unwrap();
+    index_workspace(&workspace, &model).unwrap();
+    // Literal search cannot verify a line of an unreadable file.
+    let found = |name| {
+        crate::symbols::search_symbols(
+            &workspace,
+            name,
+            crate::symbols::SymbolSearchMode::Definitions,
+            None,
+            None,
+        )
+        .unwrap()
+        .len()
+    };
+    let allow = |name: &str, mode| {
+        fs::set_permissions(linked.join(name), fs::Permissions::from_mode(mode)).unwrap();
+    };
+    // One file is inherited, the other one is divergent.
+    allow("inherited.rs", 0o000);
+    allow("lib.rs", 0o000);
+    if fs::read(linked.join("lib.rs")).is_ok() {
+        return; // Privileged users can bypass Unix permission bits.
+    }
+    let summary = index_workspace(&workspace, &model).unwrap();
+    assert!(summary.warning.unwrap().contains("inherited.rs"));
+    assert_eq!(found("inherited_overlay_marker"), 1);
+    assert_eq!(found("old_overlay_marker"), 1);
+    assert_eq!(found("base_overlay_marker"), 0);
+
+    // A new overlay cannot compare it with the base, so it shows neither.
+    fs::remove_file(workspace.base_ref_path()).unwrap();
+    index_workspace(&workspace, &model).unwrap();
+    assert_eq!(found("inherited_overlay_marker"), 0);
+    assert_eq!(found("base_overlay_marker"), 0);
+    assert_eq!(found("shared_overlay_marker"), 1);
+
+    allow("inherited.rs", 0o644);
+    allow("lib.rs", 0o644);
+    assert_eq!(index_workspace(&workspace, &model).unwrap().warning, None);
+    assert_eq!(found("inherited_overlay_marker"), 1);
+    assert_eq!(found("old_overlay_marker"), 1);
+}

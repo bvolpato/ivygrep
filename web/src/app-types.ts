@@ -73,6 +73,7 @@ export type SearchPayload = {
   errors?: string[];
   warnings?: string[];
   hits?: SearchHit[];
+  more_hits_in_file?: Record<string, number>;
   context_pack?: ContextBundle;
   elapsed_ms?: number;
 };
@@ -90,11 +91,15 @@ export type TreeEntry = {
 export type TreePayload = {
   error?: string;
   path?: string;
+  /** The requested path is a file, and `path` is its folder. */
+  is_file?: boolean;
   entries?: TreeEntry[];
+  total?: number;
 };
 
 export type FilePayload = {
   error?: string;
+  workspace?: string;
   path: string;
   absolute_path?: string;
   text?: string;
@@ -114,19 +119,31 @@ export type ViewerMode = "preview" | "source";
 export type CopyFormat = "files" | "raw" | "json";
 export type CopyScope = "visible" | "pinned";
 
+export type SearchMetadata = {
+  query: string;
+  workspace: string;
+  scope: string;
+  mode: string;
+  limit: number;
+};
+
 export type AppState = {
   workspaces: WorkspaceStatus[];
   workspace: string;
   workspaceFilter: string;
   scope: string;
+  scopeIsFile: boolean;
   events: EventSource | null;
   searching: boolean;
+  /** Request that produced `hits`. The controls can change after it. */
+  search: SearchMetadata | null;
   hits: SearchHit[];
   contextPack: ContextBundle | null;
   autoOpenKey: string;
   manualOpen: boolean;
   requestedWorkspace: string;
   viewerMode: ViewerMode;
+  currentFileWorkspace: string;
   currentFilePath: string;
   currentFileAbsolutePath: string;
   currentFileText: string;
@@ -148,14 +165,17 @@ export function createInitialState(requestedWorkspace = ""): AppState {
     workspace: ALL_WORKSPACES,
     workspaceFilter: "",
     scope: "",
+    scopeIsFile: false,
     events: null,
     searching: false,
+    search: null,
     hits: [],
     contextPack: null,
     autoOpenKey: "",
     manualOpen: false,
     requestedWorkspace,
     viewerMode: "source",
+    currentFileWorkspace: "",
     currentFilePath: "",
     currentFileAbsolutePath: "",
     currentFileText: "",
@@ -164,6 +184,18 @@ export function createInitialState(requestedWorkspace = ""): AppState {
     currentHitKey: "",
     pinnedHitKeys: new Set(),
     searchErrors: []
+  };
+}
+
+/** Query and workspace to start with. The boot values apply only to a bare URL. */
+export function initialSelection(search: string, boot: BootConfig): { query: string; workspace: string } {
+  const params = new URLSearchParams(search);
+  const [query, workspace] = search
+    ? [params.get("q"), params.get("workspace")]
+    : [boot.query, boot.workspace];
+  return {
+    query: query || "",
+    workspace: workspace && workspace !== ALL_WORKSPACES ? workspace : ""
   };
 }
 

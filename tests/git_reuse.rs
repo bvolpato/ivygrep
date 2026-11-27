@@ -276,15 +276,54 @@ fn git_reuse_observes_ancestor_ignore_changes() {
     git(&root, &["commit", "-m", "initial"]);
     let workspace = Workspace::resolve(&root).unwrap();
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-    for control in [".ignore", ".gitignore"] {
+    for (control, applies) in [(".ignore", true), (".gitignore", false)] {
         fs::write(parent.path().join(control), "a.rs\n").unwrap();
         index_workspace_for_watcher(&workspace, &model).unwrap();
-        assert_found(&workspace, "ancestor_rule_marker", false);
+        assert_found(&workspace, "ancestor_rule_marker", !applies);
         fs::remove_file(parent.path().join(control)).unwrap();
         assert_clean(&root);
         index_workspace_for_watcher(&workspace, &model).unwrap();
         assert_found(&workspace, "ancestor_rule_marker", true);
         assert_found(&workspace, "stable_marker", true);
+    }
+}
+
+/// An older run applied the `.gitignore` above a repository.
+#[test]
+#[serial]
+fn an_index_built_with_git_rules_above_the_repository_rebuilds_once() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let parent = tempdir().unwrap();
+    let main = parent.path().join("main");
+    let linked = parent.path().join("linked");
+    fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-b", "main"]);
+    fs::write(main.join("a.rs"), "pub fn hidden_marker() {}\n").unwrap();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-m", "initial"]);
+    git(
+        &main,
+        &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+    );
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let workspaces = [&main, &linked].map(|root| Workspace::resolve(root).unwrap());
+    fs::write(parent.path().join(".ignore"), "*\n").unwrap();
+    for workspace in &workspaces {
+        index_workspace_for_watcher(workspace, &model).unwrap();
+        assert_found(workspace, "hidden_marker", false);
+        fs::write(workspace.index_dir.join(".indexed_skip_gitignore"), "false").unwrap();
+    }
+    fs::rename(
+        parent.path().join(".ignore"),
+        parent.path().join(".gitignore"),
+    )
+    .unwrap();
+    for workspace in &workspaces {
+        assert!(workspace.quick_index_health().needs_rebuild());
+        index_workspace_for_watcher(workspace, &model).unwrap();
+        assert!(workspace.quick_index_health().is_queryable());
+        assert_found(workspace, "hidden_marker", true);
     }
 }
 
@@ -559,4 +598,75 @@ fn git_reuse_observes_edits_hidden_by_submodule_ignore_settings() {
         index_workspace_for_watcher(&workspace, &model).unwrap();
         assert_found(&workspace, "updated_submodule_marker", true);
     }
+}
+
+#[test]
+#[serial]
+fn git_reuse_observes_submodule_initialization() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let fixture = tempdir().unwrap();
+    let top = fixture.path();
+    for name in ["upstream", "origin"] {
+        fs::create_dir(top.join(name)).unwrap();
+        git(&top.join(name), &["init", "-b", "main"]);
+        fs::write(
+            top.join(name).join("lib.rs"),
+            format!("pub fn {name}_marker() {{}}\n"),
+        )
+        .unwrap();
+        git(&top.join(name), &["add", "."]);
+        git(&top.join(name), &["commit", "-m", "initial"]);
+    }
+    let allow_file = "protocol.file.allow=always";
+    git(
+        &top.join("origin"),
+        &["-c", allow_file, "submodule", "add", "../upstream", "sub"],
+    );
+    git(&top.join("origin"), &["commit", "-m", "submodule"]);
+    git(top, &["clone", "origin", "clone"]);
+    let root = top.join("clone");
+    let workspace = Workspace::resolve(&root).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "upstream_marker", false);
+
+    git(&root, &["-c", allow_file, "submodule", "update", "--init"]);
+    assert_clean(&root);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "upstream_marker", true);
+
+    git(&root, &["submodule", "deinit", "-f", "sub"]);
+    assert_clean(&root);
+    let summary = index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!(summary.deleted_files, 1);
+    assert_found(&workspace, "origin_marker", true);
+}
+
+#[test]
+#[serial]
+fn git_reuse_observes_a_git_entry_in_a_tracked_directory() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    let nested = root.path().join("vendor/nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("lib.rs"), "pub fn nested_marker() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "nested_marker", true);
+
+    git(&nested, &["init", "-b", "main"]);
+    assert_clean(root.path());
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "nested_marker", false);
+
+    fs::remove_dir_all(nested.join(".git")).unwrap();
+    assert_clean(root.path());
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_found(&workspace, "nested_marker", true);
 }
