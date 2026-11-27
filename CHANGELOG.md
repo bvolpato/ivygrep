@@ -26,6 +26,9 @@ All notable changes to ivygrep are documented in this file.
 - The Web explorer reports entries it does not list, opens files and searches folders whose names start or end with a space, and lists folders that contain names that are not UTF-8.
 - Malformed Web requests get a 400 or 431 response instead of a closed connection.
 - Search ranks a file such as `src/handler_tests.rs` as a test, like `src/handler_test.rs`. It competed with source files at full weight.
+- Hybrid search no longer hides source files below directories whose name only ends in `build`, `target`, `dist`, or `vendor`, such as `internal/js/esbuild/` or `src/rebuild/`. The path check matched substrings. `_vendor/`, `.build/`, and `cmake-build*/` stay vendored and build trees.
+- A one-term lookup also returns up to three files of a build, distribution, or vendored tree when no other file has that name, definition, or text. They follow all other results. Such a lookup returned nothing or only the uses. Copies stay hidden beside the source.
+- Queries of three or more words return configuration and data files when nothing better matches. In a repository of YAML, JSON, or TOML files, or in a scope of such files, every match was filtered out.
 - A file without read permission no longer fails an index run and no longer makes the workspace unsearchable. ivygrep skips the file with a warning, keeps the chunks that the index has for it, and tries again on the next run. This changes the rule of v1.3.1, where a permission error failed the update. Other I/O errors, an unreadable `.gitignore` or `.ignore` file, a file replaced by a symlink, and a missing workspace root still fail the update, but a failure before the first commit now leaves the index queryable.
 - `ig --add` finds sources that Git status cannot report as changed: the files of a submodule after `git submodule update --init` or `deinit`, a tracked directory that gets or loses its own `.git` entry, and a tracked file that was missing only while the first scan ran. The clean-checkout shortcut kept the older index until the next commit.
 - `ig --add` and `ig --add --force` rebuild an index whose `workspace.json` or `index_incarnation` file is damaged. They stopped with a JSON or UTF-8 error.
@@ -66,9 +69,10 @@ All notable changes to ivygrep are documented in this file.
 - R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
 - A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
 - A source file of unmatched punctuation no longer takes minutes to index.
-- Hybrid search no longer hides source files below directories whose name only ends in `build`, `target`, `dist`, or `vendor`, such as `internal/js/esbuild/` or `src/rebuild/`. The path check matched substrings. `_vendor/`, `.build/`, and `cmake-build*/` stay vendored and build trees.
-- A one-term lookup also returns up to three files of a build, distribution, or vendored tree when no other file has that name, definition, or text. They follow all other results. Such a lookup returned nothing or only the uses. Copies stay hidden beside the source.
-- Queries of three or more words return configuration and data files when nothing better matches. In a repository of YAML, JSON, or TOML files, or in a scope of such files, every match was filtered out.
+- MCP `ig_search` no longer builds an index of the home directory, a directory that contains it, or the filesystem root. It also does not add ignored files to such an index. It returns an error that asks for a project path and names the `ig --add` command that builds the index on purpose. A healthy index of such a directory is searched as before.
+- MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
+- The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
+- MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
 
 ### Security
 
