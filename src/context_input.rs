@@ -376,14 +376,15 @@ fn collect_git_changes(
 
 /// Accept commit-ish syntax such as `HEAD~3`, `main^`, and `@{upstream}`.
 /// A leading `-` could be parsed as a Git option and a leading `^` negates the
-/// revision; ranges are not a single base.
+/// revision; ranges are not a single base. Git does not allow the other
+/// rejected characters in a reference name.
 fn validate_git_reference(reference: &str) -> Result<()> {
     if reference.is_empty()
         || reference.starts_with(['-', '^'])
         || reference.contains("..")
-        || !reference
-            .chars()
-            .all(|character| character.is_alphanumeric() || "/._-~^@{}".contains(character))
+        || reference.chars().any(|character| {
+            character.is_whitespace() || character.is_control() || ":?*[\\".contains(character)
+        })
     {
         bail!("invalid --since Git reference: {reference:?}");
     }
@@ -1062,6 +1063,7 @@ mod tests {
         assert!(validate_git_reference("--output=/tmp/file").is_err());
         assert!(validate_git_reference("main..feature").is_err());
         assert!(validate_git_reference("main feature").is_err());
+        assert!(validate_git_reference("main:src/lib.rs").is_err());
         // `rev-parse --verify ^HEAD` prints `^<sha>`, which is not a merge base.
         assert!(validate_git_reference("^HEAD").is_err());
         assert!(validate_git_reference("^main").is_err());
@@ -1073,6 +1075,9 @@ mod tests {
             "main@{upstream}",
             "@{-1}",
             "feature/café",
+            "feature/c++",
+            "fix/issue#12",
+            "a=b,c",
         ] {
             assert!(validate_git_reference(reference).is_ok(), "{reference}");
         }

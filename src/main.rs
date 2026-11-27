@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+
 use anyhow::Result;
 
 /// musl's allocator serializes every thread on one lock. Indexing, searches,
@@ -23,7 +25,7 @@ fn reset_sigpipe() {
 fn reset_sigpipe() {}
 
 /// Whether the arguments start the MCP server (`--mcp`, or legacy `mcp serve`).
-fn serves_mcp(args: impl Iterator<Item = String>) -> bool {
+fn serves_mcp(args: impl Iterator<Item = OsString>) -> bool {
     let args = args.take_while(|arg| arg != "--").collect::<Vec<_>>();
     args.iter().any(|arg| arg == "--mcp") || args == ["mcp", "serve"]
 }
@@ -35,7 +37,7 @@ fn main() -> Result<()> {
     // The MCP server is blocking stdio code, and each of its daemon requests
     // runs on a short-lived runtime of its own. A worker pool would only add
     // one idle thread per core to every agent session.
-    let mut runtime = if serves_mcp(std::env::args().skip(1)) {
+    let mut runtime = if serves_mcp(std::env::args_os().skip(1)) {
         tokio::runtime::Builder::new_current_thread()
     } else {
         tokio::runtime::Builder::new_multi_thread()
@@ -49,7 +51,7 @@ mod tests {
 
     #[test]
     fn only_mcp_invocations_skip_the_worker_pool() {
-        let serves = |args: &[&str]| serves_mcp(args.iter().map(ToString::to_string));
+        let serves = |args: &[&str]| serves_mcp(args.iter().map(Into::into));
         assert!(serves(&["--mcp"]));
         assert!(serves(&["mcp", "serve"]));
         assert!(!serves(&["--daemon"]));

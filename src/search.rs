@@ -186,8 +186,8 @@ impl SearchOptions {
     /// Return the language filter in the canonical form stored by the index.
     ///
     /// Search options can come from raw Web/MCP requests, which accept file
-    /// extensions and aliases (for example, `rs`). Unknown filters stay
-    /// unchanged so they retain their existing no-match behavior.
+    /// extensions and aliases (for example, `rs`). Unknown filters, which the
+    /// Web API accepts, stay unchanged and match nothing.
     pub(crate) fn canonical_type_filter(&self) -> Option<String> {
         self.type_filter.as_deref().map(|filter| {
             crate::chunking::resolve_type_alias(filter)

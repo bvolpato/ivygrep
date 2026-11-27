@@ -188,6 +188,7 @@ async fn daemon_ipc_index_and_search_roundtrip() {
                         ivygrep::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
                     DaemonResponse::Ack {
                         message: format!("indexed {} files", stats.indexed_files),
+                        summary: None,
                     }
                 }
                 DaemonRequest::Search {
@@ -239,7 +240,7 @@ async fn daemon_ipc_index_and_search_roundtrip() {
     .await;
 
     match &index_response {
-        DaemonResponse::Ack { message } => {
+        DaemonResponse::Ack { message, .. } => {
             assert!(message.contains("indexed"), "got: {message}");
         }
         other => panic!("expected Ack, got: {other:?}"),
@@ -359,6 +360,7 @@ async fn daemon_ipc_error_on_bad_path() {
                 match ivygrep::workspace::Workspace::resolve(path) {
                     Ok(_) => DaemonResponse::Ack {
                         message: "should not happen".into(),
+                        summary: None,
                     },
                     Err(err) => DaemonResponse::Error {
                         message: err.to_string(),
@@ -444,6 +446,7 @@ async fn daemon_ipc_skip_gitignore() {
                     ivygrep::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
                     DaemonResponse::Ack {
                         message: "indexed".into(),
+                        summary: None,
                     }
                 }
                 DaemonRequest::Search {
@@ -733,7 +736,7 @@ async fn daemon_ipc_index_storm_does_not_starve_other_workspaces() {
             .expect("index storm must finish")
             .unwrap()
         {
-            DaemonResponse::Ack { message } => messages.push(message),
+            DaemonResponse::Ack { message, .. } => messages.push(message),
             other => panic!("expected Ack, got {other:?}"),
         }
     }
@@ -977,6 +980,7 @@ async fn cli_gc_stops_a_daemon_that_predates_the_request_and_collects_in_process
                         "restart",
                         DaemonResponse::Ack {
                             message: "restarting".to_string(),
+                            summary: None,
                         },
                     ),
                     other => panic!("unexpected request: {other:?}"),

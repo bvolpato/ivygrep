@@ -21,9 +21,9 @@ pub fn indexes_root() -> Result<PathBuf> {
 }
 
 pub fn ensure_app_dirs() -> Result<()> {
-    std::fs::create_dir_all(app_home()?)?;
     let indexes = indexes_root()?;
-    std::fs::create_dir_all(&indexes)?;
+    std::fs::create_dir_all(&indexes)
+        .with_context(|| format!("failed to create data directory {}", indexes.display()))?;
     // Tighten the ivygrep-owned index directory to 0700 — it stores the
     // decompressed source of every indexed repo (possibly including secrets),
     // so other local users on a shared host must not read it. We deliberately

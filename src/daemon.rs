@@ -1176,17 +1176,8 @@ impl WatchEventFilter {
         if fs2::FileExt::try_lock_shared(&index_lock).is_err() {
             return true;
         }
-        let first = format!("{}/", crate::workspace::index_path_string(rel_dir));
-        // `0` follows `/` in byte order, so this is every path with the prefix.
-        let past = format!("{}0", first.trim_end_matches('/'));
-        crate::indexer::open_sqlite_readonly(&self.workspace.sqlite_path())
-            .and_then(|sqlite| {
-                Ok(sqlite.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path >= ?1 AND file_path < ?2)",
-                    rusqlite::params![first, past],
-                    |row| row.get::<_, bool>(0),
-                )?)
-            })
+        self.workspace
+            .has_indexed_file_below(rel_dir)
             .unwrap_or(true)
     }
 
@@ -4379,12 +4370,15 @@ async fn run_index_request(
                         summary.total_chunks,
                         summary
                             .warning
+                            .as_ref()
                             .map(|warning| format!("; {warning}"))
                             .unwrap_or_default()
                     ),
+                    summary: Some(Box::new(summary)),
                 },
                 (Ok(()), None) => DaemonResponse::Ack {
                     message: "index already current; skipped redundant rescan".to_string(),
+                    summary: None,
                 },
             }
         }
@@ -5518,9 +5512,10 @@ async fn handle_request_with_cancellation(
             }
             DaemonResponse::Ack {
                 message: format!("cancellation requested for search {search_id}"),
+                summary: None,
             }
         }
-        DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
+        DaemonRequest::Remove { path } => match Workspace::resolve_for_removal(&path) {
             Ok(workspace) => {
                 let remove_state = state.clone();
                 match tokio::task::spawn_blocking(move || {
@@ -5544,6 +5539,7 @@ async fn handle_request_with_cancellation(
                 {
                     Ok(_leases) => DaemonResponse::Ack {
                         message: format!("removed workspace index {}", path.display()),
+                        summary: None,
                     },
                     Err(err) => DaemonResponse::Error {
                         message: err.to_string(),
@@ -5571,6 +5567,7 @@ async fn handle_request_with_cancellation(
                 if state.watcher_registered(&workspace.id) && workspace.is_watcher_alive() {
                     return DaemonResponse::Ack {
                         message: format!("already watching {}", workspace.root.display()),
+                        summary: None,
                     };
                 }
                 if let Some(error) = state.watcher_backoff_error(&workspace.id) {
@@ -5587,6 +5584,7 @@ async fn handle_request_with_cancellation(
                 });
                 DaemonResponse::Ack {
                     message: format!("restarting watcher for {}", path.display()),
+                    summary: None,
                 }
             }
             Err(err) => DaemonResponse::Error {
@@ -5605,6 +5603,7 @@ async fn handle_request_with_cancellation(
             });
             DaemonResponse::Ack {
                 message: "restarting".to_string(),
+                summary: None,
             }
         }
     }
@@ -13016,7 +13015,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
             {
-                DaemonResponse::Ack { message } => messages.push(message),
+                DaemonResponse::Ack { message, .. } => messages.push(message),
                 other => panic!("expected ack, got {other:?}"),
             }
         }
@@ -13064,7 +13063,7 @@ mod tests {
             .unwrap()
             .unwrap()
         {
-            DaemonResponse::Ack { message } => {
+            DaemonResponse::Ack { message, .. } => {
                 assert!(message.contains("already current"), "{message}");
             }
             other => panic!("expected ack, got {other:?}"),
@@ -13106,7 +13105,7 @@ mod tests {
             .unwrap()
             .unwrap()
         {
-            DaemonResponse::Ack { message } => {
+            DaemonResponse::Ack { message, .. } => {
                 assert!(
                     !message.contains("already current"),
                     "a walk that predates the request must not satisfy it: {message}"
@@ -13215,7 +13214,7 @@ mod tests {
             .unwrap()
             .unwrap()
         {
-            DaemonResponse::Ack { message } => {
+            DaemonResponse::Ack { message, .. } => {
                 assert!(message.starts_with("indexed 3 files"), "{message}");
             }
             other => panic!("expected Ack, got {other:?}"),

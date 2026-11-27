@@ -254,6 +254,14 @@ impl SourcePathMatcher {
     }
 
     pub(crate) fn allows(&mut self, path: &Path) -> Result<bool> {
+        self.allows_entry(path, false)
+    }
+
+    pub(crate) fn allows_dir(&mut self, path: &Path) -> Result<bool> {
+        self.allows_entry(path, true)
+    }
+
+    fn allows_entry(&mut self, path: &Path, is_dir: bool) -> Result<bool> {
         if path.as_os_str().is_empty()
             || path.components().any(|part| match part {
                 Component::Normal(name) => name == ".git",
@@ -274,7 +282,7 @@ impl SourcePathMatcher {
         if let Some(error) = &self.error {
             return Err(error.clone().into());
         }
-        match self.ignore.ignores(path, false) {
+        match self.ignore.ignores(path, is_dir) {
             Ok(ignored) => Ok(!ignored),
             Err(error) => {
                 // Directory rules are cached, including failed reads. Keep

@@ -1,6 +1,7 @@
 #[cfg(unix)]
 mod tests {
-    use std::process::Command;
+    use std::collections::BTreeSet;
+    use std::process::{Child, Command, Stdio};
     use std::thread;
     use std::time::Duration;
 
@@ -39,6 +40,74 @@ mod tests {
         let pid = i32::try_from(pid).unwrap();
         let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
         assert_eq!(rc, 0, "failed to kill daemon pid {pid}");
+    }
+
+    struct Daemon(Child);
+
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn add_and_remove_json_have_one_schema_with_and_without_a_daemon() {
+        let home = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn schema_marker() {}\n").unwrap();
+        let ig = |args: &[&str]| {
+            let output = Command::new(cargo_bin!("ig"))
+                .current_dir(repo.path())
+                .env("IVYGREP_HOME", home.path())
+                .env("IVYGREP_NO_AUTOSPAWN", "1")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let keys = |value: &serde_json::Value| {
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        let add = ["--add", ".", "--no-watch", "--json"];
+        let local = keys(&ig(&add));
+        let removed = ig(&["--rm", ".", "--json"]);
+
+        let _daemon = Daemon(
+            Command::new(cargo_bin!("ig"))
+                .env("IVYGREP_HOME", home.path())
+                .arg("--daemon")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        for _ in 0..400 {
+            if home.path().join("daemon.sock").exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        for indexed_files in [1, 0] {
+            let added = ig(&add);
+            assert_eq!(keys(&added), local);
+            assert_eq!(added["indexed_files"], indexed_files);
+        }
+        assert_eq!(ig(&["--rm", ".", "--json"]), removed);
+
+        // The daemon finds the index of a directory that is gone.
+        std::fs::create_dir(repo.path().join("deleted")).unwrap();
+        ig(&["--add", "deleted", "--no-watch", "--json"]);
+        std::fs::remove_dir(repo.path().join("deleted")).unwrap();
+        ig(&["--rm", "deleted", "--json"]);
+        assert_eq!(ig(&["--status", "--json"]), serde_json::json!([]));
     }
 
     #[test]
