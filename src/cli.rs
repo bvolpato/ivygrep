@@ -170,7 +170,8 @@ pub struct Cli {
     pub json: bool,
 
     /// Lines before and after the focused match to include in each snippet.
-    /// This changes output size, not retrieval ranking.
+    /// This changes output size, not retrieval ranking. --refs shows one line.
+    /// --symbol and --callers show the complete chunk.
     #[arg(
         short = 'C',
         long,

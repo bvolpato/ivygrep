@@ -55,6 +55,10 @@ All notable changes to ivygrep are documented in this file.
 - Literal search keeps leading and trailing spaces in the pattern, also in the Web UI, so `--literal 'if '` no longer matches `diff`.
 - The CLI and MCP warn that a literal or regex pattern that needs a line break has no results, because both modes search one line at a time. One trailing line break is ignored.
 - Regex context lines of UTF-16 files are decoded like the matching lines.
+- `--callers` and `--refs` search C, C++, and Objective-C together, and JavaScript and TypeScript together. A function defined in a `.h` file has its `.cpp` callers.
+- `--callers` finds Rust calls in macro arguments such as `assert_eq!(parse(x), y)`, Rust macro invocations, Bash commands, Objective-C messages, and `new` expressions in C++, PHP, Scala, and Dart.
+- `--refs` and `--callers` read code in Bash `"$(...)"` and PHP `"{$...}"` strings. `--refs` no longer lists the names that declarations introduce in C, C++, Haskell, and Objective-C `.m` and `.mm` files.
+- The `-C` help states that references show one line, and that definitions and callers show the complete chunk.
 
 ### Security
 
