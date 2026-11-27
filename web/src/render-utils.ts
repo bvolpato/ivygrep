@@ -1,7 +1,7 @@
 import hljs from "highlight.js/lib/common";
 import MarkdownIt from "markdown-it";
 import type { SearchHit } from "./app-types";
-import { escapeHtml } from "./ui-utils";
+import { escapeHtml, parentPath } from "./ui-utils";
 
 const markdown = new MarkdownIt({
   html: false,
@@ -10,6 +10,39 @@ const markdown = new MarkdownIt({
     return `<pre class="md-code"><code class="hljs">${highlightText(code, language)}</code></pre>`;
   }
 });
+
+markdown.renderer.rules.link_open = (tokens, index, options, _env, self) => {
+  if (!workspaceLink("", String(tokens[index].attrGet("href") ?? ""))) {
+    tokens[index].attrSet("target", "_blank");
+    tokens[index].attrSet("rel", "noopener noreferrer");
+  }
+  return self.renderToken(tokens, index, options);
+};
+
+/**
+ * Workspace file that a Markdown link in `filePath` names, or undefined for a
+ * link that leaves the workspace (it has a scheme or a host).
+ */
+export function workspaceLink(filePath: string, href: string): { path: string; line: number } | undefined {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//")) return undefined;
+  const [, encoded, fragment] = /^([^?#]*)[^#]*#?(.*)$/.exec(href) || ["", "", ""];
+  let target = encoded;
+  try {
+    target = decodeURIComponent(encoded);
+  } catch {
+    // A file name can contain a literal percent sign.
+  }
+  const base = target.startsWith("/") ? "" : parentPath(filePath);
+  const parts: string[] = [];
+  for (const part of `${base}/${target}`.split("/")) {
+    if (part === ".." && parts.length && parts[parts.length - 1] !== "..") parts.pop();
+    else if (part && part !== ".") parts.push(part);
+  }
+  return {
+    path: target ? parts.join("/") : filePath,
+    line: Number(/^L(\d+)/.exec(fragment)?.[1] || 1)
+  };
+}
 
 export function renderMarkdown(text: string): string {
   return markdown.render(text);
@@ -37,9 +70,10 @@ export function markQueryTerms(html: string, query: string): string {
   const terms = queryTerms(query);
   if (!terms.length) return html;
   const pattern = new RegExp(`(${terms.map(escapeRegExp).join("|")})`, "gi");
+  // The captured tags and entities are the odd parts.
   return html
-    .split(/(<[^>]+>)/g)
-    .map((part) => part.startsWith("<") ? part : part.replace(pattern, '<mark class="query-mark">$1</mark>'))
+    .split(/(<[^>]+>|&#?\w+;)/g)
+    .map((part, index) => index % 2 ? part : part.replace(pattern, '<mark class="query-mark">$1</mark>'))
     .join("");
 }
 
@@ -115,7 +149,7 @@ export function languageForPath(path: string): string | undefined {
     yaml: "yaml",
     yml: "yaml"
   };
-  return languages[ext];
+  return Object.hasOwn(languages, ext) ? languages[ext] : undefined;
 }
 
 export function normalizeLanguage(language?: string): string | undefined {
@@ -131,5 +165,5 @@ export function normalizeLanguage(language?: string): string | undefined {
     shell: "bash",
     ts: "typescript"
   };
-  return aliases[cleaned] || cleaned;
+  return Object.hasOwn(aliases, cleaned) ? aliases[cleaned] : cleaned;
 }

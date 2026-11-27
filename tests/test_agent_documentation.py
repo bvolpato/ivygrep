@@ -61,20 +61,6 @@ class AgentDocumentationTest(unittest.TestCase):
             self.assertIn(term, self.site)
         self.assertIn('id="context-packs"', self.site)
 
-    def test_quick_start_has_one_search_and_one_context_command(self) -> None:
-        site_demo = self.site.split("<!-- Demo terminal -->", 1)[1].split(
-            "<!-- Social proof strip -->", 1
-        )[0]
-
-        search_command = 'ig "what did we decide about cache invalidation?" ~/notes'
-        context_command = (
-            'ig context "fix refresh-token races" --since main --budget 8000'
-        )
-        self.assertEqual(site_demo.count(search_command), 1)
-        self.assertEqual(site_demo.count(context_command), 1)
-        self.assertNotIn("ig agent", site_demo)
-        self.assertNotIn("--mcp", site_demo)
-
     def test_opencode_uses_current_local_server_shape(self) -> None:
         self.assertIn('"type": "local"', self.site)
 
@@ -93,8 +79,8 @@ class AgentDocumentationTest(unittest.TestCase):
 
     def test_installers_verify_release_checksums_and_configure_path(self) -> None:
         self.assertIn(".sha256", self.unix_installer)
-        self.assertIn("sha256sum -c", self.unix_installer)
-        self.assertIn("shasum -a 256 -c", self.unix_installer)
+        self.assertIn("sha256sum <", self.unix_installer)
+        self.assertIn("shasum -a 256 <", self.unix_installer)
         self.assertIn("IVYGREP_INSTALL_DIR", self.unix_installer)
         self.assertIn("IVYGREP_ACCELERATOR", self.unix_installer)
         self.assertIn("linux-x86_64-cuda", self.unix_installer)

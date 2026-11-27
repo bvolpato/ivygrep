@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -126,8 +127,53 @@ fn retain_live_hits_with_roots(
     hits.retain(|_| keep.next().unwrap());
 }
 
-pub(crate) struct SearchBatch {
+/// Hits of the searched workspaces.
+#[derive(Default)]
+pub(crate) struct WorkspaceHits {
     hits: Vec<SearchHit>,
+    /// Workspace ordinal and hit index of each span with an absolute path.
+    spans: HashMap<(PathBuf, usize, usize), (usize, usize)>,
+    workspaces: usize,
+}
+
+impl WorkspaceHits {
+    /// Adds the hits of one workspace. With absolute paths, a live span from two
+    /// overlapping workspaces is kept once, with its best score.
+    pub(crate) fn add(
+        &mut self,
+        workspace_root: &Path,
+        absolute_paths: bool,
+        mut hits: Vec<SearchHit>,
+    ) {
+        if !absolute_paths {
+            self.hits.append(&mut hits);
+            return;
+        }
+        self.workspaces += 1;
+        for mut hit in hits {
+            hit.file_path = workspace_root.join(&hit.file_path);
+            let span = (hit.file_path.clone(), hit.start_line, hit.end_line);
+            match self.spans.get(&span) {
+                Some((workspace, kept)) if *workspace != self.workspaces => {
+                    if hit.score > self.hits[*kept].score {
+                        self.hits[*kept] = hit;
+                    }
+                }
+                _ => {
+                    self.spans.insert(span, (self.workspaces, self.hits.len()));
+                    self.hits.push(hit);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn into_hits(self) -> Vec<SearchHit> {
+        self.hits
+    }
+}
+
+pub(crate) struct SearchBatch {
+    hits: WorkspaceHits,
     warnings: Vec<String>,
     successful_workspaces: usize,
 }
@@ -135,7 +181,7 @@ pub(crate) struct SearchBatch {
 impl SearchBatch {
     pub(crate) fn new(warnings: Vec<String>) -> Self {
         Self {
-            hits: Vec::new(),
+            hits: WorkspaceHits::default(),
             warnings,
             successful_workspaces: 0,
         }
@@ -148,14 +194,9 @@ impl SearchBatch {
         result: Result<Vec<SearchHit>>,
     ) {
         match result {
-            Ok(mut hits) => {
+            Ok(hits) => {
                 self.successful_workspaces += 1;
-                if absolute_paths {
-                    for hit in &mut hits {
-                        hit.file_path = workspace_root.join(&hit.file_path);
-                    }
-                }
-                self.hits.append(&mut hits);
+                self.hits.add(workspace_root, absolute_paths, hits);
             }
             Err(err) => self.warnings.push(format!(
                 "search failed for {}: {err:#}",
@@ -175,7 +216,7 @@ impl SearchBatch {
     }
 
     pub(crate) fn finish(
-        mut self,
+        self,
         limit: Option<usize>,
         ordering: HitOrdering,
     ) -> Result<SearchOutcome> {
@@ -183,8 +224,9 @@ impl SearchBatch {
             bail!("search failed: {}", self.warnings.join("; "));
         }
 
+        let mut hits = self.hits.into_hits();
         if matches!(ordering, HitOrdering::Score) {
-            self.hits.sort_by(|left, right| {
+            hits.sort_by(|left, right| {
                 right
                     .score
                     .total_cmp(&left.score)
@@ -193,23 +235,24 @@ impl SearchBatch {
             });
         }
         if let Some(limit) = limit {
-            self.hits.truncate(limit);
+            hits.truncate(limit);
         }
 
         Ok(SearchOutcome {
-            hits: self.hits,
+            hits,
             warnings: self.warnings,
         })
     }
 
     /// Outcome for a cancelled batch: the hits recorded so far in arrival
     /// order, never an error even when no workspace completed.
-    pub(crate) fn finish_partial(mut self, limit: Option<usize>) -> SearchOutcome {
+    pub(crate) fn finish_partial(self, limit: Option<usize>) -> SearchOutcome {
+        let mut hits = self.hits.into_hits();
         if let Some(limit) = limit {
-            self.hits.truncate(limit);
+            hits.truncate(limit);
         }
         SearchOutcome {
-            hits: self.hits,
+            hits,
             warnings: self.warnings,
         }
     }
@@ -413,6 +456,30 @@ mod tests {
         assert!(selected.workspaces.is_empty());
         assert_eq!(selected.warnings.len(), 1);
         assert!(selected.warnings[0].contains("registered workspace root"));
+    }
+
+    #[test]
+    #[serial]
+    fn all_workspace_selection_names_workspaces_without_a_complete_index() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn rebuilding() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        crate::indexer::index_workspace(&workspace, crate::embedding::create_hash_model().as_ref())
+            .unwrap();
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.last_indexed_at_unix = None;
+        workspace.write_metadata(&metadata).unwrap();
+
+        let selection = select_all_indexed_workspaces(Workspace::resolve).unwrap();
+        assert!(selection.workspaces.is_empty());
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(
+            selection.warnings[0].contains(&workspace.root.display().to_string()),
+            "{:?}",
+            selection.warnings
+        );
     }
 
     #[test]

@@ -69,7 +69,7 @@ Linked Git worktrees share a base index. Each worktree stores only changed chunk
 
 Since v1.3.1, a CLI search or context request, `ig --interactive`, or `ig --add` asks before it builds an index for your home directory, a directory that contains it, or the filesystem root. Confirm with `y` or `yes`. Without an interactive terminal, the command stops unless you pass `--yes`.
 
-A healthy directory that is already indexed does not ask on a plain `ig --add`. `ig --add --force` rebuilds it, and `--skip-gitignore` can add ignored files, so those cases ask too.
+A healthy directory that is already indexed does not ask on a plain `ig --add`. `ig --add --force` rebuilds it, and `--skip-gitignore` can add ignored files, so those cases ask too. MCP `ig_search` returns an error instead of building or expanding such an index.
 
 The same confirmation applies when `--all --skip-gitignore` expands a broad index, or when a linked worktree needs to build or expand one for its main checkout.
 

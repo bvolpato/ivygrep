@@ -265,7 +265,8 @@ pub(super) fn find_focus_line(
     if is_definition_kind(&chunk.kind)
         && (crate::symbols::chunk_defines_exact_name(chunk, &query.text)
             || crate::symbols::chunk_defines_exact_name(chunk, symbol_name))
-        && let Some(line) = first_source_definition_line(content, lines, window_start, window_end)
+        && let Some(line) =
+            first_source_definition_line(content, lines, window_start, window_end, &chunk.language)
     {
         return line;
     }
@@ -306,34 +307,11 @@ fn first_source_definition_line(
     lines: &[LineSpan],
     window_start: usize,
     window_end: usize,
+    language: &str,
 ) -> Option<usize> {
-    let mut in_block_comment = false;
-    for line_no in window_start..=window_end {
-        let line = line_at(content, lines, line_no).trim();
-        if in_block_comment {
-            if line.contains("*/") {
-                in_block_comment = false;
-            }
-            continue;
-        }
-        if line.starts_with("/*") {
-            if !line.contains("*/") {
-                in_block_comment = true;
-            }
-            continue;
-        }
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with('#')
-            || line.starts_with('@')
-            || line.starts_with('*')
-            || line.starts_with('[') && line.ends_with(']')
-        {
-            continue;
-        }
-        return Some(line_no);
-    }
-    None
+    let window = &content[lines[window_start - 1].start..lines[window_end - 1].end];
+    let definition = crate::text::first_code_line_range(window, language)?;
+    Some(window_start + window[..definition.start].matches('\n').count())
 }
 
 pub(super) fn should_use_compact_identifier_matching(

@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -95,6 +96,28 @@ use batch_budget::{BatchBudget, Reservation};
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
 const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
 const INDEXED_SKIP_GITIGNORE_FILE: &str = ".indexed_skip_gitignore";
+/// The rules that select source files. Version 2 stops `.gitignore` rules at
+/// the root of a repository.
+const SOURCE_RULES_VERSION: u32 = 2;
+
+static PROGRESS_OUTPUT: AtomicBool = AtomicBool::new(true);
+
+/// Stop progress output on stderr. A full-screen UI owns the terminal.
+pub(crate) fn disable_progress_output() {
+    PROGRESS_OUTPUT.store(false, Ordering::Relaxed);
+}
+
+pub(crate) fn progress_on_terminal() -> bool {
+    PROGRESS_OUTPUT.load(Ordering::Relaxed) && std::io::stderr().is_terminal()
+}
+
+macro_rules! progress_line {
+    ($($message:tt)*) => {
+        if PROGRESS_OUTPUT.load(Ordering::Relaxed) {
+            eprintln!($($message)*);
+        }
+    };
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingSummary {
@@ -102,6 +125,8 @@ pub struct IndexingSummary {
     pub indexed_files: usize,
     pub deleted_files: usize,
     pub total_chunks: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     #[serde(default)]
     pub phase_timings: IndexingPhaseTimings,
 }
@@ -264,17 +289,23 @@ fn source_batch_len(files: &crate::workspace_file::RootHandle, paths: &[(PathBuf
     count
 }
 
+/// Files that the scan listed and the index run did not read.
+#[derive(Debug, Default)]
+struct SkippedSources {
+    vanished: Vec<PathBuf>,
+    unreadable: Vec<PathBuf>,
+}
+
 struct IndexBatchProducer {
     receiver: Option<std::sync::mpsc::Receiver<Result<IndexedFileBatch>>>,
-    // The thread returns the files that vanished before it read them.
-    handle: Option<std::thread::JoinHandle<Vec<PathBuf>>>,
+    handle: Option<std::thread::JoinHandle<SkippedSources>>,
     budget: Arc<BatchBudget>,
 }
 
 impl IndexBatchProducer {
     fn new(
         receiver: std::sync::mpsc::Receiver<Result<IndexedFileBatch>>,
-        handle: std::thread::JoinHandle<Vec<PathBuf>>,
+        handle: std::thread::JoinHandle<SkippedSources>,
         budget: Arc<BatchBudget>,
     ) -> Self {
         Self {
@@ -296,15 +327,14 @@ impl IndexBatchProducer {
         }
     }
 
-    /// Returns the files that vanished after the scan listed them.
-    fn finish(mut self) -> Result<Vec<PathBuf>> {
+    fn finish(mut self) -> Result<SkippedSources> {
         self.budget.stop();
         drop(self.receiver.take());
         match self.handle.take() {
             Some(handle) => handle
                 .join()
                 .map_err(|_| anyhow::anyhow!("index batch producer thread panicked")),
-            None => Ok(Vec::new()),
+            None => Ok(SkippedSources::default()),
         }
     }
 }
@@ -337,7 +367,7 @@ fn spawn_index_batch_producer(
     let _ = fs::write(&progress_path, format!("0/{total}"));
     let handle = std::thread::spawn(move || {
         let _background = use_background_pool.then(background_indexing);
-        let vanished = std::sync::Mutex::new(Vec::new());
+        let skipped = std::sync::Mutex::new(SkippedSources::default());
         let mut remaining = diff_paths.as_slice();
         'batches: while !remaining.is_empty() {
             // Each batch validates the root again. Its size probes and file
@@ -385,8 +415,14 @@ fn spawn_index_batch_producer(
                                     && crate::workspace_file::validate_root(&root).is_ok() =>
                             {
                                 progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                vanished.lock().unwrap().push(rel_path.clone());
+                                skipped.lock().unwrap().vanished.push(rel_path.clone());
                                 return Ok(empty_incremental_file(rel_path));
+                            }
+                            // The stores keep the chunks of the last read.
+                            Err(error) if crate::merkle::is_unreadable_file(&abs_path, &error) => {
+                                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                skipped.lock().unwrap().unreadable.push(rel_path.clone());
+                                return Ok(None);
                             }
                             Err(error) => {
                                 return Err(anyhow::Error::new(error).context(format!(
@@ -518,7 +554,7 @@ fn spawn_index_batch_producer(
                 }
             }
         }
-        vanished.into_inner().unwrap()
+        skipped.into_inner().unwrap()
     });
 
     IndexBatchProducer::new(receiver, handle, budget)
@@ -529,9 +565,20 @@ pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
 }
 
 pub(crate) fn indexed_skip_gitignore(workspace: &Workspace) -> Option<bool> {
-    fs::read_to_string(workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE))
-        .ok()
-        .and_then(|value| value.trim().parse::<bool>().ok())
+    read_indexed_filter(workspace)?.0.parse().ok()
+}
+
+pub(crate) fn indexed_with_current_source_rules(workspace: &Workspace) -> bool {
+    read_indexed_filter(workspace)
+        .is_some_and(|(_, version)| version == SOURCE_RULES_VERSION.to_string())
+}
+
+/// The ignore mode and the source rules version of the last complete index
+/// run. Version 1 recorded the mode only.
+fn read_indexed_filter(workspace: &Workspace) -> Option<(String, String)> {
+    let value = fs::read_to_string(workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE)).ok()?;
+    let mut fields = value.split_whitespace().map(str::to_string);
+    Some((fields.next()?, fields.next().unwrap_or_default()))
 }
 
 pub(crate) fn workspace_index_matches_skip_gitignore(
@@ -544,7 +591,7 @@ pub(crate) fn workspace_index_matches_skip_gitignore(
 fn record_indexed_skip_gitignore(workspace: &Workspace, skip_gitignore: bool) -> Result<()> {
     fs::write(
         workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE),
-        skip_gitignore.to_string(),
+        format!("{skip_gitignore} {SOURCE_RULES_VERSION}"),
     )?;
     Ok(())
 }
@@ -577,6 +624,20 @@ fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
     if !workspace.index_dir.exists() {
         return Ok(());
     }
+    // A Git directory is not a checkout, so no workspace reads it as its base.
+    if let Some(base) = crate::index_gc::read_base_ref(&workspace.index_dir)
+        && crate::workspace::is_git_dir(&base.base_workspace_root)
+    {
+        let mut git_dir_index = workspace.clone();
+        git_dir_index.index_dir = crate::config::indexes_root()?
+            .join(crate::workspace::workspace_id(&base.base_workspace_root));
+        if let Err(error) = remove_workspace_index(&git_dir_index) {
+            tracing::warn!(
+                "failed to remove index {}: {error:#}",
+                git_dir_index.index_dir.display()
+            );
+        }
+    }
     let _job_lock = jobs::lock_job_ledger(workspace)?;
     for entry in fs::read_dir(&workspace.index_dir)? {
         let entry = entry?;
@@ -587,13 +648,45 @@ fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
             continue;
         }
         let path = entry.path();
-        if path.is_dir() {
-            fs::remove_dir_all(&path)?;
+        let removed = if path.is_dir() {
+            remove_index_directory(&path)
         } else {
-            fs::remove_file(&path)?;
+            fs::remove_file(&path)
+        };
+        match removed {
+            // Other processes replace metadata and drop stale PID files
+            // without the index lock.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            removed => removed?,
         }
     }
     Ok(())
+}
+
+/// Other processes open a store without the index lock, and Tantivy creates
+/// lock files in the directory that it opens. A directory under a new name gets
+/// no new files. If a crash leaves it behind, the next index run removes it.
+fn remove_index_directory(path: &Path) -> std::io::Result<()> {
+    let renamed = path.with_file_name(format!(
+        "{}{}",
+        staging::STAGING_DIR_PREFIX,
+        uuid::Uuid::new_v4()
+    ));
+    // Windows does not rename a directory with open files.
+    let path = if fs::rename(path, &renamed).is_ok() {
+        renamed.as_path()
+    } else {
+        path
+    };
+    for _ in 0..20 {
+        match fs::remove_dir_all(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            removed => return removed,
+        }
+    }
+    fs::remove_dir_all(path)
 }
 
 pub fn index_workspace(
@@ -828,6 +921,7 @@ fn index_workspace_with_options_and_store_replacement(
             indexed_files: 0,
             deleted_files: 0,
             total_chunks: count_chunks(&workspace.sqlite_path())?,
+            warning: None,
             phase_timings: IndexingPhaseTimings {
                 discovery_ms: indexing_started.elapsed().as_secs_f64() * 1_000.0,
                 ..Default::default()
@@ -882,7 +976,7 @@ fn index_workspace_with_options_and_store_replacement(
         }
     });
 
-    let mut source_vanished = false;
+    let mut sources_skipped = false;
     let result = retry_transient_tantivy_writes(|| {
         // SQLite may have committed before Tantivy or the snapshot failed.
         // If inputs change before a retry, replaying their old Merkle diff can
@@ -896,7 +990,7 @@ fn index_workspace_with_options_and_store_replacement(
             skip_gitignore,
             reset_worktree_overlay || (incomplete && workspace.is_worktree()),
             rebuild_main || (incomplete && !workspace.is_worktree()),
-            &mut source_vanished,
+            &mut sources_skipped,
             before_store_replacement,
         )
     });
@@ -912,11 +1006,11 @@ fn index_workspace_with_options_and_store_replacement(
     if result.is_ok() && tracks_reusable_base_state {
         #[cfg(test)]
         git_state::test_support::before_record(&workspace.root);
-        // The index holds no chunks for a file that vanished during the run,
+        // The index does not hold the content of a file that the run skipped,
         // even if the checkout is clean again. Do not record it as current.
         record_indexed_git_state(
             workspace,
-            clean_git_checkout.as_ref().filter(|_| !source_vanished),
+            clean_git_checkout.as_ref().filter(|_| !sources_skipped),
         );
     }
 
@@ -1040,8 +1134,8 @@ fn index_workspace_inner(
     skip_gitignore: bool,
     reset_worktree_overlay: bool,
     rebuild_main: bool,
-    // Set if a source file vanished after the scan listed it.
-    source_vanished: &mut bool,
+    // Set if the run did not read a source file that the scan listed.
+    sources_skipped: &mut bool,
     before_store_replacement: &mut dyn FnMut(&Workspace),
 ) -> Result<IndexingSummary> {
     let index_started = std::time::Instant::now();
@@ -1082,6 +1176,7 @@ fn index_workspace_inner(
             indexed_files: 0,
             deleted_files: 0,
             total_chunks: count_chunks(&workspace.sqlite_path())?,
+            warning: None,
             phase_timings: IndexingPhaseTimings {
                 discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
                 ..Default::default()
@@ -1124,7 +1219,7 @@ fn index_workspace_inner(
                 base_ws.ensure_dirs()?;
                 base_ws.write_metadata(&base_meta)?;
                 if base_sqlite.exists() {
-                    eprintln!("  ⚡ enabling ignored files in base index before overlay...");
+                    progress_line!("  ⚡ enabling ignored files in base index before overlay...");
                     if let Err(err) = index_workspace_with_store_replacement(
                         &base_ws,
                         embedding_model,
@@ -1154,7 +1249,9 @@ fn index_workspace_inner(
             && let Some(main_root) = workspace.main_worktree_root()
             && let Ok(base_ws) = crate::workspace::Workspace::resolve(&main_root)
         {
-            eprintln!("  ⚡ base index format incompatible — rebuilding base before overlay...");
+            progress_line!(
+                "  ⚡ base index format incompatible — rebuilding base before overlay..."
+            );
             let _ = index_workspace_with_options_and_store_replacement(
                 &base_ws,
                 embedding_model,
@@ -1171,7 +1268,9 @@ fn index_workspace_inner(
             && (!workspace.has_overlay() || recreate_overlay)
             && let Some(main_root) = workspace.main_worktree_root()
         {
-            eprintln!("  ⚡ base workspace is not indexed, running full base indexing first...");
+            progress_line!(
+                "  ⚡ base workspace is not indexed, running full base indexing first..."
+            );
             let base_workspace = crate::workspace::Workspace::resolve(&main_root)?;
             let _ = index_workspace_with_options_and_store_replacement(
                 &base_workspace,
@@ -1182,14 +1281,14 @@ fn index_workspace_inner(
                 before_store_replacement,
             )?;
             base_refreshed = true;
-            eprintln!("  ⚡ base indexing complete, proceeding with overlay...");
+            progress_line!("  ⚡ base indexing complete, proceeding with overlay...");
         }
 
         if base_sqlite.exists()
             && base_merkle.exists()
             && (!workspace.has_overlay() || recreate_overlay)
         {
-            eprintln!("  ⚡ creating worktree overlay (no copy)...");
+            progress_line!("  ⚡ creating worktree overlay (no copy)...");
             let _ = fs::write(workspace.indexing_progress_path(), "building overlay");
 
             // Publish the base reference with the completed overlay, never
@@ -1237,7 +1336,7 @@ fn index_workspace_inner(
             let diff = initial_overlay_diff(&main_root, &indexed_base, &old, &new);
             captured_base_snapshot = Some(indexed_base);
 
-            eprintln!(
+            progress_line!(
                 "  ⚡ overlay delta: {} added/modified, {} deleted",
                 diff.added_or_modified.len(),
                 diff.deleted.len()
@@ -1283,6 +1382,7 @@ fn index_workspace_inner(
     // Save the Merkle snapshot only after every store commits. An earlier
     // snapshot could claim that files exist in a partial index after a crash.
     let mut pending_base_ref = None;
+    let mut unreadable_files = Vec::new();
     let (mut diff, mut pending_snapshot, clear_overlay_paths) =
         if let Some((diff, snapshot, base_ref)) = overlay_mode {
             pending_base_ref = Some(base_ref);
@@ -1291,7 +1391,8 @@ fn index_workspace_inner(
             // Incremental update to existing overlay
             let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
             let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-            let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+            let mut new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+            unreadable_files = new.keep_unreadable(&old, &workspace.root);
             let mut d = old.diff(&new);
             let mut clear_overlay_paths = Vec::new();
 
@@ -1347,6 +1448,7 @@ fn index_workspace_inner(
                     indexed_files: 0,
                     deleted_files: 0,
                     total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                    warning: warn_unreadable_files(workspace, &unreadable_files),
                     phase_timings: IndexingPhaseTimings {
                         discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
                         ..Default::default()
@@ -1372,7 +1474,8 @@ fn index_workspace_inner(
                 (old, diff)
             } else {
                 let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-                let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+                let mut new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+                unreadable_files = new.keep_unreadable(&old, &workspace.root);
                 let diff = old.diff(&new);
                 (new, diff)
             };
@@ -1386,6 +1489,7 @@ fn index_workspace_inner(
                     indexed_files: 0,
                     deleted_files: 0,
                     total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                    warning: warn_unreadable_files(workspace, &unreadable_files),
                     phase_timings: IndexingPhaseTimings {
                         discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
                         ..Default::default()
@@ -1400,21 +1504,13 @@ fn index_workspace_inner(
     let use_overlay =
         initializing_overlay || workspace.has_overlay() || workspace.base_ref_path().exists();
     let is_fresh_index = initializing_overlay || rebuild_main || !workspace_is_indexed(workspace);
-    if !is_fresh_index {
-        // Leave this marker on every failed/aborted incremental publication.
-        // Fresh builds already isolate writes in staging. No-op scans return
-        // above without touching this marker or any index stores.
-        fs::write(
-            workspace.indexing_incomplete_path(),
-            b"publication pending\n",
-        )?;
-    }
     if !use_overlay && is_fresh_index {
         // A snapshot can outlive another store or an interrupted recovery.
         // Never use its incremental delta to populate a fresh store. Ordinary
         // initial indexing already performed a full walk and has no old file.
         if workspace.merkle_snapshot_path().exists() {
             pending_snapshot = Some(MerkleSnapshot::build(&workspace.root, skip_gitignore)?);
+            unreadable_files.clear();
         }
         diff = MerkleSnapshot::empty().diff(
             pending_snapshot
@@ -1456,6 +1552,24 @@ fn index_workspace_inner(
         current_snapshot.as_deref(),
         builds_from_scratch,
     )?;
+
+    // The marker precedes the first commit of an incremental run and stays after
+    // a failed or aborted publication. A run that fails earlier leaves the stores
+    // as they are. Fresh builds isolate their writes in staging.
+    let publication_begun = std::cell::Cell::new(is_fresh_index);
+    let begin_publication = |reads_remain: bool| -> Result<()> {
+        if publication_begun.replace(true) {
+            return Ok(());
+        }
+        if reads_remain {
+            ensure_sources_open(workspace, &diff)?;
+        }
+        fs::write(
+            workspace.indexing_incomplete_path(),
+            b"publication pending\n",
+        )?;
+        Ok(())
+    };
 
     let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     let persist_started = std::time::Instant::now();
@@ -1568,6 +1682,7 @@ fn index_workspace_inner(
                 if let Some(stats) = &mut incremental_stats {
                     stats.checkpoint(&tx)?;
                 }
+                begin_publication(true)?;
                 commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
                 if !is_fresh_index {
                     writer.commit()?;
@@ -1576,6 +1691,9 @@ fn index_workspace_inner(
             }
         };
     }
+
+    // Base paths that this run hides for the first time.
+    let mut new_tombstones = HashSet::new();
 
     // Overlay state shadows only paths backed by the base index. Clear paths
     // that have returned to base content or were removed after being overlay-only.
@@ -1629,11 +1747,13 @@ fn index_workspace_inner(
         // Insert before chunking so a base file replaced by empty/binary
         // content is still hidden even though it produces no overlay chunks.
         for (rel_path, _) in &diff.added_or_modified {
-            if path_exists_in_base(rel_path) {
-                tx.execute(
+            if path_exists_in_base(rel_path)
+                && tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
                     params![index_path_string(rel_path)],
-                )?;
+                )? > 0
+            {
+                new_tombstones.insert(rel_path.clone());
             }
         }
     } else {
@@ -1654,7 +1774,7 @@ fn index_workspace_inner(
     }
 
     let total = diff.added_or_modified.len();
-    let show_progress = total > 0 && std::io::stderr().is_terminal();
+    let show_progress = total > 0 && progress_on_terminal();
 
     let t0 = std::time::Instant::now();
     let mut total_chunks_processed = 0;
@@ -1786,6 +1906,7 @@ fn index_workspace_inner(
                 if let Some(stats) = &mut incremental_stats {
                     persist_or_stop!(stats.checkpoint(&tx));
                 }
+                persist_or_stop!(begin_publication(true));
                 persist_or_stop!(commit_with_vector_tombstones(tx, &mut vector_tombstones));
                 if !is_fresh_index {
                     persist_or_stop!(writer.commit());
@@ -1797,13 +1918,14 @@ fn index_workspace_inner(
         }
     }
 
-    let vanished_files = producer.finish()?;
-    // The stores hold no chunks for a file that vanished after the scan. Its
+    let skipped = producer.finish()?;
+    // The stores do not hold the content of a file that the run skipped. Its
     // snapshot hash must not claim that the file is indexed.
-    *source_vanished = !vanished_files.is_empty();
     let pending_snapshot = pending_snapshot.map(|mut snapshot| {
-        if *source_vanished {
-            Arc::make_mut(&mut snapshot).mark_vanished(&vanished_files);
+        if !skipped.vanished.is_empty() || !skipped.unreadable.is_empty() {
+            let snapshot = Arc::make_mut(&mut snapshot);
+            snapshot.mark_vanished(&skipped.vanished);
+            snapshot.mark_unreadable(&skipped.unreadable);
         }
         snapshot
     });
@@ -1823,6 +1945,22 @@ fn index_workspace_inner(
     let secondary_indexes_started = Instant::now();
     persist_statements.flush_symbols()?;
     drop(persist_statements);
+    if !initializing_overlay {
+        // An unreadable file keeps what the index shows for it: here, the
+        // chunks that the worktree inherits from its base.
+        for rel_path in &skipped.unreadable {
+            if new_tombstones.contains(rel_path) {
+                tx.execute(
+                    "DELETE FROM tombstones WHERE file_path = ?1",
+                    params![index_path_string(rel_path)],
+                )?;
+            }
+        }
+    }
+    unreadable_files.extend(skipped.unreadable);
+    unreadable_files.sort();
+    unreadable_files.dedup();
+    *sources_skipped = !skipped.vanished.is_empty() || !unreadable_files.is_empty();
     if defer_secondary_indexes {
         create_secondary_indexes(&tx)?;
     }
@@ -1857,6 +1995,7 @@ fn index_workspace_inner(
     )?;
 
     let sqlite_commit_started = Instant::now();
+    begin_publication(false)?;
     commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
     let sqlite_commit_ms = sqlite_commit_started.elapsed().as_secs_f64() * 1_000.0;
 
@@ -1923,6 +2062,7 @@ fn index_workspace_inner(
         indexed_files: touched_files.len(),
         deleted_files: diff.deleted.len(),
         total_chunks,
+        warning: warn_unreadable_files(workspace, &unreadable_files),
         phase_timings: IndexingPhaseTimings {
             discovery_ms,
             persist_ms,
@@ -1936,6 +2076,44 @@ fn index_workspace_inner(
             metadata_ms,
         },
     })
+}
+
+/// Finds sources that fail to open before a large update commits a part of its
+/// changes. A failed read after that commit needs a rebuild.
+fn ensure_sources_open(workspace: &Workspace, diff: &MerkleDiff) -> Result<()> {
+    let files = crate::workspace_file::RootHandle::new(&workspace.root);
+    for (rel_path, _) in &diff.added_or_modified {
+        let path = workspace.root.join(rel_path);
+        let opened = files.open(rel_path).map(drop);
+        #[cfg(test)]
+        let opened =
+            crate::merkle::test_support::check(crate::merkle::test_support::Stage::Index, &path)
+                .and(opened);
+        if let Err(error) = opened
+            && error.kind() != std::io::ErrorKind::NotFound
+            && !crate::merkle::is_unreadable_file(&path, &error)
+        {
+            return Err(anyhow::Error::new(error)
+                .context(format!("failed reading source file {}", path.display())));
+        }
+    }
+    Ok(())
+}
+
+/// Reports the files that the run could not read on standard error, which a
+/// daemon redirects to its log.
+fn warn_unreadable_files(workspace: &Workspace, unreadable: &[PathBuf]) -> Option<String> {
+    let first = unreadable.first()?;
+    let warning = format!(
+        "skipped {} without read permission, first: {}",
+        match unreadable.len() {
+            1 => "1 file".to_string(),
+            count => format!("{count} files"),
+        },
+        workspace.root.join(first).display()
+    );
+    eprintln!("warning: {warning}");
+    Some(warning)
 }
 
 fn initial_overlay_diff(
@@ -5199,7 +5377,7 @@ mod tests {
                     .is_err(),
                 "receiver drop must cancel blocked producer send"
             );
-            Vec::new()
+            SkippedSources::default()
         });
 
         drop(IndexBatchProducer::new(
@@ -5277,7 +5455,47 @@ mod tests {
                 format!("{error:#}").contains("listed.rs"),
                 "unexpected producer error: {error:#}"
             );
-            assert!(producer.finish().unwrap().is_empty());
+            assert!(producer.finish().unwrap().vanished.is_empty());
+        }
+    }
+
+    /// The walk applied the rules of an ignore file that is unreadable now.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn index_batch_producer_fails_on_an_unreadable_ignore_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let (_index, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        for (name, fails) in [
+            ("locked.rs", false),
+            (".gitignore", true),
+            (".ignore", true),
+        ] {
+            let path = workspace.root.join(name);
+            fs::write(&path, "hidden.rs\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+            if fs::read(&path).is_ok() {
+                return; // Privileged users can bypass Unix permission bits.
+            }
+            let diff = MerkleDiff {
+                added_or_modified: vec![(PathBuf::from(name), false)],
+                deleted: Vec::new(),
+            };
+            assert_eq!(ensure_sources_open(&workspace, &diff).is_err(), fails);
+            let producer =
+                spawn_index_batch_producer(&workspace, &diff, None, &fields, false, false);
+            assert_eq!(
+                producer.recv().is_some_and(|batch| batch.is_err()),
+                fails,
+                "{name}"
+            );
+            assert_eq!(producer.finish().unwrap().unreadable.is_empty(), fails);
         }
     }
 
@@ -5307,7 +5525,7 @@ mod tests {
         assert_eq!(batch.files.len(), 2);
         assert!(batch.files.iter().all(|file| file.chunks.is_empty()));
         drop(batch);
-        let mut vanished = producer.finish().unwrap();
+        let mut vanished = producer.finish().unwrap().vanished;
         vanished.sort();
         assert_eq!(vanished, deleted);
     }
@@ -7152,6 +7370,55 @@ mod tests {
                 std::ffi::OsString::from("job.lock"),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn remove_workspace_index_tolerates_readers_and_metadata_writers() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let metadata = WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 1,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: true,
+            skip_gitignore: false,
+            index_generation: 1,
+        };
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            // A process that opens the store creates Tantivy lock files in it.
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = fs::write(workspace.tantivy_dir().join(".tantivy-meta.lock"), "");
+                }
+            });
+            // Another process publishes metadata and drops its PID file.
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = workspace.write_metadata(&metadata);
+                    let _ = fs::write(workspace.enhancing_pid_path(), "1");
+                    let _ = fs::remove_file(workspace.enhancing_pid_path());
+                }
+            });
+            let removals = (0..300)
+                .map(|_| {
+                    fs::create_dir_all(workspace.tantivy_dir()).unwrap();
+                    remove_workspace_index(&workspace)
+                })
+                .collect::<Vec<_>>();
+            stop.store(true, Ordering::Relaxed);
+            for removal in removals {
+                removal.unwrap();
+            }
+        });
     }
 
     #[test]

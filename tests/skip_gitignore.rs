@@ -195,12 +195,23 @@ fn all_indices_requires_confirmation_before_expanding_a_home_index() {
         .failure()
         .stderr(predicates::str::contains("Pass --yes"));
     let _daemon = start_daemon(&repo, &home);
-    for mode in [&[][..], &["--literal"], &["--regex"], &["--interactive"]] {
+    for mode in [&[][..], &["--literal"], &["--regex"]] {
         search(mode)
             .assert()
             .failure()
             .stderr(predicates::str::contains("Pass --yes"));
     }
+    // `--interactive` rejects the `--json` flag of the other searches.
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&repo)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .env("HOME", &repo)
+        .args(["--skip-gitignore", "--no-watch", "--all", "--interactive"])
+        .arg("hidden-secret-string")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Pass --yes"));
     search(&["--literal"])
         .arg("--yes")
         .assert()

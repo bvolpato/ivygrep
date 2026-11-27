@@ -1,42 +1,69 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep MCP server</title><meta name="description" content="Install ivygrep through MCP Registry or connect its local stdio server.">
-    <link rel="canonical" href="https://bvolpato.github.io/ivygrep/integrations/mcp.html">
-    <meta property="og:title" content="ivygrep MCP server">
-    <meta property="og:description" content="Install ivygrep through MCP Registry or connect its local stdio server.">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://bvolpato.github.io/ivygrep/integrations/mcp.html">
-    <meta property="og:site_name" content="ivygrep">
-    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
-    <meta property="og:image:width" content="1280">
-    <meta property="og:image:height" content="698">
-    <meta property="og:image:alt" content="ivygrep search and bounded task-context workflow">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep MCP server">
-    <meta name="twitter:description" content="Install ivygrep through MCP Registry or connect its local stdio server.">
-    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
-    <meta name="twitter:image:alt" content="ivygrep search and bounded task-context workflow">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="integration.css"><link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ivygrep MCP server</title>
+<meta name="description" content="Connect any MCP client to ivygrep over stdio, or install the checksum-pinned registry bundle.">
+<meta name="theme-color" content="#0c3b2b">
+<link rel="canonical" href="https://bvolpato.github.io/ivygrep/integrations/mcp.html">
+<meta property="og:title" content="ivygrep MCP server">
+<meta property="og:description" content="Connect any MCP client to ivygrep over stdio, or install the checksum-pinned registry bundle.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bvolpato.github.io/ivygrep/integrations/mcp.html">
+<meta property="og:site_name" content="ivygrep">
+<meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="698">
+<meta property="og:image:alt" content="grep finds what you typed. ivygrep finds what you meant.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ivygrep MCP server">
+<meta name="twitter:description" content="Connect any MCP client to ivygrep over stdio, or install the checksum-pinned registry bundle.">
+<meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
+<meta name="twitter:image:alt" content="grep finds what you typed. ivygrep finds what you meant.">
+<link rel="preload" href="../assets/fonts/recursive-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../site.css">
+<link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+<noscript><style>.copy { display: none !important; }</style></noscript>
+<script src="../site.js" defer></script>
 </head>
 <body>
-    <div class="bg-fx"></div><div class="bg-fx-glow"></div>
-    <nav class="navbar relative z-10"><div class="container nav-content"><a href="../index.html" class="logo"><img src="../assets/icon.svg" alt="ivygrep" width="38" height="34"></a><div class="integration-nav"><a href="codex.html">Codex</a><a href="claude-code.html">Claude Code</a><a href="cursor.html">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html" aria-current="page">MCP</a></div></div></nav>
-    <main class="integration-main relative z-10"><div class="container">
-        <header class="integration-header"><span class="section-tag">Model Context Protocol</span><h1>One local server. Every supported agent.</h1><p>Install checksum-pinned cross-platform MCP bundle from registry client or connect existing <code>ig</code> binary over stdio.</p></header>
-        <div class="integration-grid">
-            <section class="glass-panel integration-card"><h2>Server</h2><pre class="integration-command">ig --mcp</pre><p>MCP bundle contains ivygrep binaries for macOS, Linux, and Windows. Registry metadata pins bundle SHA-256. Release workflow publishes metadata with GitHub OIDC.</p><h3>Core request</h3><pre class="integration-command">tool: ig_search
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../assets/icon.svg" alt="" width="34" height="31">ivygrep</a>
+    <nav class="site-links always" aria-label="Integrations"><a href="claude-code.html">Claude Code</a><a href="codex.html">Codex</a><a href="cursor.html">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html" aria-current="page">MCP</a></nav>
+  </div>
+</header>
+<main id="main" class="wrap guide">
+<article>
+<h1>One local server for every MCP client.</h1>
+<p>Connect an installed <code>ig</code> over stdio, or install the bundle from a client that supports the MCP Registry.</p>
+<h2>The server</h2>
+<div class="cmd"><pre>ig --mcp</pre><button class="copy">Copy</button></div>
+<p>The registry bundle contains ivygrep binaries for macOS, Linux, and Windows. Registry metadata pins the SHA-256 of the bundle, and the release workflow publishes that metadata with GitHub OIDC.</p>
+<h2>The main request</h2>
+<div class="cmd"><pre>tool: ig_search
 query: fix refresh-token races
 path: /absolute/repository/path
 output: context_pack
 since: main
-budget_tokens: 8000</pre><p><code>since</code> resolves a Git ref and finds its merge base with <code>HEAD</code>. The pack includes changes committed on the current branch since that base, plus staged, unstaged, and untracked files. It is valid only for a context pack; the selected ref is not the diff base.</p></section>
-            <aside class="glass-panel integration-card"><h2>Tools</h2><ul><li><code>ig_search</code>: search or context pack</li><li><code>ig_status</code>: index state</li><li>stdio transport</li><li>Local source, queries, embeddings, indexes</li></ul><div class="integration-links"><a class="btn btn-ghost" href="https://registry.modelcontextprotocol.io/">MCP Registry</a><a class="btn btn-ghost" href="https://github.com/bvolpato/ivygrep/releases/latest">Release bundle</a></div></aside>
-        </div>
-    </div></main>
+budget_tokens: 8000</pre><button class="copy">Copy</button></div>
+<p><code>since</code> resolves a Git ref and finds its merge base with <code>HEAD</code>. The pack includes commits on the current branch since that base, plus staged, unstaged, and untracked files. The ref itself is not the diff base. <code>since</code> is valid only for a context pack.</p>
+</article>
+<aside><h2>Tools</h2><ul><li><code>ig_search</code>: search results or a context pack</li><li><code>ig_status</code>: index state</li></ul><h2>Transport</h2><ul><li>stdio</li><li>Source, queries, embeddings, and indexes stay local</li></ul><p><a href="https://registry.modelcontextprotocol.io/">MCP Registry</a></p><p><a href="https://github.com/bvolpato/ivygrep/releases/latest">Release bundle</a></p></aside>
+</main>
+<footer class="site-foot">
+  <div class="wrap">
+    <nav aria-label="Project">
+      <a href="../index.html">Home</a>
+      <a href="https://github.com/bvolpato/ivygrep">GitHub</a>
+      <a href="https://github.com/bvolpato/ivygrep#readme">Documentation</a>
+      <a href="../benchmarks/">Benchmarks</a>
+    </nav>
+    <span>MIT licensed. Maintained by <a href="https://github.com/bvolpato">Bruno Volpato</a>.</span>
+  </div>
+</footer>
+<div class="vh" role="status" aria-live="polite" id="announce"></div>
 </body>
 </html>

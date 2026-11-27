@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use rusqlite::{Connection, params, types::ToSql};
 use sha2::{Digest, Sha256};
 
@@ -22,6 +23,10 @@ const SYMBOL_DEFINITION_LOOKUP_BATCH: usize = 128;
 const SYMBOL_RELATIONSHIP_CANDIDATE_LIMIT: usize = 25_000;
 const MAX_RETAINED_SYMBOL_SOURCE_FILES: usize = 8;
 const SYMBOL_SOURCE_CACHE_BYTES: usize = 2 * 1024 * 1024;
+/// Languages whose files call each other. The indexer reads `.h` files as C,
+/// and JavaScript and TypeScript modules import each other.
+const RELATIONSHIP_LANGUAGE_FAMILIES: [&[&str]; 2] =
+    [&["c", "cpp", "objc"], &["javascript", "typescript"]];
 type SymbolSourceKey = (PathBuf, String, [u8; 32]);
 type SymbolSourceCell = Arc<OnceLock<Arc<ParsedSymbolSource>>>;
 type SymbolSourceCache = crate::byte_cache::ByteCache<SymbolSourceKey, SymbolSourceCell>;
@@ -242,6 +247,30 @@ fn search_symbols_in_index(
 
     workspace.ensure_current_index_format()?;
     let query = parse_symbol_query(name);
+    let lookup =
+        |query| search_definitions(workspace, search_context, query, options, &path_matcher);
+    // A Clojure name such as `string->int` contains the C and PHP member arrow.
+    // With another case, the query is for a member.
+    if query.owner.is_some() && candidate_name.contains("->") {
+        let mut hits = lookup(SymbolQuery {
+            name: candidate_name,
+            owner: None,
+        })?;
+        hits.retain(|hit| hit.preview.contains(candidate_name));
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+    }
+    lookup(query)
+}
+
+fn search_definitions(
+    workspace: &Workspace,
+    search_context: Option<&SearchContext>,
+    query: SymbolQuery<'_>,
+    options: &SearchOptions,
+    path_matcher: &PathGlobMatcher,
+) -> Result<Vec<SearchHit>> {
     let query_normalized = normalize_symbol(query.name);
     let primary_sqlite = if workspace.has_overlay() {
         workspace.overlay_sqlite_path()
@@ -255,7 +284,7 @@ fn search_symbols_in_index(
             &query,
             &query_normalized,
             options,
-            &path_matcher,
+            path_matcher,
             None,
             &files,
         )
@@ -280,7 +309,7 @@ fn search_symbols_in_index(
                     &query,
                     &query_normalized,
                     options,
-                    &path_matcher,
+                    path_matcher,
                     Some(&shadowed_paths),
                     &files,
                 )
@@ -882,6 +911,15 @@ fn relationship_definitions(
         .unwrap_or_default())
 }
 
+fn with_related_languages(mut languages: HashSet<String>) -> HashSet<String> {
+    for family in RELATIONSHIP_LANGUAGE_FAMILIES {
+        if family.iter().any(|language| languages.contains(*language)) {
+            languages.extend(family.iter().map(|language| language.to_string()));
+        }
+    }
+    languages
+}
+
 fn search_call_sites_with_references(
     workspace: &Workspace,
     search_context: Option<&SearchContext>,
@@ -917,7 +955,7 @@ fn search_call_sites_with_references(
         RelationshipDefinitions::default()
     };
     let languages = if options.type_filter.is_none() {
-        definitions.languages
+        with_related_languages(definitions.languages)
     } else {
         HashSet::new()
     };
@@ -1124,7 +1162,7 @@ fn matching_symbol_lines_in_source(
         let line = line_starts.partition_point(|offset| *offset <= start);
         let line_start = line_starts[line - 1];
         let is_call = if let Some(node) = node {
-            is_call_reference(node, language == "go" && go_generic_function)
+            is_call_reference(node, text, language == "go" && go_generic_function)
         } else {
             let line_end = line_starts.get(line).copied().unwrap_or(source.len());
             if looks_like_definition(&lower[line_start..line_end], start - line_start) {
@@ -1230,7 +1268,10 @@ fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
         let kind = current.kind();
         if matches!(
             kind,
-            "interpolation" | "interpolated_expression" | "template_substitution"
+            "interpolation"
+                | "interpolated_expression"
+                | "template_substitution"
+                | "command_substitution"
         ) {
             in_interpolation = true;
         }
@@ -1252,6 +1293,14 @@ fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
         let Some(parent) = current.parent() else {
             return true;
         };
+        // PHP puts interpolated code directly inside the string node.
+        if matches!(
+            parent.kind(),
+            "encapsed_string" | "heredoc_body" | "shell_command_expression"
+        ) && (current.kind().ends_with("_expression") || current.kind() == "variable_name")
+        {
+            in_interpolation = true;
+        }
         let kind = parent.kind();
         // Declaration names are not references. The declarator chain matters
         // for C/C++ prototypes; looking for a keyword on one line is not enough.
@@ -1269,10 +1318,36 @@ fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
                     | "type_spec"
                     | "type_alias"
                     | "method_elem"
+                    | "signature"
+                    | "header"
             ))
             && parent
                 .child_by_field_name("name")
+                .or_else(|| parent.child_by_field_name("module"))
                 .is_some_and(|name| contains_node(name, node))
+        {
+            return false;
+        }
+        // `struct hash<node> { ... }` declares `hash` and refers to `node`.
+        if kind.ends_with("_specifier")
+            && declares_type(parent)
+            && parent
+                .child_by_field_name("name")
+                .and_then(terminal_name)
+                .is_some_and(|name| name.id() == node.id())
+        {
+            return false;
+        }
+        // Objective-C gives these names no field.
+        if current.kind() == "identifier"
+            && parent.child_by_field_name("name").is_none()
+            && match kind {
+                "method_definition" | "method_declaration" => true,
+                "class_interface" | "class_implementation" | "protocol_declaration" => {
+                    parent.named_child(0) == Some(current)
+                }
+                _ => false,
+            }
         {
             return false;
         }
@@ -1328,11 +1403,26 @@ fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
     }
 }
 
+/// A C or C++ type specifier declares its name in a definition with a body and
+/// in a forward declaration. Elsewhere it refers to the type.
+fn declares_type(specifier: tree_sitter::Node<'_>) -> bool {
+    specifier.child_by_field_name("body").is_some()
+        || specifier
+            .next_sibling()
+            .is_some_and(|next| next.kind() == ";")
+}
+
 fn contains_node(container: tree_sitter::Node<'_>, node: tree_sitter::Node<'_>) -> bool {
     container.start_byte() <= node.start_byte() && node.end_byte() <= container.end_byte()
 }
 
-fn is_call_reference(node: tree_sitter::Node<'_>, go_generic_function: bool) -> bool {
+fn is_call_reference(node: tree_sitter::Node<'_>, text: &str, go_generic_function: bool) -> bool {
+    if node
+        .parent()
+        .is_some_and(|parent| parent.kind() == "token_tree")
+    {
+        return is_macro_argument_call(node, text);
+    }
     let mut current = node;
     while let Some(parent) = current.parent() {
         if parent.kind() == "call_expression_with_bareword"
@@ -1381,8 +1471,16 @@ fn is_call_reference(node: tree_sitter::Node<'_>, go_generic_function: bool) -> 
             "type_conversion_expression" if go_generic_function => {
                 parent.child_by_field_name("type")
             }
-            "new_expression" => parent.child_by_field_name("constructor"),
-            "object_creation_expression" => parent.child_by_field_name("type"),
+            "command" => parent.child_by_field_name("name"),
+            "message_expression" => parent.child_by_field_name("method"),
+            "macro_invocation" => parent.child_by_field_name("macro"),
+            "new_expression" | "const_object_expression" => parent
+                .child_by_field_name("type")
+                .or_else(|| parent.child_by_field_name("constructor")),
+            "object_creation_expression" => parent
+                .child_by_field_name("type")
+                .or_else(|| parent.named_child(0)),
+            "instance_expression" => parent.named_child(0),
             _ => None,
         };
         if let Some(callee) = callee {
@@ -1396,6 +1494,66 @@ fn is_call_reference(node: tree_sitter::Node<'_>, go_generic_function: bool) -> 
         current = parent;
     }
     false
+}
+
+/// Rust macro arguments are flat tokens: the name and its argument list are
+/// siblings, with optional `::<T>` tokens or the `!` of a nested macro between.
+fn is_macro_argument_call(node: tree_sitter::Node<'_>, text: &str) -> bool {
+    if node
+        .prev_sibling()
+        .is_some_and(|token| token.kind() == "fn")
+    {
+        return false;
+    }
+    let Some(mut next) = node.next_sibling() else {
+        return false;
+    };
+    if next.kind() == "!" {
+        return next
+            .next_sibling()
+            .is_some_and(|token| token.kind() == "token_tree");
+    }
+    if next.kind() == "::" {
+        let mut depth = 0usize;
+        loop {
+            let Some(token) = next.next_sibling() else {
+                return false;
+            };
+            next = token;
+            match token.kind() {
+                "<" => depth += 1,
+                "<<" => depth += 2,
+                ">" => depth = depth.saturating_sub(1),
+                ">>" => depth = depth.saturating_sub(2),
+                _ if depth == 0 => break,
+                _ => {}
+            }
+        }
+    }
+    next.kind() == "token_tree"
+        && next.child(0).is_some_and(|open| open.kind() == "(")
+        && !is_attribute_option(node, text)
+}
+
+/// Attribute options and `cfg!` predicates such as `not(test)` look like calls.
+/// In macro tokens, an attribute is a `#` and a token tree in brackets.
+fn is_attribute_option(mut node: tree_sitter::Node<'_>, text: &str) -> bool {
+    while let Some(tokens) = node.parent().filter(|parent| parent.kind() == "token_tree") {
+        let before = tokens.prev_sibling();
+        let bang = before.filter(|token| token.kind() == "!");
+        let prefix = bang.map_or(before, |bang| bang.prev_sibling());
+        let is_option = match prefix.and_then(|prefix| prefix.utf8_text(text.as_bytes()).ok()) {
+            Some("#") => tokens.child(0).is_some_and(|open| open.kind() == "["),
+            Some("cfg") => bang.is_some(),
+            _ => false,
+        };
+        if is_option {
+            return true;
+        }
+        node = tokens;
+    }
+    node.parent()
+        .is_some_and(|parent| parent.kind() == "attribute")
 }
 
 fn go_generic_callee_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
@@ -1457,6 +1615,9 @@ fn terminal_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_
                 | "conditional_access_expression"
                 | "unary_expression"
                 | "pointer_expression"
+                | "command_name"
+                | "stable_type_identifier"
+                | "type"
         ) {
             return None;
         }
@@ -1778,6 +1939,9 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
 
     // Skips comments and annotations, including multi-line ones.
     let signature = &chunk.text[first_code_line_range(&chunk.text, &chunk.language)?];
+    if let Some(name) = language_definition_name(signature, &chunk.language) {
+        return name.map(str::to_string);
+    }
 
     let keywords: &[&str] = match chunk.kind.as_str() {
         "Function" | "function" => &["fn", "def", "func", "function", "fun"],
@@ -1811,6 +1975,40 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
         allow_function_fallback,
         require_type_alias_assignment,
     )
+}
+
+/// Definition names that the generic keyword scan cannot read. The outer `None`
+/// leaves the line to that scan.
+fn language_definition_name<'a>(line: &'a str, language: &str) -> Option<Option<&'a str>> {
+    static R: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"^[`"']?([\w.]+)[`"']?\s*(?:<<?-|=)\s*function\b"#).expect("valid R regex")
+    });
+    static POWERSHELL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(?:function|filter)\s+(?:\w+:)?([\w-]+)").expect("valid PowerShell regex")
+    });
+    static CLOJURE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"^\(def(?:n-?|macro|method|multi|type|record|protocol)\s+(?:\^(?:\{[^}]*\}|\S+)\s+)*([^\s()\[\]{}"]+)"#,
+        )
+        .expect("valid Clojure regex")
+    });
+    static R_HANDLER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:condition|error|interrupt|message|warning)\s*=").expect("valid R regex")
+    });
+    let (pattern, exclusive) = match language.to_ascii_lowercase().as_str() {
+        // `tryCatch` arguments.
+        "r" if R_HANDLER.is_match(line.trim()) => return Some(None),
+        "r" => (&*R, true),
+        "clojure" => (&*CLOJURE, true),
+        // Classes keep the generic scan.
+        "powershell" => (&*POWERSHELL, false),
+        _ => return None,
+    };
+    let name = pattern
+        .captures(line.trim())
+        .and_then(|captures| captures.get(1))
+        .map(|name| name.as_str());
+    (exclusive || name.is_some()).then_some(name)
 }
 
 /// Chunk windows after the first carry a `// continuation of ...` header.
@@ -1904,13 +2102,20 @@ fn heuristic_definition_names(chunk: &IndexedChunk) -> Vec<String> {
                 }),
             );
         }
-    } else {
-        names.extend(definition_name(chunk));
+    } else if let Some(name) = definition_name(chunk) {
+        // `print.order` is found by its full name and as `order` of `print`.
+        if chunk.language.eq_ignore_ascii_case("r")
+            && let Some((_, leaf)) = name.rsplit_once('.')
+            && !leaf.is_empty()
+        {
+            names.push(leaf.to_string());
+        }
+        names.push(name);
     }
     names
 }
 
-pub(crate) fn likely_definition_names(text: &str) -> Vec<String> {
+pub(crate) fn likely_definition_names(text: &str, language: &str) -> Vec<String> {
     const KEYWORDS: &[&str] = &[
         "fn",
         "def",
@@ -1927,7 +2132,10 @@ pub(crate) fn likely_definition_names(text: &str) -> Vec<String> {
     ];
     let mut seen = HashSet::new();
     text.lines()
-        .filter_map(|line| definition_name_from_signature(line.trim(), KEYWORDS, false, false))
+        .filter_map(|line| match language_definition_name(line, language) {
+            Some(name) => name.map(str::to_string),
+            None => definition_name_from_signature(line.trim(), KEYWORDS, false, false),
+        })
         .filter(|name| seen.insert(normalize_symbol(name)))
         .collect()
 }
@@ -2230,6 +2438,54 @@ mod tests {
             is_ignored: false,
             definitions: None,
         }
+    }
+
+    #[test]
+    fn extracts_definition_names_of_languages_without_a_keyword_before_the_name() {
+        for (language, text, expected) in [
+            (
+                "r",
+                "compute_mean <- function(values) {",
+                &["compute_mean"][..],
+            ),
+            ("r", "my_function = function(x) x", &["my_function"]),
+            (
+                "r",
+                "print.order <- function(x, ...) {",
+                &["order", "print.order"],
+            ),
+            ("r", "lapply(x, FUN = function(i) {", &[]),
+            ("r", "error = function(e) {", &[]),
+            ("r", "result <- function_call(x)", &[]),
+            ("powershell", "function Get-Stock {", &["Get-Stock"]),
+            (
+                "powershell",
+                "Function script:Set-Stock($Name) {",
+                &["Set-Stock"],
+            ),
+            ("powershell", "filter Select-Even { $_ }", &["Select-Even"]),
+            ("clojure", "(defn parse-order [raw]", &["parse-order"]),
+            (
+                "clojure",
+                "(defn- ^{:doc \"Parses.\"} ^String hidden [x] x)",
+                &["hidden"],
+            ),
+            ("clojure", "(default-handler x)", &[]),
+        ] {
+            assert_eq!(
+                definition_names(&chunk(language, "Function", text)),
+                expected,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            definition_names(&chunk("powershell", "Class", "class Stock {")),
+            ["Stock"]
+        );
+        assert_eq!(
+            likely_definition_names("function Set-Stock {\n}\n", "powershell"),
+            ["Set-Stock"]
+        );
     }
 
     #[test]
@@ -3344,6 +3600,241 @@ void phantomCpp() {}
                 .map(|hit| (hit.line, hit.is_call))
                 .collect::<Vec<_>>();
             assert_eq!(lines, [(expected_line, true)], "{path}");
+        }
+    }
+
+    fn relationship_lines(path: &str, language: &str, source: &str) -> Vec<(usize, bool)> {
+        matching_symbol_lines(
+            std::path::Path::new(path),
+            source,
+            language,
+            &parse_symbol_query("audit_target"),
+        )
+        .iter()
+        .map(|hit| (hit.line, hit.is_call))
+        .collect()
+    }
+
+    #[test]
+    fn rust_macro_tokens_keep_calls_and_values_apart() {
+        for (arguments, is_call) in [
+            ("assert_eq!(audit_target(1), 2);", true),
+            ("println!(\"{}\", other::audit_target::<Vec<u8>>(1));", true),
+            ("assert!(value.audit_target().is_none());", true),
+            ("audit_target!(1);", true),
+            ("crate::audit_target! { 1 }", true),
+            ("vec![audit_target![1]];", true),
+            ("vec![audit_target, other(1)];", false),
+            ("assert!(audit_target < other(1));", false),
+            ("matches!(value, audit_target { .. });", false),
+            ("cfg_if! { fn audit_target(value: u8) {} }", false),
+            ("#[cfg(audit_target(test))] audit_other(1);", false),
+            ("#[serde(with(audit_target(a = \"b\")))] struct S;", false),
+            ("#![cfg_attr(test, audit_target(dead_code))]", false),
+            ("cfg_if! { if #[cfg(audit_target(unix))] {} }", false),
+            ("proptest! { #![config(audit_target(1))] }", false),
+            ("if cfg!(audit_target(unix)) {}", false),
+            ("assert!(cfg!(other(audit_target(unix))));", false),
+            ("#[cfg(test)] assert!(audit_target(1));", true),
+            ("#[arg(parser = audit_target!(u16))] struct S;", true),
+            ("cfg_if! { if #[cfg(unix)] { audit_target(1) } }", true),
+            ("assert!(!cfg!(unix) && !(audit_target(1)));", true),
+            ("assert!(items[audit_target(1)]);", true),
+            ("quote! { #(audit_target(1)),* }", true),
+        ] {
+            assert_eq!(
+                relationship_lines("calls.rs", "rust", &format!("fn run() {{ {arguments} }}\n")),
+                [(1, is_call)],
+                "{arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn calls_and_constructors_follow_each_grammar() {
+        for (path, language, source) in [
+            (
+                "calls.sh",
+                "shell",
+                "if ! audit_target web; then exit; fi\n",
+            ),
+            ("calls.sh", "shell", "out=\"$(audit_target api)\"\n"),
+            (
+                "calls.m",
+                "objc",
+                "int run(id s) { return [s audit_target:1]; }\n",
+            ),
+            (
+                "calls.cpp",
+                "cpp",
+                "auto run() { return new ns::audit_target<int>(1); }\n",
+            ),
+            (
+                "calls.php",
+                "php",
+                "<?php $s = new \\App\\audit_target(1);\n",
+            ),
+            (
+                "calls.php",
+                "php",
+                "<?php $s = \"v {$this->audit_target()}\";\n",
+            ),
+            (
+                "calls.php",
+                "php",
+                "<?php $s = <<<EOT\n{$this->audit_target()}\nEOT;\n",
+            ),
+            (
+                "Calls.scala",
+                "scala",
+                "object B { def run() = new a.audit_target(1) }\n",
+            ),
+            (
+                "calls.dart",
+                "dart",
+                "run() { return new audit_target<int>(1); }\n",
+            ),
+            (
+                "calls.dart",
+                "dart",
+                "run() { return const audit_target(); }\n",
+            ),
+        ] {
+            let lines = relationship_lines(path, language, source);
+            assert!(
+                matches!(lines[..], [(_, true)]),
+                "{language} {source}: {lines:?}"
+            );
+        }
+        for (path, language, source) in [
+            ("calls.sh", "shell", "echo audit_target\n"),
+            (
+                "calls.m",
+                "objc",
+                "void run(id s) { [s other:audit_target]; }\n",
+            ),
+            (
+                "calls.cpp",
+                "cpp",
+                "auto run() { return new other(audit_target); }\n",
+            ),
+        ] {
+            assert_eq!(
+                relationship_lines(path, language, source),
+                [(1, false)],
+                "{language} {source}"
+            );
+        }
+        for (path, language, source) in [
+            ("calls.sh", "shell", "out=\"audit_target\"\n"),
+            ("calls.php", "php", "<?php $s = \"audit_target() {$x}\";\n"),
+        ] {
+            assert!(
+                relationship_lines(path, language, source).is_empty(),
+                "{language} {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn positional_declaration_names_are_not_references() {
+        for (path, language, declaration, reference) in [
+            (
+                "a.c",
+                "c",
+                "struct audit_target { int v; };",
+                "struct audit_target *p;",
+            ),
+            (
+                "a.c",
+                "c",
+                "struct audit_target;",
+                "int n = sizeof(struct audit_target);",
+            ),
+            (
+                "a.c",
+                "c",
+                "enum audit_target { A };",
+                "enum audit_target kind;",
+            ),
+            (
+                "a.cpp",
+                "cpp",
+                "class audit_target { int v; };",
+                "audit_target *p;",
+            ),
+            (
+                "a.cpp",
+                "cpp",
+                "struct ns::audit_target { int v; };",
+                "template <> struct hash<audit_target> { int v; };",
+            ),
+            (
+                "a.m",
+                "objc",
+                "@interface audit_target\n- (int)audit_target:(int)x;\n@end",
+                "audit_target *p;",
+            ),
+            (
+                "a.hs",
+                "haskell",
+                "audit_target :: Int -> Int",
+                "run = audit_target",
+            ),
+            (
+                "a.hs",
+                "haskell",
+                "module App.Audit_target where",
+                "run = audit_target",
+            ),
+        ] {
+            assert!(
+                relationship_lines(path, language, &format!("{declaration}\n")).is_empty(),
+                "{language} {declaration}"
+            );
+            let line = declaration.lines().count() + 1;
+            assert_eq!(
+                relationship_lines(path, language, &format!("{declaration}\n{reference}\n")),
+                [(line, false)],
+                "{language} {reference}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn callers_cross_related_languages_only() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        for (path, text) in [
+            ("util.h", "inline int add_one(int x) { return x + 1; }\n"),
+            ("main.cpp", "int main() { return add_one(1); }\n"),
+            (
+                "lib.ts",
+                "export function fmt_value(x: number) { return x; }\n",
+            ),
+            ("use.js", "function go() { return fmt_value(1); }\n"),
+            (
+                "use.py",
+                "def go():\n    return fmt_value(1) + add_one(1)\n",
+            ),
+        ] {
+            std::fs::write(root.path().join(path), text).unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+        for (symbol, caller) in [("add_one", "main.cpp"), ("fmt_value", "use.js")] {
+            for mode in [SymbolSearchMode::Callers, SymbolSearchMode::References] {
+                let hits = search_symbols(&workspace, symbol, mode, None, None).unwrap();
+                let paths = hits.iter().map(|hit| hit.file_path.as_path());
+                assert_eq!(
+                    paths.collect::<Vec<_>>(),
+                    [Path::new(caller)],
+                    "{symbol} {mode:?}"
+                );
+            }
         }
     }
 
