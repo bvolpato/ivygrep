@@ -393,6 +393,44 @@ fn lexical_filename_output_preserves_the_explicit_retrieval_limit() {
 }
 
 #[test]
+fn enumerating_file_limit_counts_files_beside_a_file_with_many_hits() {
+    let tmp = temporary_directory();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let dense = (0..40)
+        .map(|i| format!("def timer_{i}():\n    return timer({i}) + timer()\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(root.join("timer.py"), dense).unwrap();
+    for name in ["u", "v", "w", "x", "y"] {
+        std::fs::write(
+            root.join(format!("{name}.py")),
+            format!("def job_{name}(value):\n    log(value)\n    return timer(value)\n"),
+        )
+        .unwrap();
+    }
+    run(
+        &home,
+        &root,
+        &["--add", ".", "--hash", "--no-watch", "--json"],
+    );
+    let check = || {
+        for mode in ["--regex", "--refs", "--callers"] {
+            let mut args = vec![mode, "--no-watch", "--json", "-n", "5", "timer"];
+            let files = result_paths(&run(&home, &root, &args));
+            assert_eq!(files.len(), 5, "{mode}: {files:?}");
+            args.push("--file-name-only");
+            let names: Vec<PathBuf> = serde_json::from_value(run(&home, &root, &args)).unwrap();
+            assert_eq!(names.len(), 5, "{mode}: {names:?}");
+        }
+    };
+    check();
+    let _daemon = start_daemon(&home, &root);
+    check();
+}
+
+#[test]
 fn filename_searches_deduplicate_overlapping_workspaces_before_limiting_files() {
     let temporary = temporary_directory();
     let home = temporary.path().join("home");
