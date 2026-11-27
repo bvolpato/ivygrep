@@ -1,3 +1,6 @@
+# "irm | iex" runs this file in the caller's scope. The script block keeps the
+# preferences, strict mode, functions, and variables out of the user's session.
+& {
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -166,6 +169,10 @@ try {
 
     Write-Host "Installed ivygrep $tag to $installDir\ig.exe"
     & (Join-Path $installDir "ig.exe") --version
+} catch {
+    # Only a thrown error also stops a caller that does not use "Stop".
+    throw
 } finally {
     Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 }
