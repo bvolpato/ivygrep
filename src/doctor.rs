@@ -196,7 +196,7 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
     if let Some(record) = watcher_status.record.as_ref()
         && record
             .details
-            .get("coalesced_events")
+            .get("pending_events")
             .and_then(|value| value.parse::<u64>().ok())
             .is_some_and(|value| value >= 32)
     {
@@ -496,22 +496,27 @@ mod tests {
         let _ = crate::jobs::start_job(&workspace, crate::jobs::JobKind::Watcher, "dirty", 1);
         let mut ledger: serde_json::Value =
             serde_json::from_slice(&std::fs::read(workspace.job_ledger_path()).unwrap()).unwrap();
+        // The count of coalesced events covers the life of the watcher.
         ledger["jobs"][0]["details"]["coalesced_events"] = serde_json::json!("64");
-        std::fs::write(
-            workspace.job_ledger_path(),
-            serde_json::to_vec_pretty(&ledger).unwrap(),
-        )
-        .unwrap();
+        for (pending, reported) in [("64", true), ("0", false)] {
+            ledger["jobs"][0]["details"]["pending_events"] = serde_json::json!(pending);
+            std::fs::write(
+                workspace.job_ledger_path(),
+                serde_json::to_vec_pretty(&ledger).unwrap(),
+            )
+            .unwrap();
 
-        let report = inspect_workspace(&workspace);
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|finding| finding.contains("heavy burst of filesystem events")),
-            "expected watcher coalescing finding, got {:#?}",
-            report.findings
-        );
+            let report = inspect_workspace(&workspace);
+            assert_eq!(
+                report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.contains("heavy burst of filesystem events")),
+                reported,
+                "{pending} pending events: {:#?}",
+                report.findings
+            );
+        }
     }
 
     #[test]

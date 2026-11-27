@@ -1647,7 +1647,10 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         let mut names = if is_test {
             likely_test_subject_names(&hit.preview)
         } else {
-            likely_definition_names(&hit.preview)
+            likely_definition_names(
+                &hit.preview,
+                crate::chunking::language_for_path(&hit.file_path).unwrap_or_default(),
+            )
         };
         let mut seen_names = HashSet::new();
         names.retain(|name| seen_names.insert(name.clone()));

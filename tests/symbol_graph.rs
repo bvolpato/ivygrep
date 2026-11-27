@@ -655,6 +655,12 @@ fn qualified_symbol_lookups_filter_by_owner() {
     )
     .unwrap();
 
+    fs::write(
+        root.path().join("core.clj"),
+        "(ns core)\n\n(defn gearbox->method [x] x)\n\n(defn string->int [s] (Integer/parseInt s))\n\n(defn int [x] x)\n",
+    )
+    .unwrap();
+
     let workspace = index(root.path(), home.path());
     let definitions = |symbol: &str| {
         search_symbols(
@@ -684,6 +690,11 @@ fn qualified_symbol_lookups_filter_by_owner() {
     let gearbox = definitions("Gearbox->method");
     assert_eq!(gearbox.len(), 1, "{gearbox:?}");
     assert_eq!(gearbox[0].start_line, 7);
+
+    // The complete name of a Clojure function can contain the member arrow.
+    let arrow = definitions("string->int");
+    assert_eq!(arrow.len(), 1, "{arrow:?}");
+    assert_eq!(arrow[0].start_line, 5);
 
     // Case-insensitive owner matches rank after exact ones but still filter.
     let folded = definitions("gearbox.method");
