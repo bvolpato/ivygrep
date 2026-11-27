@@ -509,6 +509,8 @@ impl ApiRepo {
             .error_for_status()?;
         let content = response.bytes().await?;
         file.write_all(&content).await?;
+        // A Tokio file can still have a pending write when `write_all` returns.
+        file.flush().await?;
         Ok(())
     }
 
