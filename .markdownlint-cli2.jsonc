@@ -8,9 +8,11 @@
       "allowed_elements": [
         "a",
         "br",
+        "details",
         "img",
         "p",
-        "strong"
+        "strong",
+        "summary"
       ]
     },
     "MD041": false
