@@ -926,6 +926,11 @@ MCP returns `null` counts and readiness. Text and Web status show that statistic
 are temporarily unavailable instead of interpreting placeholders as an empty
 index or complete coverage.
 
+A worker process renews its job record from its start, also while a guard holds
+it back or it waits for a place. The record names the lane, the PID, and the
+start time of the process. A later process with the same PID is therefore not
+mistaken for the worker.
+
 The split of the SQLite store into stored chunks, graph, and auxiliary bytes
 comes from `dbstat`, which reads every page of the store. A status listing
 therefore measures it only for a store up to 256 MiB, and leaves the three

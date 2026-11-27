@@ -116,7 +116,7 @@ pub struct WorkspaceStatus {
     pub watch_enabled: bool,
     #[serde(default)]
     pub watcher_alive: bool,
-    /// Last watcher start failure recorded in the job ledger while offline.
+    /// Why the watcher is offline, or why its updates fail while it is alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_error: Option<String>,
     /// Counts, coverage, and compaction are unmeasured when true. Ignore their
@@ -782,17 +782,34 @@ impl Workspace {
     /// Checks if an enhancement process is currently running for this workspace.
     pub fn is_enhancing_active(&self) -> bool {
         let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
-        status.active() || is_active_pid_alive(&self.enhancing_pid_path())
+        status.active() || self.enhancement_pid_owner(&status).is_some()
     }
 
     /// Pid of the live background worker of this workspace, whether it runs
     /// or still waits for a place among the running workers.
     pub(crate) fn enhancement_worker_pid(&self) -> Option<u32> {
+        self.enhancement_pid_owner(&jobs::job_status(
+            self,
+            JobKind::Enhancement,
+            ENHANCEMENT_HEARTBEAT_TTL_SECS,
+        ))?
+    }
+
+    /// Whether a live worker owns the PID file, and its PID once the file
+    /// names it. The job record also holds the start time of the worker, so a
+    /// later process with the same PID is not mistaken for it.
+    fn enhancement_pid_owner(&self, status: &jobs::JobStatus) -> Option<Option<u32>> {
         let pid_path = self.enhancing_pid_path();
         if !is_active_pid_alive(&pid_path) {
             return None;
         }
-        fs::read_to_string(pid_path).ok()?.trim().parse().ok()
+        let pid = fs::read_to_string(pid_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok());
+        let reused = !status.process_alive
+            && pid.is_some()
+            && status.record.as_ref().and_then(|record| record.pid) == pid;
+        (!reused).then_some(pid)
     }
 
     /// Checks whether hash vectors or their deletion journals lag the lexical index.
@@ -832,7 +849,14 @@ impl Workspace {
     pub fn needs_neural_enhancement(&self) -> bool {
         let enhancement_status =
             jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
-        if enhancement_status.active() {
+        // A hash worker leaves the neural work to a later worker.
+        if enhancement_status.active()
+            && !enhancement_status
+                .record
+                .as_ref()
+                .and_then(|record| record.details.get(jobs::WORKER_LANE_DETAIL))
+                .is_some_and(|lane| lane == crate::indexer::WorkerLane::Hash.name())
+        {
             return false;
         }
 
@@ -1081,12 +1105,19 @@ impl Workspace {
         // requests in parallel) don't race on a shared temp file.
         let path = self.metadata_path();
         let tmp = path.with_file_name(format!("workspace.json.tmp.{}", uuid::Uuid::new_v4()));
-        fs::write(&tmp, data)?;
-        if let Err(err) = fs::rename(&tmp, &path) {
+        let mut attempts = 0;
+        loop {
+            fs::write(&tmp, &data)?;
+            let Err(err) = fs::rename(&tmp, &path) else {
+                return Ok(());
+            };
             let _ = fs::remove_file(&tmp);
-            return Err(err.into());
+            attempts += 1;
+            // A removal of the index in another process took the temporary file.
+            if err.kind() != std::io::ErrorKind::NotFound || attempts == 5 {
+                return Err(err.into());
+            }
         }
-        Ok(())
     }
 
     pub fn read_metadata(&self) -> Result<Option<WorkspaceMetadata>> {
@@ -1933,14 +1964,11 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         } else {
             is_active_pid_alive(&index_dir.join(".watcher.pid"))
         };
-        let watcher_error = (!watcher_alive)
-            .then(|| {
-                watcher_status
-                    .record
-                    .as_ref()
-                    .and_then(|record| record.last_error.clone())
-            })
-            .flatten();
+        // A live watcher keeps the error of an update until one succeeds.
+        let watcher_error = watcher_status
+            .record
+            .as_ref()
+            .and_then(|record| record.last_error.clone());
 
         let enhancement_status = jobs::job_status_at(
             &ledger,
@@ -2104,15 +2132,22 @@ pub fn list_workspace_roots() -> Result<Vec<PathBuf>> {
 }
 
 pub(crate) fn list_indexed_workspace_roots() -> Result<(Vec<PathBuf>, Vec<String>)> {
-    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
-    let roots = entries
-        .into_iter()
-        .filter(|(_, metadata)| metadata.last_indexed_at_unix.is_some())
-        .map(|(_, metadata)| (metadata.id, metadata.root))
-        .collect::<BTreeMap<_, _>>()
-        .into_values()
-        .collect();
-    Ok((roots, warnings))
+    let WorkspaceRegistry {
+        entries,
+        mut warnings,
+    } = workspace_registry()?;
+    let mut roots = BTreeMap::new();
+    for (_, metadata) in entries {
+        if metadata.last_indexed_at_unix.is_some() {
+            roots.insert(metadata.id, metadata.root);
+        } else if !root_is_gone(&metadata.root) {
+            warnings.push(format!(
+                "{} was not searched: its index is not complete",
+                metadata.root.display()
+            ));
+        }
+    }
+    Ok((roots.into_values().collect(), warnings))
 }
 
 fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
@@ -2705,6 +2740,83 @@ mod tests {
 
     use super::*;
     use serial_test::serial;
+
+    fn indexed_status_workspace() -> (tempfile::TempDir, tempfile::TempDir, Workspace) {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        for name in ["first", "second"] {
+            fs::write(
+                root.path().join(format!("{name}.rs")),
+                format!("pub fn {name}_status_marker() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::create_hash_model();
+        crate::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
+        (home, root, workspace)
+    }
+
+    #[test]
+    #[serial]
+    fn status_reports_a_failing_update_of_a_live_watcher() {
+        let (_home, _root, workspace) = indexed_status_workspace();
+        jobs::start_job(&workspace, JobKind::Watcher, "idle", 1).unwrap();
+        let update = |phase: &str, error: Option<&str>| {
+            jobs::heartbeat_job(
+                &workspace,
+                JobKind::Watcher,
+                jobs::JobUpdate {
+                    phase: Some(phase.to_string()),
+                    last_error: Some(error.map(str::to_string)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let status = list_workspaces().unwrap().pop().unwrap();
+            assert!(status.watcher_alive);
+            status.watcher_error
+        };
+        assert_eq!(update("idle", None), None);
+        // A retry runs under another phase while the failure lasts.
+        for phase in ["error", "indexing"] {
+            assert_eq!(
+                update(phase, Some("permission denied")).as_deref(),
+                Some("permission denied")
+            );
+        }
+        assert_eq!(update("idle", None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn enhancement_pid_of_another_process_is_not_a_worker() {
+        let (_home, _root, workspace) = indexed_status_workspace();
+        jobs::start_job(&workspace, JobKind::Enhancement, "running", 1).unwrap();
+        let pid = std::process::id();
+        fs::write(workspace.enhancing_pid_path(), pid.to_string()).unwrap();
+        assert_eq!(workspace.enhancement_worker_pid(), Some(pid));
+        assert!(workspace.is_enhancing_active());
+
+        // The worker died, and the system gave its PID to this process.
+        let mut ledger = jobs::read_job_ledger(&workspace);
+        for job in &mut ledger.jobs {
+            job.pid_start_time = Some("another start time".to_string());
+        }
+        fs::write(
+            workspace.job_ledger_path(),
+            serde_json::to_vec(&ledger).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(workspace.enhancement_worker_pid(), None);
+        assert!(!workspace.is_enhancing_active());
+
+        // A worker that has not written its record yet is alive.
+        jobs::finish_job(&workspace, JobKind::Enhancement, "completed", None).unwrap();
+        assert_eq!(workspace.enhancement_worker_pid(), Some(pid));
+    }
 
     #[test]
     #[serial]
