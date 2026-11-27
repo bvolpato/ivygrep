@@ -1094,7 +1094,7 @@ impl WatchEventFilter {
     fn checkout_marker_change(
         &mut self,
         event: &notify::Event,
-        ignore: &mut Option<ignore::IncrementalIgnore>,
+        ignore: &mut Option<crate::walker::SourceIgnore>,
     ) -> CheckoutMarkerChange {
         use notify::EventKind;
         use notify::event::ModifyKind;
@@ -1185,26 +1185,25 @@ impl WatchEventFilter {
         &self,
         rel: &Path,
         is_dir: bool,
-        ignore: &mut Option<ignore::IncrementalIgnore>,
+        ignore: &mut Option<crate::walker::SourceIgnore>,
     ) -> bool {
         let Some(builder) = &self.ignore_builder else {
             return false;
         };
-        let matcher = ignore.get_or_insert_with(|| crate::walker::source_ignore_matcher(builder));
-        let (matched, error) = matcher.matched_with_errors(rel, is_dir);
-        if error.is_some_and(|error| !crate::walker::is_ignore_pattern_warning(&error)) {
+        let matcher =
+            ignore.get_or_insert_with(|| crate::walker::SourceIgnore::new(builder, false));
+        matcher.ignores(rel, is_dir).unwrap_or_else(|_| {
             // A failed read cannot establish that this event is safe to drop.
             *ignore = None;
-            return false;
-        }
-        matched.is_ignore()
+            false
+        })
     }
 
     fn path_to_reindex(
         &self,
         path: &Path,
         kind: notify::EventKind,
-        ignore: &mut Option<ignore::IncrementalIgnore>,
+        ignore: &mut Option<crate::walker::SourceIgnore>,
     ) -> Option<PathBuf> {
         use notify::EventKind;
         use notify::event::{CreateKind, RemoveKind};
@@ -12157,6 +12156,36 @@ mod tests {
             matches!(filter.change_for_event(&event), WatchChange::Paths(paths)
             if paths == HashSet::from([PathBuf::from("new.rs")]))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn watch_events_skip_git_rules_above_a_repository() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("repository");
+        for directory in ["objects", "refs"] {
+            std::fs::create_dir_all(root.join(".git").join(directory)).unwrap();
+        }
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(parent.path().join(".gitignore"), "*\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.env\n").unwrap();
+        // Git does not take this directory for a repository.
+        std::fs::create_dir_all(root.join("nested/.git")).unwrap();
+        let workspace = Workspace::resolve(&root).unwrap();
+        let filter = WatchEventFilter::new(&workspace);
+        for (path, reindexed) in [
+            ("new.rs", true),
+            ("nested/new.rs", true),
+            ("nested/new.env", false),
+        ] {
+            assert_eq!(
+                filter.path_should_reindex(&workspace.root.join(path)),
+                reindexed,
+                "{path}"
+            );
+        }
     }
 
     #[test]

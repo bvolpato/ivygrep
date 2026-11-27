@@ -2898,7 +2898,9 @@ fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
 ///
 /// The walker does not enter a separate checkout below a Git workspace, so a
 /// workspace at or below a linked worktree or a nested clone is not a
-/// conflict. A target that is not a Git checkout keeps everything below it.
+/// conflict. It enters a submodule, but a search in a submodule always uses the
+/// index of the submodule, so that one is not a conflict either. A target that
+/// is not a Git checkout keeps everything below it.
 fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut below = workspace_roots
         .into_iter()
@@ -2907,9 +2909,15 @@ fn nested_workspace_conflicts(target_root: &Path, workspace_roots: Vec<PathBuf>)
     if below.peek().is_none() {
         return Vec::new();
     }
-    let nested_checkouts = crate::workspace::NestedCheckouts::new(target_root);
+    use crate::workspace::{NestedCheckouts, is_git_workspace_root};
+
+    let nested_checkouts = NestedCheckouts::new(target_root);
+    let is_git_target = is_git_workspace_root(target_root);
     below
-        .filter(|root| !nested_checkouts.contains(target_root, root))
+        .filter(|root| {
+            !(is_git_target && is_git_workspace_root(root))
+                && !nested_checkouts.contains(target_root, root)
+        })
         .collect()
 }
 
@@ -3122,10 +3130,10 @@ mod tests {
         registered.extend([root.clone(), tmp.path().join("sibling")]);
 
         // The walker stops at the nested clone, so it reaches nothing below
-        // it. It enters a plain directory and a submodule.
+        // it. It enters a plain directory. A submodule has its own index.
         assert_eq!(
             nested_workspace_conflicts(&root, registered.clone()),
-            [root.join("docs"), root.join("vendor/lib")]
+            [root.join("docs")]
         );
 
         // A root that is not a Git checkout keeps everything below it.
