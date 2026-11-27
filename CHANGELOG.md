@@ -61,6 +61,7 @@ All notable changes to ivygrep are documented in this file.
 - `ig agent install` and `ig agent doctor` use the configuration file that `CODEX_HOME` or `CLAUDE_CONFIG_DIR` selects. An empty `IVYGREP_AGENT_HOME` no longer writes the file into the current directory.
 - `ig agent install` accepts a JSON config with a UTF-8 byte order mark and an inline `mcp_servers` table in the Codex config. An unreadable config error names the file. `ig agent doctor` fails when a detected client has an invalid config, instead of reporting a healthy setup.
 - `ig agent doctor` checks a Cursor config that has comments or trailing commas. `ig agent install cursor` does not edit that config and shows the entry to set by hand.
+- `-n` limits result files, not matches, in CLI regex, reference, and caller searches. One file with many matches could use the whole limit. These searches read 20 matches per requested file, from 200 to 1,000 in total, so a file with more matches can still hide later files.
 - C++ and Objective-C declarations in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
 - R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
 - A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
