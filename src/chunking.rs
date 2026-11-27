@@ -487,6 +487,15 @@ pub fn resolve_type_alias(input: &str) -> Option<&'static str> {
     Some(alias)
 }
 
+/// [`resolve_type_alias`] for a filter that a user or a client supplied.
+pub(crate) fn require_type_alias(input: &str) -> anyhow::Result<&'static str> {
+    resolve_type_alias(input).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown type {input:?}: use one language name, extension, or alias, such as rust, py, or md"
+        )
+    })
+}
+
 pub fn is_indexable_path(path: &Path) -> bool {
     language_for_path(path).is_some()
 }

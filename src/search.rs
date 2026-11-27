@@ -45,11 +45,8 @@ mod presentation;
 #[path = "search_semantic_visibility.rs"]
 mod semantic_visibility;
 
-pub(crate) use boolean::BOOLEAN_NOT_APPLIED_WARNING;
-use boolean::{
-    BooleanSearch, boolean_candidates, has_explicit_boolean_operators, lexical_query_parser,
-    parse_lexical_query,
-};
+pub(crate) use boolean::{BOOLEAN_NOT_APPLIED_WARNING, has_explicit_boolean_operators};
+use boolean::{BooleanSearch, boolean_candidates, lexical_query_parser, parse_lexical_query};
 use eligibility::CandidateEligibility;
 use file_cache::{CachedFileContent, FileContentCache};
 use semantic_visibility::{refill_semantic_matches, score_constrained_semantic_keys};
@@ -189,8 +186,8 @@ impl SearchOptions {
     /// Return the language filter in the canonical form stored by the index.
     ///
     /// Search options can come from raw Web/MCP requests, which accept file
-    /// extensions and aliases (for example, `rs`). Unknown filters stay
-    /// unchanged so they retain their existing no-match behavior.
+    /// extensions and aliases (for example, `rs`). Unknown filters, which the
+    /// Web API accepts, stay unchanged and match nothing.
     pub(crate) fn canonical_type_filter(&self) -> Option<String> {
         self.type_filter.as_deref().map(|filter| {
             crate::chunking::resolve_type_alias(filter)
@@ -1002,7 +999,7 @@ pub(crate) fn literal_file_search_with_context(
             _,
         ) => literal::FileSearchMode::FilesWithPreviews {
             file_limit: file_limit.min(MAX_SEARCH_RESULT_LIMIT),
-            hits_per_file: hits_per_file.clamp(1, crate::protocol::MAX_HITS_PER_FILE),
+            hits_per_file: hits_per_file.clamp(1, MAX_SEARCH_RESULT_LIMIT),
         },
         _ => literal::FileSearchMode::Files,
     };
@@ -1729,6 +1726,10 @@ fn literal_queries_allow_incremental_verification(queries: &[String]) -> bool {
     })
 }
 
+/// Longest literal that gets one relaxed variant per term. Their size grows with
+/// the square of the term count, and a pasted prompt has hundreds of terms.
+const MAX_RELAXED_LITERAL_TERMS: usize = 24;
+
 fn literal_candidate_query(
     fields: &TantivyFields,
     query: &str,
@@ -1754,6 +1755,13 @@ fn literal_candidate_query(
         if terms.len() == 2 {
             variants.push(vec![0]);
             variants.push(vec![1]);
+        } else if terms.len() > MAX_RELAXED_LITERAL_TERMS {
+            // Only the first and the last term of an exact substring can be
+            // part of a longer indexed term.
+            let last = terms.len() - 1;
+            variants.push((1..=last).collect());
+            variants.push((0..last).collect());
+            variants.push((1..last).collect());
         } else if terms.len() > 2 {
             for skipped in 0..terms.len() {
                 variants.push(
@@ -3054,9 +3062,17 @@ fn should_use_conjunctive_numeric_query(query_text: &str) -> bool {
             == 1
 }
 
+/// Longest query variant matched as an exact substring. The matcher compiles
+/// every variant into one regex, whose size limit a pasted file would exceed.
+const MAX_LITERAL_QUERY_BYTES: usize = 16 * 1024;
+
 fn build_literal_queries(query_text: &str, lexical_queries: &[String]) -> Vec<String> {
     if should_run_literal_pass(query_text) {
-        return lexical_queries.to_vec();
+        return lexical_queries
+            .iter()
+            .filter(|query| query.len() <= MAX_LITERAL_QUERY_BYTES)
+            .cloned()
+            .collect();
     }
 
     let primary = tokenize_query(query_text);
@@ -8936,6 +8952,107 @@ mod tests {
                 "{query}: {hits:?}"
             );
         }
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_without_ascii_terms_ranks_files_and_limits_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("a.md"), "認証\n".repeat(60)).unwrap();
+        std::fs::write(tmp.path().join("b.md"), "認証\n".repeat(150)).unwrap();
+        std::fs::write(tmp.path().join("c.py"), "def 認証(user):\n    pass\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let ranked = |limit: Option<usize>| {
+            let options = SearchOptions {
+                limit,
+                ..SearchOptions::default()
+            };
+            let hits = hybrid_search(&workspace, "認証", Some(&model), &options).unwrap();
+            if let Some(limit) = limit {
+                assert!(hits.len() <= limit, "{limit}: {hits:?}");
+            }
+            let files = crate::protocol::group_hits_by_file(&hits, None)
+                .into_iter()
+                .map(|file| file.file_path)
+                .collect::<Vec<_>>();
+            (files, hits.len())
+        };
+        let expected = ["b.md", "a.md", "c.py"].map(PathBuf::from);
+        assert_eq!(ranked(Some(2)).0, expected[..2]);
+        // A full limit marks counts as lower bounds. Below it, no match is missing.
+        assert_eq!(ranked(None), (expected.to_vec(), DEFAULT_SEARCH_LIMIT));
+        assert_eq!(ranked(Some(1_000)), (expected.to_vec(), 211));
+        assert_eq!(ranked(Some(usize::MAX)), (expected.to_vec(), 211));
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_returns_a_line_range_once_for_overlapping_chunks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("blueprint.py"),
+            "class Blueprint:\n    def register(self):\n        return url_for(self)\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let options = SearchOptions {
+            context: 0,
+            ..SearchOptions::default()
+        };
+        let hits = hybrid_search(&workspace, "url_for", None, &options).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.start_line, hit.end_line))
+                .collect::<Vec<_>>(),
+            [(3, 3)],
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn literal_pass_stays_bounded_for_long_prompts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let words = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    let letter = |value: usize| char::from(b'a' + (value % 26) as u8);
+                    format!("word{}{}", letter(index / 26), letter(index))
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // `traceback` routes to the literal pass, and the file continues the
+        // first and the last word of the pasted text.
+        let text = format!("{} traceback {}", words(40), words(60));
+        std::fs::write(tmp.path().join("prose.txt"), format!("x{text}x\n")).unwrap();
+        std::fs::write(tmp.path().join("other.txt"), "wordaa wordab\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let ctx = SearchContext::load(&workspace, None, false).unwrap();
+
+        let query = literal_candidate_query(&ctx.fields, &words(300), true).unwrap();
+        let variants = query.downcast_ref::<BooleanQuery>().unwrap().clauses();
+        assert!(variants.len() <= 4, "{} variants", variants.len());
+
+        let hits = hybrid_search(&workspace, &text, None, &SearchOptions::default()).unwrap();
+        assert_eq!(hits[0].file_path, PathBuf::from("prose.txt"));
+        assert!(hits[0].sources.contains(&"literal".to_string()), "{hits:?}");
+
+        let log = "wordaa wordab\n".repeat(20_000);
+        hybrid_search(&workspace, &log, None, &SearchOptions::default()).unwrap();
     }
 
     #[test]

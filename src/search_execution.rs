@@ -52,11 +52,7 @@ fn search_hits(
             .chars()
             .any(|character| character.is_ascii_alphanumeric())
     {
-        let literal_options = SearchOptions {
-            limit: options.limit.or(Some(DEFAULT_SEARCH_LIMIT)),
-            ..options.clone()
-        };
-        return literal_search_with_context(ctx, workspace, query_text, &literal_options);
+        return exact_substring_hits(ctx, workspace, query_text, options);
     }
 
     // Pasted error output: runtime values such as absolute paths and ids are
@@ -914,7 +910,85 @@ fn search_hits(
         file_count
     );
 
-    Ok(hits.into_iter().map(PreparedHit::into_hit).collect())
+    Ok(merge_repeated_spans(
+        hits.into_iter().map(PreparedHit::into_hit).collect(),
+    ))
+}
+
+/// Exact substring hits for a query without ASCII tokens. Files rank by matching
+/// lines, and every selected file gets a hit before a second hit of one file.
+fn exact_substring_hits(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    let limit = options.bounded_limit().unwrap_or(DEFAULT_SEARCH_LIMIT);
+    let output = if limit == usize::MAX {
+        LiteralSearchOutput::Files
+    } else {
+        // Callers read fewer hits than `limit` as a complete result, so only
+        // the limit may cut the hits of a file.
+        LiteralSearchOutput::FilesWithPreviews {
+            file_limit: limit,
+            hits_per_file: limit,
+        }
+    };
+    let literal_options = SearchOptions {
+        limit: Some(limit),
+        ..options.clone()
+    };
+    let files = literal_file_search_with_context(
+        ctx,
+        workspace,
+        query_text,
+        &literal_options,
+        output,
+        false,
+    )?;
+    Ok(files
+        .into_iter()
+        .flat_map(|file| {
+            // A merge of several workspaces orders hits by score, so further hits
+            // of a file follow the first hit of each file.
+            file.hits.into_iter().enumerate().map(move |(index, hit)| {
+                let score = if index == 0 {
+                    file.total_score
+                } else {
+                    file.total_score * 1e-6
+                };
+                SearchHit { score, ..hit }
+            })
+        })
+        .collect())
+}
+
+/// Keeps one hit per line range of a file. Overlapping chunks, such as a class
+/// and its method, can focus on the same line. The kept hit takes over the score
+/// of the dropped one, so the file keeps its total.
+fn merge_repeated_spans(hits: Vec<SearchHit>) -> Vec<SearchHit> {
+    let mut kept = Vec::<SearchHit>::with_capacity(hits.len());
+    let mut spans = HashMap::<(PathBuf, usize, usize), usize>::with_capacity(hits.len());
+    for hit in hits {
+        match spans.entry((hit.file_path.clone(), hit.start_line, hit.end_line)) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                kept[*entry.get()].score += hit.score;
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(kept.len());
+                kept.push(hit);
+            }
+        }
+    }
+    kept.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.end_line.cmp(&right.end_line))
+    });
+    kept
 }
 
 /// Fusion weight for a hash-vector match on a candidate that direct search
