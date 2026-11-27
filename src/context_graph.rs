@@ -257,11 +257,11 @@ pub(crate) fn extract_file_graph_with_trees(
         BTreeSet::new()
     };
     for related in likely_test_candidates(rel_path) {
-        if existing_workspace_file(root, snapshot, &related).is_some() {
+        if let Some(stored) = existing_workspace_file(root, snapshot, &related) {
             if path_looks_like_test(rel_path) {
-                insert_edge(&mut edges, &related, rel_path, FileEdgeKind::Test);
+                insert_edge(&mut edges, &stored, rel_path, FileEdgeKind::Test);
             } else {
-                insert_edge(&mut edges, rel_path, &related, FileEdgeKind::Test);
+                insert_edge(&mut edges, rel_path, &stored, FileEdgeKind::Test);
             }
         } else if late_bound_tests.contains(&related)
             && let Some(lookup_key) = late_bound_owner_lookup_key(rel_path)
@@ -1619,7 +1619,9 @@ fn first_go_package_file(
         .filter(|path| root.join(path).is_file() && is_go_package_file(path))
         .collect::<Vec<_>>();
     candidates.sort();
-    candidates.into_iter().next()
+    candidates
+        .iter()
+        .find_map(|path| existing_workspace_file(root, snapshot, path))
 }
 
 fn is_go_package_file(path: &Path) -> bool {
@@ -1682,11 +1684,13 @@ fn existing_workspace_file(
     relative: &Path,
 ) -> Option<PathBuf> {
     let normalized = normalize_relative_path(relative)?;
-    let exists = snapshot.map_or_else(
-        || root.join(&normalized).is_file(),
-        |snapshot| snapshot.files.contains_key(&index_path_string(&normalized)),
-    );
-    exists.then_some(normalized)
+    let Some(snapshot) = snapshot else {
+        return crate::workspace_file::stored_path(root, &normalized);
+    };
+    snapshot
+        .files
+        .contains_key(&index_path_string(&normalized))
+        .then_some(normalized)
 }
 
 fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
@@ -1716,10 +1720,10 @@ fn nearest_manifest(
     for directory in parent.ancestors() {
         for manifest in manifest_names_for_language(language) {
             let candidate = directory.join(manifest);
-            if candidate != rel_path
-                && existing_workspace_file(root, snapshot, &candidate).is_some()
+            if let Some(stored) = existing_workspace_file(root, snapshot, &candidate)
+                && stored != rel_path
             {
-                return Some(candidate);
+                return Some(stored);
             }
         }
         if language == "csharp"
@@ -2582,6 +2586,9 @@ pub(crate) fn expand_context_tests(
 }
 
 fn context_test_expansion(edge: RankedEdge, seeds: &BTreeSet<String>) -> Option<GraphExpansion> {
+    if !matches!(edge.kind, FileEdgeKind::Dependency | FileEdgeKind::Test) {
+        return None;
+    }
     let source = index_path_string(&edge.source_path);
     let target = index_path_string(&edge.target_path);
     let (test_path, seed_path) =
@@ -2592,6 +2599,10 @@ fn context_test_expansion(edge: RankedEdge, seeds: &BTreeSet<String>) -> Option<
         } else {
             return None;
         };
+    // A test imports helpers. It is not the code that they test.
+    if path_looks_like_test(&seed_path) {
+        return None;
+    }
     Some(GraphExpansion {
         file_path: test_path,
         seed_path,
@@ -2709,7 +2720,8 @@ pub(crate) fn overlay_shadowed_paths(workspace: &Workspace) -> HashSet<String> {
 }
 
 fn personalized_page_rank(edges: &[RankedEdge], seeds: &BTreeSet<String>) -> HashMap<String, f64> {
-    let mut adjacency = HashMap::<String, Vec<(String, f64)>>::new();
+    // Floating-point sums depend on their order, so nodes need a fixed order.
+    let mut adjacency = BTreeMap::<String, Vec<(String, f64)>>::new();
     for edge in edges {
         let source = index_path_string(&edge.source_path);
         let target = index_path_string(&edge.target_path);
@@ -2874,6 +2886,107 @@ mod tests {
 
     fn canonical_tempdir() -> tempfile::TempDir {
         tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn page_rank_is_identical_for_identical_edges() {
+        let edge = |source: &str, target: String| RankedEdge {
+            source_path: PathBuf::from(source),
+            target_path: PathBuf::from(target),
+            kind: FileEdgeKind::Dependency,
+            cochange_count: 0,
+        };
+        let mut edges = Vec::new();
+        for index in 0..20 {
+            edges.push(edge("left.rs", format!("{index}.rs")));
+            edges.push(edge("right.rs", format!("{}.rs", index * 7 % 20)));
+            edges.push(edge("top.rs", format!("{}.rs", index * 3 % 11)));
+        }
+        let seeds = ["left.rs", "right.rs", "top.rs"].map(String::from).into();
+        let ranks = || {
+            let mut ranks = personalized_page_rank(&edges, &seeds)
+                .into_iter()
+                .map(|(node, rank)| (node, rank.to_bits()))
+                .collect::<Vec<_>>();
+            ranks.sort();
+            ranks
+        };
+        let first = ranks();
+        for _ in 0..50 {
+            assert_eq!(ranks(), first);
+        }
+    }
+
+    #[test]
+    fn files_that_a_test_imports_are_not_its_tests() {
+        let expansion = |source: &str, target: &str, kind, seed: &str| {
+            context_test_expansion(
+                RankedEdge {
+                    source_path: PathBuf::from(source),
+                    target_path: PathBuf::from(target),
+                    kind,
+                    cochange_count: 0,
+                },
+                &BTreeSet::from([seed.to_string()]),
+            )
+            .map(|expansion| expansion.file_path)
+        };
+        let dependency = FileEdgeKind::Dependency;
+        let test = "tests/test_main.py";
+        assert_eq!(expansion(test, "tests/helpers.py", dependency, test), None);
+        assert_eq!(
+            expansion(
+                "tests/README.md",
+                "pkg/main.py",
+                FileEdgeKind::Documentation,
+                "pkg/main.py"
+            ),
+            None
+        );
+        assert_eq!(
+            expansion(test, "pkg/main.py", dependency, "pkg/main.py"),
+            Some(PathBuf::from(test))
+        );
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn live_edges_use_the_stored_spelling_of_a_path() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            ("app/Models/Invoice.php", "<?php\n"),
+            ("Composer.json", "{}\n"),
+            ("go.mod", "module example.com/m\n"),
+            ("internal/api/server.go", "package api\n"),
+            ("Tests/test_ledger.py", ""),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        if !root.path().join("APP").exists() {
+            return; // case-sensitive volume
+        }
+        for (source, content, expected) in [
+            (
+                "app/Controller.php",
+                "<?php\nuse App\\Models\\Invoice;\n",
+                &["Composer.json", "app/Models/Invoice.php"][..],
+            ),
+            (
+                "main.go",
+                "package main\n\nimport \"example.com/m/internal/API\"\n",
+                &["go.mod", "internal/api/server.go"][..],
+            ),
+            ("src/ledger.py", "", &["Tests/test_ledger.py"][..]),
+        ] {
+            let edges = extract_file_edges(root.path(), None, Path::new(source), content);
+            let targets = edges
+                .iter()
+                .map(|edge| edge.target_path.to_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(targets, expected.iter().copied().collect(), "{source}");
+        }
     }
 
     #[cfg(unix)]
@@ -4401,7 +4514,7 @@ const char *example = "\
     fn php_grouped_imports_resolve_each_owning_file() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("app/Acme/Util")).unwrap();
-        for owner in ["Auth", "Clock", "foo", "bar", "FOO", "BAR"] {
+        for owner in ["Auth", "Clock", "foo", "bar", "LIMIT", "RATE"] {
             fs::write(
                 root.path().join(format!("app/Acme/Util/{owner}.php")),
                 "<?php namespace Acme\\Util;\n",
@@ -4426,12 +4539,12 @@ const char *example = "\
                 &["foo", "bar"][..],
             ),
             (
-                "<?php\nuse const Acme\\Util\\{FOO, BAR};\n",
-                &["FOO", "BAR"][..],
+                "<?php\nuse const Acme\\Util\\{LIMIT, RATE};\n",
+                &["LIMIT", "RATE"][..],
             ),
             (
-                "<?php\nuse function Acme\\Util\\foo as release_foo;\nuse const Acme\\Util\\FOO;\n",
-                &["foo", "FOO"][..],
+                "<?php\nuse function Acme\\Util\\foo as release_foo;\nuse const Acme\\Util\\LIMIT;\n",
+                &["foo", "LIMIT"][..],
             ),
             (
                 "<?php\nuse Acme\\Util\\Auth, Acme\\Util\\Clock as ReleaseClock;\n",
@@ -4454,12 +4567,12 @@ const char *example = "\
                 &["Auth", "Clock"][..],
             ),
             (
-                "<?php\nuse function Acme\\Util\\foo, Acme\\Util\\bar;\nuse const Acme\\Util\\FOO, Acme\\Util\\BAR;\n",
-                &["foo", "bar", "FOO", "BAR"][..],
+                "<?php\nuse function Acme\\Util\\foo, Acme\\Util\\bar;\nuse const Acme\\Util\\LIMIT, Acme\\Util\\RATE;\n",
+                &["foo", "bar", "LIMIT", "RATE"][..],
             ),
             (
-                "<?php\nuse Acme\\Util\\{\n    Auth as ReleaseAuth,\n    function foo as release_foo,\n    const FOO,\n};\n",
-                &["Auth", "foo", "FOO"][..],
+                "<?php\nuse Acme\\Util\\{\n    Auth as ReleaseAuth,\n    function foo as release_foo,\n    const LIMIT,\n};\n",
+                &["Auth", "foo", "LIMIT"][..],
             ),
         ] {
             let edges =

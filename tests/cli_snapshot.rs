@@ -197,6 +197,9 @@ fn cli_does_not_index_the_home_directory_without_confirmation() {
     let ivygrep_home = tmp.path().join("ivygrep_home");
     std::fs::create_dir_all(&user_home).unwrap();
     std::fs::write(user_home.join("notes.rs"), "pub fn greeting() {}\n").unwrap();
+    let project = user_home.join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("lib.rs"), "pub fn project_fn() {}\n").unwrap();
     // The test has no terminal, so `ig` cannot ask.
     let ig = |args: &[&str]| {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
@@ -220,16 +223,27 @@ fn cli_does_not_index_the_home_directory_without_confirmation() {
 
     ig(&["greeting"]).assert().failure().stderr(refused());
     ig(&["--add"]).assert().failure().stderr(refused());
+    ig(&["--doctor", "--fix"])
+        .assert()
+        .failure()
+        .stderr(refused());
     assert!(!indexed(), "a refused command must not create an index");
 
     let found = predicates::str::contains("notes.rs");
     ig(&["--yes", "greeting"])
         .assert()
         .success()
-        .stdout(found.clone());
+        .stdout(found.clone())
+        .stderr(predicates::str::contains("First run").count(1));
     // An existing index of the home directory needs no confirmation.
     ig(&["greeting"]).assert().success().stdout(found);
     ig(&["--add"]).assert().success();
+    // A search of one directory leaves the index of the home directory alone.
+    ig(&["--skip-gitignore", "project_fn", "project"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("lib.rs"));
+    ig(&["--rm", "project"]).assert().success();
     // These rebuild the index, or add the ignored files to it.
     ig(&["--add", "--force"])
         .assert()
@@ -524,6 +538,71 @@ fn cli_first_line_only_text_output() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("pub fn calculate_tax"));
     assert!(!text.contains("amount * rate"));
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--first-line-only", "--json", "--literal", "calculate_tax"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let files: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let preview = files[0]["hits"][0]["preview"].as_str().unwrap();
+    assert!(
+        !preview.is_empty() && !preview.contains('\n'),
+        "{preview:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_rejects_unknown_type_filters() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+    for type_filter in ["not-a-language", "rs,py"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&target_root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args(["--type", type_filter, "tax"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(format!(
+                "unknown type {type_filter:?}"
+            )));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_reports_an_argument_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .arg(std::ffi::OsStr::from_bytes(b"caf\xe9"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("invalid UTF-8"));
+}
+
+#[test]
+#[serial]
+fn cli_status_reports_unreadable_workspace_metadata() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&target_root).unwrap();
+    workspace.ensure_dirs().unwrap();
+    std::fs::write(workspace.metadata_path(), "{").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .env("IVYGREP_HOME", &home)
+        .args(["--status", "--json"])
+        .assert()
+        .success()
+        .stdout("[]\n")
+        .stderr(predicates::str::contains(&workspace.id));
 }
 
 #[test]
@@ -2685,6 +2764,34 @@ fn cli_add_waits_for_hash_enhancement() {
 
 #[test]
 #[serial]
+fn cli_wait_for_enhancement_reports_a_failed_worker() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+    let add = || {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+        command
+            .current_dir(&target_root)
+            .env("IVYGREP_HOME", &home)
+            .args(["--add", "--no-watch", "."]);
+        command
+    };
+    add().env("IVYGREP_NO_AUTOSPAWN", "1").assert().success();
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&target_root).unwrap();
+    // The worker cannot record its result.
+    std::fs::create_dir(workspace.hash_enhanced_generation_path()).unwrap();
+
+    add()
+        .env_remove("IVYGREP_NO_AUTOSPAWN")
+        .env_remove("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT")
+        .arg("--wait-for-enhancement")
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("background enhancement failed"));
+}
+
+#[test]
+#[serial]
 fn cli_wait_for_enhancement_reports_a_queued_worker_and_finishes_once_a_place_frees() {
     use std::io::BufRead;
 
@@ -2953,6 +3060,109 @@ fn cli_prevent_nested_indexing() {
         "ig --rm {}",
         child.canonicalize().unwrap().display()
     )));
+}
+
+#[test]
+#[serial]
+fn cli_removes_the_index_of_a_registered_root_that_no_search_resolves_to() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let parent = root.join("parent");
+    let home = root.join("ivygrep_home");
+    for child in ["kept child", "deleted child"] {
+        std::fs::create_dir_all(parent.join(child)).unwrap();
+    }
+    let repository = root.join("repository");
+    init_git_repo(&repository);
+    std::fs::write(repository.join("lib.rs"), "pub fn base() {}\n").unwrap();
+    git_checked(&repository, &["config", "user.email", "test@example.com"]);
+    git_checked(&repository, &["config", "user.name", "Test"]);
+    git_checked(&repository, &["add", "."]);
+    git_checked(&repository, &["commit", "-qm", "init"]);
+    git_checked(&repository, &["worktree", "add", "-q", ".claude/agent"]);
+    let ig = |args: &[&std::ffi::OsStr]| {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+        command
+            .current_dir(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args(args);
+        command
+    };
+    let deleted = parent.join("deleted child");
+    let kept = parent.join("kept child");
+    ig(&["--add".as_ref(), kept.as_ref()]).assert().success();
+    ig(&["--add".as_ref(), deleted.as_ref()]).assert().success();
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let id = Workspace::resolve(&deleted).unwrap().id;
+    std::fs::remove_dir(&deleted).unwrap();
+
+    // Only the directory that still exists blocks an index of the parent.
+    ig(&["--add".as_ref(), "parent".as_ref()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("kept child"))
+        .stderr(predicates::str::contains("deleted child").not());
+    ig(&["--rm".as_ref(), kept.as_ref()]).assert().success();
+    ig(&["--add".as_ref(), "parent".as_ref()])
+        .assert()
+        .success();
+
+    let removed = ig(&[
+        "--rm".as_ref(),
+        "parent/deleted child".as_ref(),
+        "--json".as_ref(),
+    ])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let removed: serde_json::Value = serde_json::from_slice(&removed).unwrap();
+    assert_eq!(removed["removed"], id);
+    ig(&["--status".as_ref()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deleted child").not());
+
+    // `git worktree remove` takes away the `.git` file that marks a checkout.
+    ig(&["--add".as_ref(), "repository/.claude/agent".as_ref()])
+        .assert()
+        .success();
+    git_checked(&repository, &["worktree", "remove", ".claude/agent"]);
+    ig(&["--add".as_ref(), "repository".as_ref()])
+        .assert()
+        .success();
+    ig(&["--rm".as_ref(), "repository/.claude/agent".as_ref()])
+        .assert()
+        .success();
+
+    // A Git root above an indexed directory blocks that index until the
+    // directory is removed.
+    let nested = root.join("later/src");
+    std::fs::create_dir_all(&nested).unwrap();
+    ig(&["--add".as_ref(), nested.as_ref()]).assert().success();
+    init_git_repo(&root.join("later"));
+    ig(&["--add".as_ref(), "later".as_ref()]).assert().failure();
+    ig(&["--rm".as_ref(), nested.as_ref()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(nested.to_str().unwrap()));
+    ig(&["--add".as_ref(), "later".as_ref()]).assert().success();
+
+    for missing in [
+        "parent/never indexed",
+        "parent/deleted child",
+        "ivygrep_home",
+    ] {
+        ig(&["--rm".as_ref(), missing.as_ref(), "--json".as_ref()])
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(predicates::str::contains(format!(
+                "no saved index for {missing}"
+            )));
+    }
 }
 
 /// The walker keeps a linked worktree out of the index of the repository

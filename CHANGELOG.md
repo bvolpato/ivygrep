@@ -46,7 +46,6 @@ All notable changes to ivygrep are documented in this file.
 - Search works inside a Git submodule. A submodule, a clone made with `git clone --separate-git-dir`, and a linked worktree of either are standalone workspaces. ivygrep took their Git directory for the main checkout: every search in a submodule failed with `base index format incompatible`, and a separate Git directory was indexed as a workspace. When ivygrep rebuilds the checkout, it removes that index. An index of a submodule no longer prevents an index of its parent repository.
 - `.gitignore` and `info/exclude` rules above a Git repository no longer apply to its files, as in Git. A rule such as `*` or `.worktrees/**` in a directory above a repository or a linked worktree left its index empty. A submodule inside a workspace also stops the rules of its parent repository, except the `info/exclude` rules of a workspace whose root has a `.git` file. Its own `info/exclude` rules apply. `.ignore` files above a repository and all rules above a plain directory still apply. An index with such rules above its repository rebuilds on first use. The next `ig --add` adds the submodule files that rules of the parent hid.
 - C and C++ symbol lookups return definitions only. A mention such as `struct node *next` no longer counts as a definition of `node`, so a common type no longer hides its own definition. `typedef` and `using` names and C++ unions are found.
-- C++ classes and methods in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
 - Several definitions on one line, such as `int getA() { ... } int getB() { ... }`, are all found.
 - In C and C++ code that the grammar cannot parse because of a macro, types with a body are found. A `typedef` in such code can be missing.
 - Python module docstrings and imports no longer register words such as `provides` or `import` as symbols.
@@ -63,6 +62,46 @@ All notable changes to ivygrep are documented in this file.
 - `ig agent install` accepts a JSON config with a UTF-8 byte order mark and an inline `mcp_servers` table in the Codex config. An unreadable config error names the file. `ig agent doctor` fails when a detected client has an invalid config, instead of reporting a healthy setup.
 - `ig agent doctor` checks a Cursor config that has comments or trailing commas. `ig agent install cursor` does not edit that config and shows the entry to set by hand.
 - `-n` limits result files, not matches, in CLI regex, reference, and caller searches. One file with many matches could use the whole limit. These searches read 20 matches per requested file, from 200 to 1,000 in total, so a file with more matches can still hide later files.
+- C++ and Objective-C declarations in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
+- R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
+- A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
+- A source file of unmatched punctuation no longer takes minutes to index.
+- MCP `ig_search` no longer builds an index of the home directory, a directory that contains it, or the filesystem root. It also does not add ignored files to such an index. It returns an error that asks for a project path and names the `ig --add` command that builds the index on purpose. A healthy index of such a directory is searched as before.
+- MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
+- The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
+- MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
+- `--wait-for-enhancement` reports a failed neural worker and exits. Without a model, for example offline, it started a new worker without end and never returned.
+- `ig --rm PATH` removes the index of a directory that no longer exists, that a newer Git root contains, or that was renamed. It fails when PATH has no saved index. The index of a deleted directory, such as a removed Git worktree, no longer blocks an index of the directory above it.
+- A search, context, or MCP request for a path below an indexed plain directory uses that index with a path scope. It built a second index, and `ig --add` of the directory then failed. A second index is still built for an ignored directory, for a directory that the outer index does not have yet, while the outer index needs a rebuild, and below an index of the home directory or the filesystem root.
+- `ig --doctor --fix` rebuilds an index after an interrupted indexing run, also when `ig --doctor` ran first. It asks before it indexes a home directory or the filesystem root, and it applies the sub-workspace check to a first index.
+- `ig --doctor` reports an offline watcher, a failed background enhancement, and a daemon endpoint that no daemon answers.
+- `ig --add --json` and `ig --rm --json` print the same fields with and without a daemon. `--first-line-only` applies to `--json` output.
+- `--literal`, `--symbol`, `--refs`, `--callers`, and `--regex` search for the words `context`, `agent`, `hardware`, and `help`. Other searches for them need `--`, as in `ig -- context`.
+- `--since` accepts every valid branch name, such as `fix/issue#12`.
+- An unknown `--type`, or MCP `type`, is an error. It returned no results.
+- An argument that is not valid UTF-8 no longer causes a panic. Errors for an unusable data directory and for `ig --web` without a daemon name the cause. `ig --status` reports workspaces whose metadata it cannot read.
+- Text previews keep the indentation of their first line. A first index without a daemon prints its notice once.
+- Search, context packs, and MCP accept text in which a word and a colon precede a `*`, such as a Markdown list after `Steps to reproduce:` or `Access-Control-Allow-Origin: *`. Such a query failed with `The field does not exist`. A standalone `*` is punctuation and no longer matches every document.
+- A query with deeply nested parentheses or `NOT` operators no longer overflows the stack, which stopped the daemon for all its clients, or runs for minutes. Groups and `NOT` can nest up to six levels.
+- Multi-line and quoted prompts no longer use CPU time and memory that grow with the square of their length. A 3 KB prompt took more than 20 CPU seconds and 1 GB. Multi-line queries above 110 KB no longer fail with `Compiled regex exceeds size limit`.
+- Queries in CJK, Cyrillic, or Greek text rank files by matching lines and apply the limit to files. The first file in path order could use the whole limit.
+- Boolean operators also apply to notes. The memory probes of the daemon read them as text and returned notes that `NOT` excludes.
+- Boolean operands can be identifiers that the code tokenizer splits, such as `url_for`, `LocalProxy`, or `sha256`. They failed with `invalid or unsupported Boolean query`.
+- `--all` returns a hit once when tracked workspaces overlap. Hybrid, symbol, and regex searches returned it once per workspace and added the scores.
+- Hybrid results no longer repeat a line range of a file when overlapping chunks, such as a class and its method, focus on the same line.
+- Hybrid search no longer hides source files below directories whose name only ends in `build`, `target`, `dist`, or `vendor`, such as `internal/js/esbuild/` or `src/rebuild/`. The path check matched substrings. `_vendor/`, `.build/`, and `cmake-build*/` stay vendored and build trees.
+- A one-term lookup also returns up to three files of a build, distribution, or vendored tree when no other file has that name, definition, or text. They follow all other results. Such a lookup returned nothing or only the uses. Copies stay hidden beside the source.
+- Queries of three or more words return configuration and data files when nothing better matches. In a repository of YAML, JSON, or TOML files, or in a scope of such files, every match was filtered out.
+- A context pack for a stack trace or compiler message shows the line that the text names, also inside a function that does not fit into one item. A pack lists up to 32 named lines as references, or one for each 64 tokens of a smaller budget, and the first line of each file has priority. Up to three lines of a file become evidence, with the first and the last line of a file that has more.
+- Context packs resolve paths in `file://`, bundler, and local development server URLs, in diff headers, in workspaces whose path contains spaces, and with route segments (`[slug]`, `(group)`, `$id`) or non-ASCII names. A name without an extension, such as `Makefile:4`, resolves when the file exists.
+- Context packs do not mark production code as a test because it calls a function such as `split(` or `commit(`. That mark also replaced definitions with called names as anchors.
+- Up to 24 changed files can become evidence in a context pack that has room for them. Changed files that do not match the task stopped after the fourth one, and the pack was not marked as truncated.
+- Context packs are identical for the same task and index. The graph ranking added floating-point numbers in random order.
+- On a file system that ignores letter case or Unicode normalization, context packs use the stored spelling of a path. A PHP import such as `App\Models\Invoice` listed `app/Models/Invoice.php` twice under two names.
+- Context packs skip changed or named files that the indexer skips, such as binary and minified files, and read named files that are not valid UTF-8 as the indexer does.
+- Context items keep the indentation of their first line. Roles and reasons of symbols whose line is cut from an item are removed, and files that a test imports are not labeled as its tests.
+- A context pack closes a code fence that the task leaves open, so that the evidence stays outside the code block. A task with an uppercase `AND`, `OR`, or `NOT` that is not a valid Boolean expression is searched as text.
+- `ig context --since` reports that two histories have no merge base. The change list does not repeat a file that the working tree renamed, or report a deletion of a file that was only staged.
 - `ig --interactive` repeats the search when a first background index completes, and shows an indexing status until then. The indexer no longer prints progress over the screen.
 - The TUI searches again after you change a query and undo the change while its search runs.
 - The TUI file view reaches the end of files with wrapped lines or more than 65,535 lines, and opens with the hit on the screen. The selected snippet stays visible below wrapped snippets.

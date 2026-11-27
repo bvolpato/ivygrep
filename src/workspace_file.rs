@@ -31,6 +31,28 @@ pub(crate) fn open(root: &Path, path: &Path) -> io::Result<File> {
     regular_file(open_components(root, &components)?)
 }
 
+/// The name of a file as its directory stores it. A file system that ignores
+/// letter case or Unicode normalization opens other spellings, which are not
+/// paths in Git or in an index.
+pub(crate) fn stored_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let absolute = root.join(path);
+    if !absolute.is_file() {
+        return None;
+    }
+    // A symlink resolves to another name and keeps its own.
+    let linked = path
+        .ancestors()
+        .any(|name| !name.as_os_str().is_empty() && root.join(name).is_symlink());
+    let stored = absolute
+        .canonicalize()
+        .ok()
+        .zip(root.canonicalize().ok())
+        .filter(|_| !linked)
+        .and_then(|(file, root)| file.strip_prefix(root).ok().map(Path::to_path_buf));
+    let stored = stored.as_deref().unwrap_or(path);
+    Some(PathBuf::from(crate::workspace::index_path_string(stored)))
+}
+
 /// Names of `path` beneath `root`. An absolute `path` must start with `root`.
 fn relative_components<'a>(root: &Path, path: &'a Path) -> io::Result<Vec<&'a OsStr>> {
     let relative = if path.is_absolute() {

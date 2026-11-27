@@ -265,6 +265,15 @@ fn should_expand_memory_query(query: &str, hits: &[SearchHit], limit: Option<usi
             >= files.len() * 4
 }
 
+/// Whether the results obey Boolean operators. Memory probes embed the query in a
+/// sentence, where its operators would be read as text.
+fn is_boolean_request(query: &str, warnings: &[String]) -> bool {
+    crate::search::has_explicit_boolean_operators(query)
+        && !warnings
+            .iter()
+            .any(|warning| warning == crate::search::BOOLEAN_NOT_APPLIED_WARNING)
+}
+
 fn memory_query_variants(query: &str) -> [String; 2] {
     let query = query
         .char_indices()
@@ -1167,17 +1176,8 @@ impl WatchEventFilter {
         if fs2::FileExt::try_lock_shared(&index_lock).is_err() {
             return true;
         }
-        let first = format!("{}/", crate::workspace::index_path_string(rel_dir));
-        // `0` follows `/` in byte order, so this is every path with the prefix.
-        let past = format!("{}0", first.trim_end_matches('/'));
-        crate::indexer::open_sqlite_readonly(&self.workspace.sqlite_path())
-            .and_then(|sqlite| {
-                Ok(sqlite.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path >= ?1 AND file_path < ?2)",
-                    rusqlite::params![first, past],
-                    |row| row.get::<_, bool>(0),
-                )?)
-            })
+        self.workspace
+            .has_indexed_file_below(rel_dir)
             .unwrap_or(true)
     }
 
@@ -4370,12 +4370,15 @@ async fn run_index_request(
                         summary.total_chunks,
                         summary
                             .warning
+                            .as_ref()
                             .map(|warning| format!("; {warning}"))
                             .unwrap_or_default()
                     ),
+                    summary: Some(Box::new(summary)),
                 },
                 (Ok(()), None) => DaemonResponse::Ack {
                     message: "index already current; skipped redundant rescan".to_string(),
+                    summary: None,
                 },
             }
         }
@@ -4801,7 +4804,7 @@ async fn handle_request_with_cancellation(
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
-                let mut all_hits = Vec::new();
+                let mut all_hits = crate::search_service::WorkspaceHits::default();
                 let mut all_errors = workspace_warnings;
                 let mut successful_workspaces = 0usize;
                 let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
@@ -4943,13 +4946,7 @@ async fn handle_request_with_cancellation(
                     ) {
                         Ok(outcome) => {
                             successful_workspaces += 1;
-                            let mut hits = outcome.hits;
-                            if all_indices {
-                                for hit in &mut hits {
-                                    hit.file_path = workspace.root.join(&hit.file_path);
-                                }
-                            }
-                            all_hits.append(&mut hits);
+                            all_hits.add(&workspace.root, all_indices, outcome.hits);
                             // A warning about how the query was read is the
                             // same for every workspace. Like every entry here it
                             // keeps the results out of the query cache, which
@@ -4970,6 +4967,7 @@ async fn handle_request_with_cancellation(
                     }
                     tracing::trace!("daemon_search_hybrid={:?}", task_started.elapsed());
                 }
+                let mut all_hits = all_hits.into_hits();
                 all_hits.sort_by(|a, b| {
                     b.score
                         .partial_cmp(&a.score)
@@ -5045,6 +5043,7 @@ async fn handle_request_with_cancellation(
                 if !disable_memory_expansion
                     && !hash_only
                     && !force_neural
+                    && !is_boolean_request(&expansion_query, &errors)
                     && should_expand_memory_query(&expansion_query, &hits, limit)
                 {
                     let scope_is_file = expansion_options
@@ -5513,9 +5512,10 @@ async fn handle_request_with_cancellation(
             }
             DaemonResponse::Ack {
                 message: format!("cancellation requested for search {search_id}"),
+                summary: None,
             }
         }
-        DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
+        DaemonRequest::Remove { path } => match Workspace::resolve_for_removal(&path) {
             Ok(workspace) => {
                 let remove_state = state.clone();
                 match tokio::task::spawn_blocking(move || {
@@ -5539,6 +5539,7 @@ async fn handle_request_with_cancellation(
                 {
                     Ok(_leases) => DaemonResponse::Ack {
                         message: format!("removed workspace index {}", path.display()),
+                        summary: None,
                     },
                     Err(err) => DaemonResponse::Error {
                         message: err.to_string(),
@@ -5566,6 +5567,7 @@ async fn handle_request_with_cancellation(
                 if state.watcher_registered(&workspace.id) && workspace.is_watcher_alive() {
                     return DaemonResponse::Ack {
                         message: format!("already watching {}", workspace.root.display()),
+                        summary: None,
                     };
                 }
                 if let Some(error) = state.watcher_backoff_error(&workspace.id) {
@@ -5582,6 +5584,7 @@ async fn handle_request_with_cancellation(
                 });
                 DaemonResponse::Ack {
                     message: format!("restarting watcher for {}", path.display()),
+                    summary: None,
                 }
             }
             Err(err) => DaemonResponse::Error {
@@ -5600,6 +5603,7 @@ async fn handle_request_with_cancellation(
             });
             DaemonResponse::Ack {
                 message: "restarting".to_string(),
+                summary: None,
             }
         }
     }
@@ -8012,9 +8016,9 @@ mod tests {
         let model = create_hash_model();
         index_workspace(&workspace, model.as_ref()).unwrap();
 
-        let request = DaemonRequest::Search {
+        let request = |query: &str| DaemonRequest::Search {
             path: Some(workspace.root.clone()),
-            query: "What should I remember before planning my weekend trip?".to_string(),
+            query: query.to_string(),
             limit: Some(5),
             context: 2,
             type_filter: None,
@@ -8027,7 +8031,8 @@ mod tests {
             hash_only: false,
             disable_memory_expansion: false,
         };
-        let response = handle_request(test_state(), request).await;
+        let query = "What should I remember before planning my weekend trip?";
+        let response = handle_request(test_state(), request(query)).await;
         let DaemonResponse::SearchResults { hits, .. } = response else {
             panic!("expected search results");
         };
@@ -8035,6 +8040,26 @@ mod tests {
             hits.iter()
                 .any(|hit| hit.sources.iter().any(|source| source == "memory")),
             "daemon-backed clients should receive default memory expansion"
+        );
+
+        for index in 0..3 {
+            std::fs::write(
+                repo.path().join(format!("flight-{index}.md")),
+                format!("# Weekend trip note\nRemember planning preference {index} for flights."),
+            )
+            .unwrap();
+        }
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let query = "remember planning preference weekend trip NOT flights";
+        let response = handle_request(test_state(), request(query)).await;
+        let DaemonResponse::SearchResults { hits, .. } = response else {
+            panic!("expected search results");
+        };
+        assert!(hits.len() >= 3);
+        assert!(
+            hits.iter()
+                .all(|hit| !hit.file_path.to_string_lossy().contains("flight")),
+            "a memory probe ignored NOT: {hits:?}"
         );
     }
 
@@ -12990,7 +13015,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
             {
-                DaemonResponse::Ack { message } => messages.push(message),
+                DaemonResponse::Ack { message, .. } => messages.push(message),
                 other => panic!("expected ack, got {other:?}"),
             }
         }
@@ -13038,7 +13063,7 @@ mod tests {
             .unwrap()
             .unwrap()
         {
-            DaemonResponse::Ack { message } => {
+            DaemonResponse::Ack { message, .. } => {
                 assert!(message.contains("already current"), "{message}");
             }
             other => panic!("expected ack, got {other:?}"),
@@ -13080,7 +13105,7 @@ mod tests {
             .unwrap()
             .unwrap()
         {
-            DaemonResponse::Ack { message } => {
+            DaemonResponse::Ack { message, .. } => {
                 assert!(
                     !message.contains("already current"),
                     "a walk that predates the request must not satisfy it: {message}"
@@ -13189,7 +13214,7 @@ mod tests {
             .unwrap()
             .unwrap()
         {
-            DaemonResponse::Ack { message } => {
+            DaemonResponse::Ack { message, .. } => {
                 assert!(message.starts_with("indexed 3 files"), "{message}");
             }
             other => panic!("expected Ack, got {other:?}"),

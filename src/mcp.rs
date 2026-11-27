@@ -34,11 +34,11 @@ use crate::protocol::{
     DaemonRequest, DaemonResponse, FileSearchResult, LiteralSearchOutput, MAX_HITS_PER_FILE,
     SearchHit, group_hits_by_file,
 };
-use crate::regex_search::regex_search_with_options;
+use crate::regex_search::{regex_file_name_search_with_options, regex_search_with_options};
 use crate::search::{SearchOptions, hybrid_search_outcome, literal_file_search};
 use crate::symbols::{SymbolSearchMode, search_symbols_with_options};
 use crate::workspace::{
-    Workspace, WorkspaceMetadata, WorkspaceStatus, resolve_workspace_and_scope,
+    Workspace, WorkspaceMetadata, WorkspaceStatus, resolve_workspace_and_scope_with_base,
 };
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -126,10 +126,14 @@ struct IvygrepSearchArgs {
     query: Option<String>,
     path: Option<String>,
     output: Option<String>,
+    #[serde(default, deserialize_with = "integer_argument")]
     budget_tokens: Option<usize>,
     since: Option<String>,
+    #[serde(default, deserialize_with = "integer_argument")]
     limit: Option<usize>,
+    #[serde(default, deserialize_with = "integer_argument")]
     hits_per_file: Option<usize>,
+    #[serde(default, deserialize_with = "integer_argument")]
     context: Option<usize>,
     #[serde(rename = "type")]
     type_filter: Option<String>,
@@ -144,6 +148,29 @@ struct IvygrepSearchArgs {
     file_name_only: Option<bool>,
     verbose: Option<bool>,
     skip_gitignore: Option<bool>,
+}
+
+/// JSON Schema counts `5.0` as an integer, and some clients send it.
+fn integer_argument<'de, D>(deserializer: D) -> std::result::Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(number) = Option::<serde_json::Number>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    number
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .or_else(|| {
+            let value = number.as_f64()?;
+            (value >= 0.0 && value.fract() == 0.0).then_some(value as usize)
+        })
+        .map(Some)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid value: {number}, expected a non-negative integer"
+            ))
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1734,6 +1761,9 @@ fn execute_ivygrep_search(
     {
         bail!("budget_tokens must be between 256 and 131072");
     }
+    if let Some(type_filter) = &args.type_filter {
+        crate::chunking::require_type_alias(type_filter)?;
+    }
     if !wants_context_pack && args.budget_tokens.is_some() {
         bail!("budget_tokens requires output=context_pack");
     }
@@ -1758,7 +1788,11 @@ fn execute_ivygrep_search(
         None => env::current_dir()?,
     };
 
-    let (current_workspace, scope_filter) = resolve_workspace_and_scope(Path::new(&input_path))?;
+    let (current_workspace, scope_filter, base) =
+        resolve_workspace_and_scope_with_base(Path::new(&input_path))?;
+    for root in base.iter().chain([&current_workspace.root]) {
+        crate::cli::refuse_broad_build(root, args.skip_gitignore.unwrap_or(false))?;
+    }
 
     // MCP search is intentionally scoped to one workspace. Ensure that
     // workspace is indexed and watched before searching so edits made by a
@@ -1901,7 +1935,7 @@ fn execute_ivygrep_search(
             path: Some(workspace.root.clone()),
             pattern: query.to_string(),
             limit: search_limit,
-            file_name_only: false,
+            file_name_only,
             context: args.context.unwrap_or(2),
             type_filter: args.type_filter.clone(),
             include_globs: include_globs.clone(),
@@ -1937,7 +1971,9 @@ fn execute_ivygrep_search(
                 search_warnings = warnings;
                 Some(SearchRows::Hits(hits))
             }
-            Some(DaemonResponse::LiteralFiles { files, warnings }) if literal => {
+            Some(DaemonResponse::LiteralFiles { files, warnings })
+                if literal || (regex && file_name_only) =>
+            {
                 search_warnings = warnings;
                 Some(SearchRows::Files(files))
             }
@@ -1975,6 +2011,12 @@ fn execute_ivygrep_search(
             &search_options,
             literal_output,
             false,
+        )?)
+    } else if regex && file_name_only {
+        SearchRows::Files(regex_file_name_search_with_options(
+            &workspace,
+            query,
+            &search_options,
         )?)
     } else if regex {
         SearchRows::Hits(regex_search_with_options(
@@ -2068,6 +2110,7 @@ fn execute_ivygrep_search(
     };
     let summary = HitsSummary {
         workspace_root: &current_workspace.root,
+        scope: scope_filter.as_ref().map(|scope| scope.rel_path.as_path()),
         query,
         mode: mode_name,
         total_matches,
@@ -2210,6 +2253,7 @@ fn bound_hits_by_file(
 
 struct HitsSummary<'a> {
     workspace_root: &'a Path,
+    scope: Option<&'a Path>,
     query: &'a str,
     mode: &'a str,
     total_matches: usize,
@@ -2220,10 +2264,14 @@ struct HitsSummary<'a> {
 
 fn render_hits_header(summary: &HitsSummary<'_>, shown: usize, out: &mut String) {
     use std::fmt::Write as _;
+    let scope = summary
+        .scope
+        .map(|scope| format!(" (scope: {})", scope.display()))
+        .unwrap_or_default();
     if shown == 0 {
         let _ = writeln!(
             out,
-            "No {} matches for \"{}\" in {}",
+            "No {} matches for \"{}\" in {}{scope}",
             summary.mode,
             summary.query,
             summary.workspace_root.display()
@@ -2238,7 +2286,7 @@ fn render_hits_header(summary: &HitsSummary<'_>, shown: usize, out: &mut String)
         };
         let _ = write!(
             out,
-            "{shown} of {}{lower_bound} files for \"{}\" ({}) in {}",
+            "{shown} of {}{lower_bound} files for \"{}\" ({}) in {}{scope}",
             summary.total_matches,
             summary.query,
             summary.mode,
@@ -4142,6 +4190,7 @@ impl AccountManager {
         let bounded = bound_hits_by_file(&hits, 10, 3, 1000);
         let summary = HitsSummary {
             workspace_root: Path::new("/repo"),
+            scope: None,
             query: "needle",
             mode: "literal",
             total_matches: bounded.total_matches,
@@ -4196,6 +4245,32 @@ impl AccountManager {
             &[],
         );
         assert_eq!(empty, "No literal matches for \"needle\" in /repo\n");
+
+        let scoped = render_hits_text(
+            &HitsSummary {
+                scope: Some(Path::new("docs")),
+                warnings: &[],
+                ..summary
+            },
+            &[],
+        );
+        assert_eq!(
+            scoped,
+            "No literal matches for \"needle\" in /repo (scope: docs)\n"
+        );
+    }
+
+    #[test]
+    fn search_arguments_accept_integers_with_a_zero_fraction() {
+        let parse = |limit: Value| {
+            serde_json::from_value::<IvygrepSearchArgs>(json!({"query": "x", "limit": limit}))
+        };
+        assert_eq!(parse(json!(5)).unwrap().limit, Some(5));
+        assert_eq!(parse(json!(5.0)).unwrap().limit, Some(5));
+        assert_eq!(parse(Value::Null).unwrap().limit, None);
+        for invalid in [json!(5.5), json!(-1), json!(-1.0), json!("5")] {
+            assert!(parse(invalid.clone()).is_err(), "{invalid}");
+        }
     }
 
     #[test]

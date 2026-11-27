@@ -132,7 +132,14 @@ the parent, which tracks them and has always indexed their sources: a path
 listed in the root `.gitmodules`, or a `.git` file pointing into the `modules`
 directory of the workspace's own Git directory, where Git keeps absorbed
 submodules. A workspace root that is not a Git checkout keeps everything below
-it, so a plain directory of clones still indexes as one workspace. The
+it, so a plain directory of clones still indexes as one workspace. A search or
+context request for a path below an indexed plain directory uses that index with
+a path scope. The path keeps a workspace of its own when it is in a Git checkout,
+has its own index, or is excluded by ignore rules. It also keeps one while the
+outer index needs a rebuild, so that a search of the path does not start that
+rebuild. The same applies when the path has indexable files and the outer index
+has no file below it yet. An index of the home directory, a directory above it, or
+the filesystem root is never used for a path below it. The
 recursive watch still covers nested checkouts; their events are dropped by the
 filter, except for the `.git` entry itself. When a directory whose files are in
 the index gets a `.git` entry (`git init`, or a clone into it), the watcher
@@ -235,7 +242,8 @@ home, or the filesystem root. An interactive terminal accepts `y` or `yes`;
 non-interactive use requires `--yes`. A plain `--add` of an already indexed,
 healthy directory does not trigger this prompt. `--force` rebuilds it, while
 `--skip-gitignore` can add ignored files, and both prompt when they target a
-broad root.
+broad root. MCP cannot ask, so `ig_search` returns an error instead of building
+or expanding such an index. It still searches a healthy one that already exists.
 
 Main indexes and overlays mark live publication as incomplete before their first
 commit. A run that fails before that commit, for example on a read error, leaves
@@ -347,8 +355,12 @@ no longer registers a definition or gets its own chunk; `typedef`, `using`, and
 Python `type` names at file or namespace scope and C++ unions register symbols,
 and so do types with a body in C or C++ code that the grammar cannot parse; several
 definitions on one line all register; Python module text and imports, and C++
-destructors and operators, register none; and `.h` files with C++ syntax use the
-C++ grammar. They keep the language name `c`.
+destructors and operators, register none; and `.h` files with C++ or Objective-C
+syntax use the grammar of that language. They keep the language name `c`. R,
+PowerShell, and Clojure functions register their complete names, and a byte-order
+mark does not hide the first line from the line heuristics. Query matching has
+the CPU allowance of the parse budget, so a tree with very many unnamed siblings
+falls back to heuristic chunks.
 
 ## Search pipeline
 
@@ -380,7 +392,9 @@ availability.
 A hybrid query whose letters and digits are all non-ASCII, such as CJK or
 Cyrillic text, has none of the ASCII code tokens that lexical, path, and hash
 signals use. Unless neural retrieval is forced, it runs exact substring
-matching, the only pass that can find it.
+matching, the only pass that can find it. Files rank by matching lines. Each
+file within the limit gets one hit, and the rest of the limit goes to further
+hits of the first files.
 
 `src/search_execution.rs` coordinates applicable retrieval passes:
 
@@ -389,7 +403,8 @@ matching, the only pass that can find it.
 - exact and inferred symbol candidates
 - lightweight hash-vector ANN
 - neural ANN when routing requests it and compatible vectors exist
-- bounded memory probes for qualifying note-heavy implicit questions
+- bounded memory probes for qualifying note-heavy implicit questions, except
+  Boolean requests
 
 Neural retrieval is conditional, and lexical results remain available while
 neural vectors are incomplete. Identifier, path, and short literal routes skip
@@ -432,9 +447,16 @@ Explicit Boolean requests are parsed before expansion. All retrieval signals
 are restricted to a request-local pool of raw-query matches bounded by the
 normal lexical candidate budget. Semantic scoring ranks only keys in that pool;
 it cannot introduce an otherwise similar document that violates the constraint.
-Unsupported structured queries, including phrases requiring unindexed positions,
-fail explicitly when the request is a one-line lookup. Quoted or escaped operator
+Unsupported structured queries, including phrases requiring unindexed positions
+and groups or `NOT` nested more than six levels, fail explicitly when the request
+is a one-line lookup. Every level adds recursion, and nested conjunctions double
+the search work with every level. An unquoted operand that
+the code tokenizer splits, such as `url_for`, is not a phrase: the index query
+asks for its tokens, and the chunk text or path must contain them next to each
+other. Rejected chunks do not use up the pool. Quoted or escaped operator
 words and ordinary natural-language input keep their existing expansion behavior.
+A context task is prose: when its search fails, the pack searches again with
+lowercase operator words.
 
 A prompt or paste that does not parse is not a Boolean request. The cut is the
 one signature scoring uses: multi-line input, or at least 13 raw terms
@@ -756,11 +778,16 @@ conventional parent module file, such as `#[path]` modules, get no `self::` or
 
 Stack-trace frames under `node_modules`, `site-packages`, `dist-packages`, the
 Cargo registry, or the Go module cache map only by their package-relative path,
-and `rustc` toolchain frames are ignored. `--since` accepts one commit-ish, such
-as `HEAD~3` or `@{upstream}`, finds its Git merge base with `HEAD`, and compares
-that base with `HEAD`. It adds staged, unstaged, and untracked changes, and
-rejects ranges and negated references. The selected ref itself is not used as
-the diff base.
+and `rustc` toolchain frames are ignored. `file` URLs map like absolute paths.
+Bundler URLs and URLs with a loopback host map like relative paths. A diff prefix
+such as `a/` is removed only when no workspace path ends with the named path. A
+pack lists up to 32 named lines, or one for each 64 tokens of a smaller budget.
+The first line of each file has priority. Up to three lines of a file seed
+evidence, and the second and third line rank below the first line of each named
+file. `--since` accepts one commit-ish, such as `HEAD~3` or `@{upstream}`, finds
+its Git merge base with `HEAD`, and compares that base with `HEAD`. It adds
+staged, unstaged, and untracked changes, and rejects ranges and negated
+references. The selected ref itself is not used as the diff base.
 
 ## Worktree overlays
 
@@ -1166,6 +1193,8 @@ older protocol (for example a development build with the same build version)
 gets a structured version error from the `Version` probe and restarts it.
 
 Version 10 added file-oriented literal results. Version 11 adds the `hash_only` search option. An older client that omits it keeps automatic model selection. A hash-only request uses hash vectors even if the daemon has a neural model loaded, and it can request only hash vectors from the background queue.
+
+The acknowledgement of an `Index` request can carry the indexing summary in an optional `summary` field. Older clients ignore it, so it did not change the version.
 
 Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Web literal searches do the same. Earlier literal output modes retain their behavior.
 
