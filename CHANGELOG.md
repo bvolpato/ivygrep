@@ -81,6 +81,14 @@ All notable changes to ivygrep are documented in this file.
 - An unknown `--type`, or MCP `type`, is an error. It returned no results.
 - An argument that is not valid UTF-8 no longer causes a panic. Errors for an unusable data directory and for `ig --web` without a daemon name the cause. `ig --status` reports workspaces whose metadata it cannot read.
 - Text previews keep the indentation of their first line. A first index without a daemon prints its notice once.
+- Search, context packs, and MCP accept text in which a word and a colon precede a `*`, such as a Markdown list after `Steps to reproduce:` or `Access-Control-Allow-Origin: *`. Such a query failed with `The field does not exist`. A standalone `*` is punctuation and no longer matches every document.
+- A query with deeply nested parentheses or `NOT` operators no longer overflows the stack, which stopped the daemon for all its clients, or runs for minutes. Groups and `NOT` can nest up to six levels.
+- Multi-line and quoted prompts no longer use CPU time and memory that grow with the square of their length. A 3 KB prompt took more than 20 CPU seconds and 1 GB. Multi-line queries above 110 KB no longer fail with `Compiled regex exceeds size limit`.
+- Queries in CJK, Cyrillic, or Greek text rank files by matching lines and apply the limit to files. The first file in path order could use the whole limit.
+- Boolean operators also apply to notes. The memory probes of the daemon read them as text and returned notes that `NOT` excludes.
+- Boolean operands can be identifiers that the code tokenizer splits, such as `url_for`, `LocalProxy`, or `sha256`. They failed with `invalid or unsupported Boolean query`.
+- `--all` returns a hit once when tracked workspaces overlap. Hybrid, symbol, and regex searches returned it once per workspace and added the scores.
+- Hybrid results no longer repeat a line range of a file when overlapping chunks, such as a class and its method, focus on the same line.
 
 ### Security
 

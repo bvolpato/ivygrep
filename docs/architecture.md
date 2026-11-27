@@ -392,7 +392,9 @@ availability.
 A hybrid query whose letters and digits are all non-ASCII, such as CJK or
 Cyrillic text, has none of the ASCII code tokens that lexical, path, and hash
 signals use. Unless neural retrieval is forced, it runs exact substring
-matching, the only pass that can find it.
+matching, the only pass that can find it. Files rank by matching lines. Each
+file within the limit gets one hit, and the rest of the limit goes to further
+hits of the first files.
 
 `src/search_execution.rs` coordinates applicable retrieval passes:
 
@@ -401,7 +403,8 @@ matching, the only pass that can find it.
 - exact and inferred symbol candidates
 - lightweight hash-vector ANN
 - neural ANN when routing requests it and compatible vectors exist
-- bounded memory probes for qualifying note-heavy implicit questions
+- bounded memory probes for qualifying note-heavy implicit questions, except
+  Boolean requests
 
 Neural retrieval is conditional, and lexical results remain available while
 neural vectors are incomplete. Identifier, path, and short literal routes skip
@@ -444,8 +447,13 @@ Explicit Boolean requests are parsed before expansion. All retrieval signals
 are restricted to a request-local pool of raw-query matches bounded by the
 normal lexical candidate budget. Semantic scoring ranks only keys in that pool;
 it cannot introduce an otherwise similar document that violates the constraint.
-Unsupported structured queries, including phrases requiring unindexed positions,
-fail explicitly when the request is a one-line lookup. Quoted or escaped operator
+Unsupported structured queries, including phrases requiring unindexed positions
+and groups or `NOT` nested more than six levels, fail explicitly when the request
+is a one-line lookup. Every level adds recursion, and nested conjunctions double
+the search work with every level. An unquoted operand that
+the code tokenizer splits, such as `url_for`, is not a phrase: the index query
+asks for its tokens, and the chunk text or path must contain them next to each
+other. Rejected chunks do not use up the pool. Quoted or escaped operator
 words and ordinary natural-language input keep their existing expansion behavior.
 
 A prompt or paste that does not parse is not a Boolean request. The cut is the
