@@ -455,6 +455,8 @@ the code tokenizer splits, such as `url_for`, is not a phrase: the index query
 asks for its tokens, and the chunk text or path must contain them next to each
 other. Rejected chunks do not use up the pool. Quoted or escaped operator
 words and ordinary natural-language input keep their existing expansion behavior.
+A context task is prose: when its search fails, the pack searches again with
+lowercase operator words.
 
 A prompt or paste that does not parse is not a Boolean request. The cut is the
 one signature scoring uses: multi-line input, or at least 13 raw terms
@@ -776,11 +778,16 @@ conventional parent module file, such as `#[path]` modules, get no `self::` or
 
 Stack-trace frames under `node_modules`, `site-packages`, `dist-packages`, the
 Cargo registry, or the Go module cache map only by their package-relative path,
-and `rustc` toolchain frames are ignored. `--since` accepts one commit-ish, such
-as `HEAD~3` or `@{upstream}`, finds its Git merge base with `HEAD`, and compares
-that base with `HEAD`. It adds staged, unstaged, and untracked changes, and
-rejects ranges and negated references. The selected ref itself is not used as
-the diff base.
+and `rustc` toolchain frames are ignored. `file` URLs map like absolute paths.
+Bundler URLs and URLs with a loopback host map like relative paths. A diff prefix
+such as `a/` is removed only when no workspace path ends with the named path. A
+pack lists up to 32 named lines, or one for each 64 tokens of a smaller budget.
+The first line of each file has priority. Up to three lines of a file seed
+evidence, and the second and third line rank below the first line of each named
+file. `--since` accepts one commit-ish, such as `HEAD~3` or `@{upstream}`, finds
+its Git merge base with `HEAD`, and compares that base with `HEAD`. It adds
+staged, unstaged, and untracked changes, and rejects ranges and negated
+references. The selected ref itself is not used as the diff base.
 
 ## Worktree overlays
 

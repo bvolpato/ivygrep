@@ -14,6 +14,8 @@ use crate::walker::SourcePathMatcher;
 use crate::workspace::Workspace;
 
 const MAX_SERIALIZED_CHANGES: usize = 512;
+/// Named lines of one file that can become evidence.
+const MAX_SEED_LINES_PER_FILE: usize = 3;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,25 +191,29 @@ pub(crate) fn collect_context_input(
             referenced_paths.push(reference);
         }
     }
-    let mut seeds = BTreeMap::<PathBuf, ContextSeed>::new();
-    for reference in &referenced_paths {
-        if !workspace.root.join(&reference.file_path).is_file() {
+    let mut seeds = Vec::new();
+    let mut seeded_paths = BTreeSet::new();
+    for references in referenced_paths.chunk_by(|left, right| left.file_path == right.file_path) {
+        if !workspace.root.join(&references[0].file_path).is_file() {
             continue;
         }
-        seeds.insert(
-            reference.file_path.clone(),
-            ContextSeed {
-                file_path: reference.file_path.clone(),
-                line: reference.line,
-                git_revision: None,
-                reason: reference.line.map_or_else(
-                    || "mentioned in task input".to_string(),
-                    |line| format!("mentioned at line {line} in task or stack trace"),
-                ),
-                source: "task_input".to_string(),
-                priority: 3,
-            },
-        );
+        seeded_paths.insert(references[0].file_path.clone());
+        for (rank, reference) in seed_references(references).into_iter().enumerate() {
+            seeds.push((
+                rank,
+                ContextSeed {
+                    file_path: reference.file_path.clone(),
+                    line: reference.line,
+                    git_revision: None,
+                    reason: reference.line.map_or_else(
+                        || "mentioned in task input".to_string(),
+                        |line| format!("mentioned at line {line} in task or stack trace"),
+                    ),
+                    source: "task_input".to_string(),
+                    priority: 3,
+                },
+            ));
+        }
     }
     let base_commit = change_scope
         .as_ref()
@@ -215,7 +221,7 @@ pub(crate) fn collect_context_input(
     for change in &seed_changes {
         let current_file = workspace.root.join(&change.file_path).is_file();
         let deleted_file = change.status == ContextChangeStatus::Deleted;
-        if !current_file && !deleted_file {
+        if !current_file && !deleted_file || !seeded_paths.insert(change.file_path.clone()) {
             continue;
         }
         let sources = change
@@ -224,9 +230,9 @@ pub(crate) fn collect_context_input(
             .map(|source| source.label())
             .collect::<Vec<_>>()
             .join(", ");
-        seeds
-            .entry(change.file_path.clone())
-            .or_insert_with(|| ContextSeed {
+        seeds.push((
+            0,
+            ContextSeed {
                 file_path: change.file_path.clone(),
                 line: None,
                 git_revision: deleted_file.then(|| {
@@ -251,30 +257,46 @@ pub(crate) fn collect_context_input(
                 }
                 .to_string(),
                 priority: 2,
-            });
+            },
+        ));
     }
-    let mut seeds = seeds.into_values().collect::<Vec<_>>();
     let task_terms = task
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .flat_map(crate::text::split_identifier_segments)
         .filter(|term| term.len() >= 3)
         .collect::<BTreeSet<_>>();
-    seeds.sort_by(|left, right| {
+    // The first line of each file precedes the second line of any file, so a
+    // file with many lines cannot use up the seed limit.
+    seeds.sort_by(|(left_rank, left), (right_rank, right)| {
         right
             .priority
             .cmp(&left.priority)
+            .then_with(|| left_rank.cmp(right_rank))
             .then_with(|| {
                 seed_path_relevance(&right.file_path, &task_terms)
                     .cmp(&seed_path_relevance(&left.file_path, &task_terms))
             })
             .then_with(|| left.file_path.cmp(&right.file_path))
     });
+    let seeds = seeds.into_iter().map(|(_, seed)| seed).collect();
 
     Ok(ContextInput {
         change_scope,
         referenced_paths,
         seeds,
     })
+}
+
+/// Runtimes print the failing frame first or last, so a file with many lines
+/// keeps both ends.
+fn seed_references(references: &[ContextInputPath]) -> Vec<&ContextInputPath> {
+    if references.len() <= MAX_SEED_LINES_PER_FILE {
+        return references.iter().collect();
+    }
+    references[..MAX_SEED_LINES_PER_FILE - 1]
+        .iter()
+        .chain(references.last())
+        .collect()
 }
 
 fn seed_path_relevance(path: &Path, task_terms: &BTreeSet<String>) -> usize {
@@ -315,7 +337,13 @@ fn collect_git_changes(
             true,
         )?
         .context("Git did not resolve --since reference")?;
-        let merge_base = git_output(root, &["merge-base", verified.trim(), "HEAD"], true)?
+        let merge_base = git_output(root, &["merge-base", verified.trim(), "HEAD"], true)
+            .with_context(|| {
+                format!(
+                    "Git found no merge base of {reference} and HEAD; \
+                     their histories can be unrelated, or the clone can be shallow"
+                )
+            })?
             .context("Git could not find merge base for --since reference")?;
         base_commit = Some(merge_base.trim().to_string());
         merge_name_status(
@@ -401,11 +429,11 @@ fn git_output(root: &Path, args: &[&str], required: bool) -> Result<Option<Strin
         return Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()));
     }
     if required {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match stderr.trim() {
+            "" => bail!("git {} failed: {}", args.join(" "), output.status),
+            stderr => bail!("git {} failed: {stderr}", args.join(" ")),
+        }
     }
     Ok(None)
 }
@@ -503,6 +531,10 @@ fn merge_porcelain_status(
         let Some(path) = workspace_relative_path(&entry[3..], workspace_prefix) else {
             continue;
         };
+        // A file that was staged and then removed never existed in a commit.
+        if (index_status, worktree_status) == (b'A', b'D') {
+            continue;
+        }
         if index_status == b'?' && worktree_status == b'?' {
             merge_change(
                 changes,
@@ -549,7 +581,13 @@ fn merge_porcelain_status(
                 b'U' => ContextChangeStatus::Unmerged,
                 _ => ContextChangeStatus::Unknown,
             };
-            merge_change(changes, path.clone(), old_path.clone(), status, source);
+            let old_path = matches!(
+                status,
+                ContextChangeStatus::Renamed | ContextChangeStatus::Copied
+            )
+            .then(|| old_path.clone())
+            .flatten();
+            merge_change(changes, path.clone(), old_path, status, source);
         }
     }
 }
@@ -561,6 +599,38 @@ fn merge_change(
     status: ContextChangeStatus,
     source: ContextChangeSource,
 ) {
+    if status == ContextChangeStatus::Renamed
+        && source != ContextChangeSource::Since
+        && let Some(previous) = old_path
+            .as_ref()
+            .filter(|old| {
+                changes
+                    .get(*old)
+                    .is_some_and(|change| change.sources == [ContextChangeSource::Since])
+            })
+            .and_then(|old| changes.remove(old))
+    {
+        // The branch changed the file before this rename moved it.
+        let added = previous.status == ContextChangeStatus::Added;
+        changes.insert(
+            path.clone(),
+            ContextChange {
+                file_path: path,
+                old_path: if added {
+                    None
+                } else {
+                    previous.old_path.or(old_path)
+                },
+                status: if added {
+                    ContextChangeStatus::Added
+                } else {
+                    ContextChangeStatus::Renamed
+                },
+                sources: vec![ContextChangeSource::Since, source],
+            },
+        );
+        return;
+    }
     let change = changes.entry(path.clone()).or_insert(ContextChange {
         file_path: path,
         old_path: None,
@@ -609,9 +679,59 @@ fn normalize_relative(path: &Path) -> Option<PathBuf> {
         .then(|| PathBuf::from(crate::workspace::index_path_string(&normalized)))
 }
 
+/// Task text in which local source URLs and paths below a workspace root that
+/// contains spaces are plain paths. Bundlers and development servers name a
+/// source relative to a project, after an optional `(layer)/`.
+fn task_path_text(root: &Path, task: &str) -> String {
+    static URL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"\b([A-Za-z][A-Za-z-]*)://([^\s/\\"'<>()]*)/*((?:\([A-Za-z0-9_-]+\)/)?(?:\./)?)([A-Za-z]:/)?"#,
+        )
+        .expect("valid URL regex")
+    });
+    let text = URL.replace_all(task, |captures: &regex::Captures<'_>| {
+        let authority = &captures[2];
+        let drive = captures.get(4).map_or("", |drive| drive.as_str());
+        match captures[1].to_ascii_lowercase().as_str() {
+            "file" if drive.is_empty() => format!("/{}", &captures[3]),
+            "file" | "webpack" | "webpack-internal" | "turbopack" | "rsc" | "app" | "ng" => {
+                drive.to_string()
+            }
+            "http" | "https"
+                if matches!(
+                    authority
+                        .rsplit_once(':')
+                        .filter(|(_, port)| port.bytes().all(|byte| byte.is_ascii_digit()))
+                        .map_or(authority, |(host, _)| host),
+                    "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]"
+                ) =>
+            {
+                drive.to_string()
+            }
+            _ => captures[0].to_string(),
+        }
+    });
+    let root = root.to_string_lossy();
+    let root = root.strip_prefix(r"\\?\").unwrap_or(&root);
+    if !root.contains(char::is_whitespace) {
+        return text.into_owned();
+    }
+    text.replace(&format!("{root}/"), "")
+        .replace(&format!("{root}\\"), "")
+}
+
 fn referenced_task_paths(root: &Path, task: &str, skip_gitignore: bool) -> Vec<ContextInputPath> {
     static PYTHON_TRACE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#"File [\"']([^\"']+)[\"'], line ([0-9]+)"#).expect("valid trace regex")
+    });
+    // Route segments such as `[slug]`, `(group)`, and `$id`, names outside
+    // ASCII, and a development-server query before the line number.
+    static ROUTE_PATH: LazyLock<Regex> = LazyLock::new(|| {
+        const NAME: &str = r"(?:[\p{L}\p{M}\p{N}_.@+$~%-]|\[{1,2}[\p{L}\p{N}_.-]+\]{1,2})";
+        Regex::new(&format!(
+            r"((?:\b[A-Za-z]:)?[/\\]*{NAME}+(?:[/\\]+(?:\([\p{{L}}\p{{N}}_.-]+\){NAME}*|{NAME}+))*\.[A-Za-z0-9_+-]+)(\?[^\s:()]*)?(?::(?:line\s+)?([0-9]+)|#L([0-9]+)|\(([0-9]+)(?:,[0-9]+)?\))?"
+        ))
+        .expect("valid route regex")
     });
     static PATH_WITH_LINE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?m)([A-Za-z0-9_./\\@+:-]+\.[A-Za-z0-9_+-]+):(?:line\s+)?([0-9]+)(?::[0-9]+)?")
@@ -625,13 +745,20 @@ fn referenced_task_paths(root: &Path, task: &str, skip_gitignore: bool) -> Vec<C
         Regex::new(r"(?m)([A-Za-z0-9_./\\@+:-]+\.[A-Za-z0-9_+-]+)\(([0-9]+)(?:,[0-9]+)?\)")
             .expect("valid parenthesized-line regex")
     });
+    static NAME_WITH_LINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?m)(?:^|[\s"'(=])((?:[A-Za-z0-9_.@+-]+[/\\])*[A-Za-z][A-Za-z0-9_-]*):([0-9]+)"#,
+        )
+        .expect("valid name-line regex")
+    });
     static BARE_PATH: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?m)([A-Za-z0-9_./\\@+:-]+\.[A-Za-z0-9_+-]+)").expect("valid path regex")
     });
 
-    let mut paths = BTreeSet::new();
+    let task = task_path_text(root, task);
+    let mut paths = Vec::new();
     let mut workspace_files = None;
-    for captures in PYTHON_TRACE.captures_iter(task) {
+    for captures in PYTHON_TRACE.captures_iter(&task) {
         insert_task_path(
             &mut paths,
             root,
@@ -643,12 +770,44 @@ fn referenced_task_paths(root: &Path, task: &str, skip_gitignore: bool) -> Vec<C
             &mut workspace_files,
         );
     }
+    // The tail of a route path can look like a different file, so the plain
+    // patterns must not see the paths that resolved here.
+    let mut plain = String::with_capacity(task.len());
+    let mut copied = 0;
+    for captures in ROUTE_PATH.captures_iter(&task) {
+        let (Some(matched), Some(path)) = (captures.get(0), captures.get(1)) else {
+            continue;
+        };
+        let plain_path = path
+            .as_str()
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "_./\\@+:-".contains(ch));
+        if plain_path && captures.get(2).is_none() {
+            continue;
+        }
+        let line = (3..=5)
+            .find_map(|group| captures.get(group))
+            .and_then(|value| value.as_str().parse().ok());
+        if insert_task_path(
+            &mut paths,
+            root,
+            path.as_str(),
+            line,
+            skip_gitignore,
+            &mut workspace_files,
+        ) {
+            plain.push_str(&task[copied..matched.start()]);
+            plain.push(' ');
+            copied = matched.end();
+        }
+    }
+    plain.push_str(&task[copied..]);
     for pattern in [
         &*PATH_WITH_LINE,
         &*PATH_WITH_HASH_LINE,
         &*PATH_WITH_PARENS_LINE,
     ] {
-        for captures in pattern.captures_iter(task) {
+        for captures in pattern.captures_iter(&plain) {
             insert_task_path(
                 &mut paths,
                 root,
@@ -661,7 +820,17 @@ fn referenced_task_paths(root: &Path, task: &str, skip_gitignore: bool) -> Vec<C
             );
         }
     }
-    for captures in BARE_PATH.captures_iter(task) {
+    for captures in NAME_WITH_LINE.captures_iter(&plain) {
+        // Names without an extension, such as `Makefile`, look like prose.
+        // They must name a file exactly.
+        if let Some(path) = normalize_relative(Path::new(&captures[1].replace('\\', "/")))
+            .and_then(|path| crate::workspace_file::stored_path(root, &path))
+        {
+            let line = captures[2].parse().ok().filter(|line| *line > 0);
+            push_task_path(&mut paths, path, line);
+        }
+    }
+    for captures in BARE_PATH.captures_iter(&plain) {
         insert_task_path(
             &mut paths,
             root,
@@ -671,20 +840,32 @@ fn referenced_task_paths(root: &Path, task: &str, skip_gitignore: bool) -> Vec<C
             &mut workspace_files,
         );
     }
+    // Lines of one file keep their order in the task.
+    paths.sort_by(|left, right| left.file_path.cmp(&right.file_path));
     paths
-        .into_iter()
-        .map(|(file_path, line)| ContextInputPath { file_path, line })
-        .collect()
 }
 
+fn push_task_path(paths: &mut Vec<ContextInputPath>, file_path: PathBuf, line: Option<usize>) {
+    if line.is_some() {
+        paths.retain(|path| path.file_path != file_path || path.line.is_some());
+    }
+    if !paths
+        .iter()
+        .any(|path| path.file_path == file_path && (line.is_none() || path.line == line))
+    {
+        paths.push(ContextInputPath { file_path, line });
+    }
+}
+
+/// Reports whether the path names a workspace file.
 fn insert_task_path(
-    paths: &mut BTreeSet<(PathBuf, Option<usize>)>,
+    paths: &mut Vec<ContextInputPath>,
     root: &Path,
     raw_path: &str,
     line: Option<usize>,
     skip_gitignore: bool,
     workspace_files: &mut Option<Vec<PathBuf>>,
-) {
+) -> bool {
     static BARE_VERSION: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^[vV]?[0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z.+-]+)?$")
             .expect("valid version regex")
@@ -710,7 +891,7 @@ fn insert_task_path(
         normalize_relative(raw_path)
     };
     let Some(mut relative) = relative else {
-        return;
+        return false;
     };
     if external_path
         && !root.join(&relative).is_file()
@@ -719,14 +900,16 @@ fn insert_task_path(
         // Dependency frames share at most their package-relative path with the
         // workspace (e.g. a pip-installed app); a bare file name is too weak.
         if remainder.components().count() < 2 {
-            return;
+            return false;
         }
         relative = remainder;
         external_path = false;
     }
-    if !root.join(&relative).is_file() {
+    if let Some(stored) = crate::workspace_file::stored_path(root, &relative) {
+        relative = stored;
+    } else {
         if line.is_none() && BARE_VERSION.is_match(&normalized_separators) {
-            return;
+            return false;
         }
         let files = workspace_files.get_or_insert_with(|| {
             crate::walker::source_walker(root, skip_gitignore)
@@ -749,24 +932,29 @@ fn insert_task_path(
         if external_path {
             matches.sort_by_key(|candidate| std::cmp::Reverse(candidate.components().count()));
         }
-        let Some(candidate) = matches.first() else {
-            return;
-        };
-        let best_depth = candidate.components().count();
-        if matches
-            .get(1)
-            .is_some_and(|candidate| !external_path || candidate.components().count() == best_depth)
-        {
-            return;
+        if let Some(candidate) = matches.first() {
+            let best_depth = candidate.components().count();
+            if matches.get(1).is_some_and(|candidate| {
+                !external_path || candidate.components().count() == best_depth
+            }) {
+                return false;
+            }
+            relative = (*candidate).clone();
+        } else {
+            // `a/src/lib.rs` and `b/src/lib.rs` in a pasted diff.
+            let Some(stored) = ["a", "b", "c", "i", "o", "w"]
+                .iter()
+                .find_map(|prefix| relative.strip_prefix(prefix).ok())
+                .filter(|_| !external_path)
+                .and_then(|path| crate::workspace_file::stored_path(root, path))
+            else {
+                return false;
+            };
+            relative = stored;
         }
-        relative = (*candidate).clone();
     }
-    paths.retain(|(path, existing_line)| path != &relative || existing_line.is_some());
-    if !paths.iter().any(|(path, existing_line)| {
-        path == &relative && (existing_line == &line || existing_line.is_some())
-    }) {
-        paths.insert((relative, line));
-    }
+    push_task_path(paths, relative, line);
+    true
 }
 
 fn normalize_external_path(path: &Path, drop_first_component: bool) -> Option<PathBuf> {
@@ -830,7 +1018,7 @@ mod tests {
         fs::write(root.path().join("archive/1.3.3"), "old release").unwrap();
         fs::write(root.path().join("2.0"), "current release").unwrap();
 
-        let mut paths = BTreeSet::new();
+        let mut paths = Vec::new();
         let mut workspace_files = None;
         for version in ["1.3.3", "v1.3.3-rc.1+build", "2.0"] {
             insert_task_path(
@@ -843,7 +1031,13 @@ mod tests {
             );
         }
         assert!(workspace_files.is_none());
-        assert_eq!(paths, BTreeSet::from([(PathBuf::from("2.0"), None)]));
+        assert_eq!(
+            paths,
+            [ContextInputPath {
+                file_path: PathBuf::from("2.0"),
+                line: None,
+            }]
+        );
         assert_eq!(
             referenced_task_paths(root.path(), "see 1.3.3:7 and archive/1.3.3", false),
             vec![ContextInputPath {
@@ -908,6 +1102,158 @@ mod tests {
                     file_path: PathBuf::from("src/token.rs"),
                     line: Some(9),
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn route_names_source_urls_and_diff_prefixes_resolve() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("My Proj");
+        for path in [
+            "Makefile",
+            "app/[slug]/page.tsx",
+            "bindings/c/page.tsx",
+            "page.tsx",
+            "src/app/(shop)/+page.ts",
+            "src/café.py",
+            "src/plain.ts",
+            "src/users.$id.tsx",
+        ] {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "\n").unwrap();
+        }
+        let below_root = format!("crash at {}/src/plain.ts:30", root.display());
+        for (task, path, line) in [
+            (
+                "./app/[slug]/page.tsx:30:5 Type error",
+                "app/[slug]/page.tsx",
+                Some(30),
+            ),
+            (
+                "bug in src/app/(shop)/+page.ts(12,4)",
+                "src/app/(shop)/+page.ts",
+                Some(12),
+            ),
+            ("bug in src/users.$id.tsx.", "src/users.$id.tsx", None),
+            ("bug in src/café.py:6", "src/café.py", Some(6)),
+            ("修复src/plain.ts的错误", "src/plain.ts", None),
+            (
+                "at App (http://localhost:5173/src/plain.ts?t=17:30:5)",
+                "src/plain.ts",
+                Some(30),
+            ),
+            (
+                "--- a/src/plain.ts\n+++ b/src/plain.ts",
+                "src/plain.ts",
+                None,
+            ),
+            // A directory with the name of a diff prefix.
+            ("bug in c/page.tsx:3", "bindings/c/page.tsx", Some(3)),
+            (
+                "Makefile:4: *** missing separator.  Stop.",
+                "Makefile",
+                Some(4),
+            ),
+            (below_root.as_str(), "src/plain.ts", Some(30)),
+            (
+                "at App (webpack-internal:///(rsc)/./src/plain.ts:30:5)",
+                "src/plain.ts",
+                Some(30),
+            ),
+            (
+                "at main (file:///C:/agent/work/src/plain.ts:30:5)",
+                "src/plain.ts",
+                Some(30),
+            ),
+            // Frames without a drive letter are absolute only on Unix hosts.
+            #[cfg(unix)]
+            (
+                "at main (file:///usr/app/src/plain.ts:30:5)",
+                "src/plain.ts",
+                Some(30),
+            ),
+        ] {
+            assert_eq!(
+                referenced_task_paths(&root, task, false),
+                [ContextInputPath {
+                    file_path: PathBuf::from(path),
+                    line,
+                }],
+                "{task}"
+            );
+        }
+        for task in [
+            "see https://example.com/page.tsx",
+            "std::vec:12 and localhost:8080",
+            "/srv/other/[slug]/layout.tsx:3",
+        ] {
+            assert_eq!(referenced_task_paths(&root, task, false), [], "{task}");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn task_paths_use_the_stored_spelling() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/Models")).unwrap();
+        fs::write(root.path().join("app/Models/Invoice.php"), "\n").unwrap();
+        if !root.path().join("APP").exists() {
+            return; // case-sensitive volume
+        }
+        assert_eq!(
+            referenced_task_paths(root.path(), "bug at APP/models/invoice.php:6", false),
+            [ContextInputPath {
+                file_path: PathBuf::from("app/Models/Invoice.php"),
+                line: Some(6),
+            }]
+        );
+        let decomposed = "app/cafe\u{301}.php";
+        fs::write(root.path().join(decomposed), "\n").unwrap();
+        if root.path().join("app/caf\u{e9}.php").exists() {
+            assert_eq!(
+                referenced_task_paths(root.path(), "bug at app/caf\u{e9}.php:2", false),
+                [ContextInputPath {
+                    file_path: PathBuf::from(decomposed),
+                    line: Some(2),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn every_line_of_a_file_is_a_reference_and_seeds_keep_both_ends() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a.py"), "\n").unwrap();
+        fs::write(root.path().join("b.py"), "\n").unwrap();
+        let task =
+            "a.py\na.py:90: error\na.py:10: error\na.py:50: error\na.py:70: error\nb.py:5: error";
+        let lines = |paths: &[ContextInputPath]| {
+            paths
+                .iter()
+                .filter(|path| path.file_path == Path::new("a.py"))
+                .filter_map(|path| path.line)
+                .collect::<Vec<_>>()
+        };
+        let paths = referenced_task_paths(root.path(), task, false);
+        assert_eq!(lines(&paths), [90, 10, 50, 70]);
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let input =
+            collect_context_input(&workspace, task, None, &SearchOptions::default()).unwrap();
+        let seeds = input
+            .seeds
+            .iter()
+            .map(|seed| (seed.file_path.to_str().unwrap(), seed.line))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            seeds,
+            [
+                ("a.py", Some(90)),
+                ("b.py", Some(5)),
+                ("a.py", Some(10)),
+                ("a.py", Some(70)),
             ]
         );
     }
@@ -1055,6 +1401,44 @@ mod tests {
         assert_eq!(
             changes.get(Path::new("new.rs")).unwrap().sources,
             vec![ContextChangeSource::Untracked]
+        );
+    }
+
+    #[test]
+    fn working_tree_renames_and_removals_do_not_repeat_branch_changes() {
+        let mut changes = BTreeMap::new();
+        merge_name_status(
+            &mut changes,
+            b"A\0added.rs\0M\0edited.rs\0D\0removed.rs\0",
+            ContextChangeSource::Since,
+            Path::new(""),
+        );
+        merge_porcelain_status(
+            &mut changes,
+            b"RM moved.rs\0added.rs\0R  renamed.rs\0edited.rs\0AD staged.rs\0AD removed.rs\0",
+            Path::new(""),
+        );
+        let changes = changes
+            .into_values()
+            .map(|change| {
+                (
+                    change.file_path.to_str().unwrap().to_string(),
+                    change.old_path,
+                    change.status,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changes,
+            [
+                ("moved.rs".to_string(), None, ContextChangeStatus::Added),
+                ("removed.rs".to_string(), None, ContextChangeStatus::Deleted),
+                (
+                    "renamed.rs".to_string(),
+                    Some(PathBuf::from("edited.rs")),
+                    ContextChangeStatus::Renamed
+                ),
+            ]
         );
     }
 

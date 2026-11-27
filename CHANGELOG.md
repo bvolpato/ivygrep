@@ -92,6 +92,16 @@ All notable changes to ivygrep are documented in this file.
 - Hybrid search no longer hides source files below directories whose name only ends in `build`, `target`, `dist`, or `vendor`, such as `internal/js/esbuild/` or `src/rebuild/`. The path check matched substrings. `_vendor/`, `.build/`, and `cmake-build*/` stay vendored and build trees.
 - A one-term lookup also returns up to three files of a build, distribution, or vendored tree when no other file has that name, definition, or text. They follow all other results. Such a lookup returned nothing or only the uses. Copies stay hidden beside the source.
 - Queries of three or more words return configuration and data files when nothing better matches. In a repository of YAML, JSON, or TOML files, or in a scope of such files, every match was filtered out.
+- A context pack for a stack trace or compiler message shows the line that the text names, also inside a function that does not fit into one item. A pack lists up to 32 named lines as references, or one for each 64 tokens of a smaller budget, and the first line of each file has priority. Up to three lines of a file become evidence, with the first and the last line of a file that has more.
+- Context packs resolve paths in `file://`, bundler, and local development server URLs, in diff headers, in workspaces whose path contains spaces, and with route segments (`[slug]`, `(group)`, `$id`) or non-ASCII names. A name without an extension, such as `Makefile:4`, resolves when the file exists.
+- Context packs do not mark production code as a test because it calls a function such as `split(` or `commit(`. That mark also replaced definitions with called names as anchors.
+- Up to 24 changed files can become evidence in a context pack that has room for them. Changed files that do not match the task stopped after the fourth one, and the pack was not marked as truncated.
+- Context packs are identical for the same task and index. The graph ranking added floating-point numbers in random order.
+- On a file system that ignores letter case or Unicode normalization, context packs use the stored spelling of a path. A PHP import such as `App\Models\Invoice` listed `app/Models/Invoice.php` twice under two names.
+- Context packs skip changed or named files that the indexer skips, such as binary and minified files, and read named files that are not valid UTF-8 as the indexer does.
+- Context items keep the indentation of their first line. Roles and reasons of symbols whose line is cut from an item are removed, and files that a test imports are not labeled as its tests.
+- A context pack closes a code fence that the task leaves open, so that the evidence stays outside the code block. A task with an uppercase `AND`, `OR`, or `NOT` that is not a valid Boolean expression is searched as text.
+- `ig context --since` reports that two histories have no merge base. The change list does not repeat a file that the working tree renamed, or report a deletion of a file that was only staged.
 
 ### Security
 
