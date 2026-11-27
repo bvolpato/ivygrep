@@ -6,6 +6,14 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Search, context packs, and MCP accept text in which a word and a colon precede a `*`, such as a Markdown list after `Steps to reproduce:` or `Access-Control-Allow-Origin: *`. Such a query failed with `The field does not exist`. A standalone `*` is punctuation and no longer matches every document.
+- A query with deeply nested parentheses or `NOT` operators no longer overflows the stack, which stopped the daemon for all its clients, or runs for minutes. Groups and `NOT` can nest up to six levels.
+- Multi-line and quoted prompts no longer use CPU time and memory that grow with the square of their length. A 3 KB prompt took more than 20 CPU seconds and 1 GB. Multi-line queries above 110 KB no longer fail with `Compiled regex exceeds size limit`.
+- Queries in CJK, Cyrillic, or Greek text rank files by matching lines and apply the limit to files. The first file in path order could use the whole limit.
+- Boolean operators also apply to notes. The memory probes of the daemon read them as text and returned notes that `NOT` excludes.
+- Boolean operands can be identifiers that the code tokenizer splits, such as `url_for`, `LocalProxy`, or `sha256`. They failed with `invalid or unsupported Boolean query`.
+- `--all` returns a hit once when tracked workspaces overlap. Hybrid, symbol, and regex searches returned it once per workspace and added the scores.
+- Hybrid results no longer repeat a line range of a file when overlapping chunks, such as a class and its method, focus on the same line.
 - `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
 - The stress fixture download uses its next source when a server requests a long retry delay. Such a delay blocked the scheduled cross-platform run until its time limit, and `E2E Summary` now fails when a platform job is cancelled.
 - `install.sh` names an accelerator archive that it cannot reach instead of reporting it as not available. It also selects the Apple Silicon archive from a shell that runs under Rosetta.
@@ -66,14 +74,10 @@ All notable changes to ivygrep are documented in this file.
 - R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
 - A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
 - A source file of unmatched punctuation no longer takes minutes to index.
-- Search, context packs, and MCP accept text in which a word and a colon precede a `*`, such as a Markdown list after `Steps to reproduce:` or `Access-Control-Allow-Origin: *`. Such a query failed with `The field does not exist`. A standalone `*` is punctuation and no longer matches every document.
-- A query with deeply nested parentheses or `NOT` operators no longer overflows the stack, which stopped the daemon for all its clients, or runs for minutes. Groups and `NOT` can nest up to six levels.
-- Multi-line and quoted prompts no longer use CPU time and memory that grow with the square of their length. A 3 KB prompt took more than 20 CPU seconds and 1 GB. Multi-line queries above 110 KB no longer fail with `Compiled regex exceeds size limit`.
-- Queries in CJK, Cyrillic, or Greek text rank files by matching lines and apply the limit to files. The first file in path order could use the whole limit.
-- Boolean operators also apply to notes. The memory probes of the daemon read them as text and returned notes that `NOT` excludes.
-- Boolean operands can be identifiers that the code tokenizer splits, such as `url_for`, `LocalProxy`, or `sha256`. They failed with `invalid or unsupported Boolean query`.
-- `--all` returns a hit once when tracked workspaces overlap. Hybrid, symbol, and regex searches returned it once per workspace and added the scores.
-- Hybrid results no longer repeat a line range of a file when overlapping chunks, such as a class and its method, focus on the same line.
+- MCP `ig_search` no longer builds an index of the home directory, a directory that contains it, or the filesystem root. It also does not add ignored files to such an index. It returns an error that asks for a project path and names the `ig --add` command that builds the index on purpose. A healthy index of such a directory is searched as before.
+- MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
+- The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
+- MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
 
 ### Security
 
