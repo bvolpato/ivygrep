@@ -120,6 +120,39 @@ class E2EWorkflowTest(unittest.TestCase):
             self.assertEqual(build, "build --release --bin ig")
             self.assertTrue(bench.startswith("bench --locked --bench indexer_bench "))
 
+    def test_stress_mode_applies_test_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copy2(E2E_WORKFLOW.parents[2] / "test.sh", root / "test.sh")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            cargo = bin_dir / "cargo"
+            cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$CARGO_RECORD"\n')
+            cargo.chmod(0o755)
+            record = root / "cargo-record"
+            env = {
+                **os.environ,
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "CARGO_RECORD": str(record),
+            }
+            base = "test --test stress_harness --locked"
+            for options, expected in (
+                ([], f"{base} -- --ignored --nocapture --test-threads 1"),
+                (
+                    ["--filter", "stress_alice", "--test-threads", "2", "--nocapture"],
+                    f"{base} stress_alice -- --ignored --test-threads 2 --nocapture",
+                ),
+            ):
+                with self.subTest(options=options):
+                    subprocess.run(
+                        ["bash", "test.sh", "--stress", *options],
+                        cwd=root,
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(record.read_text().strip(), expected)
+
     def test_aarch64_smoke_uses_git_and_python_images(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")
         arm = workflow.split("cross-linux-aarch64:", maxsplit=1)[1].split(

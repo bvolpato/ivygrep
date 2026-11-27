@@ -1030,8 +1030,12 @@ fn literal_search_candidates(
     if options.is_cancelled() {
         return Ok(None);
     }
-    let query = query_text.trim();
-    if query.is_empty() || options.bounded_limit() == Some(0) {
+    if query_text.trim().is_empty() || options.bounded_limit() == Some(0) {
+        return Ok(None);
+    }
+    // A shell `$(...)` removes the `\n` of a final `\r\n` and keeps the `\r`.
+    let query = without_final_line_break(query_text).trim_end_matches('\r');
+    if query.contains('\n') {
         return Ok(None);
     }
 
@@ -1050,6 +1054,26 @@ fn literal_search_candidates(
         return Ok(None);
     }
     Ok(Some(LiteralCandidates { query_lower, paths }))
+}
+
+/// Explains the empty result of a pattern that [`pattern_needs_line_break`] reports.
+pub(crate) const MULTI_LINE_PATTERN_WARNING: &str = "literal and regex searches match within one line, but this pattern needs a line break. Search for one of its lines, or search without this mode.";
+
+/// Whether a literal or regex pattern can only match across lines. Both modes
+/// search one line at a time, so it has no results.
+pub(crate) fn pattern_needs_line_break(pattern: &str, regex: bool) -> bool {
+    if regex {
+        crate::regex_search::line_pattern(pattern).is_none()
+    } else {
+        without_final_line_break(pattern).contains('\n')
+    }
+}
+
+/// A pasted line can end with its line break. It is not part of the pattern.
+pub(crate) fn without_final_line_break(pattern: &str) -> &str {
+    pattern
+        .strip_suffix('\n')
+        .map_or(pattern, |line| line.strip_suffix('\r').unwrap_or(line))
 }
 
 /// Case-insensitive literal matching folds each character independently.
@@ -6223,6 +6247,7 @@ fn is_test_path(path: &str) -> bool {
         || path.starts_with("selftests/")
         // File-level signals (naming conventions across languages)
         || path.contains("_test.")    // Go, Rust: foo_test.go, foo_test.rs
+        || path.contains("_tests.")   // Rust: foo_tests.rs
         || path.contains(".test.")    // JS/TS: foo.test.ts, foo.test.js
         || path.contains("_spec.")    // Ruby, JS: foo_spec.rb, foo.spec.ts
         || path.contains(".spec.")    // JS/TS: foo.spec.ts
@@ -7605,6 +7630,39 @@ mod tests {
             literal_search(&workspace, "calculate_sales_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_sales_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_keeps_spaces_and_drops_one_line_break() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("notes.txt"), "diff the notes\n  if ready\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let options = SearchOptions {
+            context: 0,
+            ..SearchOptions::default()
+        };
+        let lines = |query: &str| {
+            literal_search(&workspace, query, &options)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.preview)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines("if"), ["diff the notes", "  if ready"]);
+        for query in ["if ", " if", "  if ready\r\n", "  if ready\r"] {
+            assert_eq!(lines(query), ["  if ready"], "{query:?}");
+        }
+        assert!(lines(" \n").is_empty());
+        assert!(lines("diff the notes\n  if ready").is_empty());
+        for (pattern, multi_line) in [("if \n", false), ("a\nb", true), ("a\n\n", true)] {
+            assert_eq!(pattern_needs_line_break(pattern, false), multi_line);
+        }
     }
 
     #[test]
@@ -10226,6 +10284,7 @@ export function registerCommands(p: Plugin) {
         // Filename conventions
         assert!(is_test_path("src/handler_test.go"));
         assert!(is_test_path("src/handler_test.rs"));
+        assert!(is_test_path("src/handler_tests.rs"));
         assert!(is_test_path("src/Button.test.tsx"));
         assert!(is_test_path("src/user_spec.rb"));
         assert!(is_test_path("src/handler.spec.ts"));
@@ -12519,6 +12578,36 @@ export function registerCommands(p: Plugin) {
             chunk_density_exponent(&ChunkBoostContext::new(&header))
                 < chunk_density_exponent(&ChunkBoostContext::new(&benchmark))
         );
+    }
+
+    #[test]
+    fn exact_symbol_preview_skips_annotation_arguments() {
+        for (path, language, symbol, content, line) in [
+            (
+                "api.py",
+                "python",
+                "create_transfer",
+                "@router.post(\n    \"/transfers\",\n    status_code=201,\n)\nasync def create_transfer(body):\n    return body\n",
+                5,
+            ),
+            (
+                "shell.ts",
+                "typescript",
+                "AppShell",
+                "@Component({\n  selector: \"x-app\",\n})\nexport class AppShell {}\n",
+                4,
+            ),
+        ] {
+            let lines = line_spans(content);
+            let mut chunk = make_test_chunk(symbol, path, content, "Class");
+            chunk.language = language.to_string();
+            let query = PresentationQuery::new(symbol);
+            assert_eq!(
+                find_focus_line(&chunk, &query, content, &lines),
+                line,
+                "{path}"
+            );
+        }
     }
 
     #[test]

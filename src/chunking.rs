@@ -8,10 +8,12 @@
 //!    or use [`detect_text_only`] for languages without structural boundaries.
 //! 4. Done — indexing, search, and MCP pick it up automatically.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
@@ -705,7 +707,12 @@ pub(crate) fn chunk_source_with_metadata(
 ) -> ChunkedSource {
     let lang_def = find_language_def(rel_path);
     let language = lang_def.map(|d| d.name).unwrap_or("text").to_string();
-    let lines: Vec<&str> = text.lines().collect();
+    let mut lines: Vec<&str> = text.lines().collect();
+    // The parser skips a byte-order mark, but the line heuristics do not. The
+    // tree keeps its offsets into the complete text.
+    if let Some(line) = lines.first_mut() {
+        *line = line.strip_prefix('\u{feff}').unwrap_or(line);
+    }
 
     if lines.is_empty() {
         return ChunkedSource {
@@ -870,6 +877,12 @@ impl ParseBudget {
         Self::with_operation_limit(TREE_SITTER_PARSE_OPERATION_BUDGET)
     }
 
+    /// Query matching is linear for ordinary trees. Only the CPU allowance
+    /// limits it.
+    fn for_query() -> Self {
+        Self::with_operation_limit(u64::MAX)
+    }
+
     fn with_operation_limit(max_operations: u64) -> Self {
         Self {
             max_operations,
@@ -962,8 +975,53 @@ pub(crate) fn parse_source_tree(
     text: &str,
     language: &str,
 ) -> Option<tree_sitter::Tree> {
+    let language = grammar_language(rel_path, language, text);
     let (grammar, _) = tree_sitter_query(rel_path, language, text.lines().count())?;
     parse_source_tree_with_budget(text, &grammar, &ParseBudget::new())
+}
+
+/// C++ and Objective-C headers often use the `.h` extension, and the C grammar
+/// cannot parse classes, namespaces, templates, or interfaces. Mixed headers use
+/// the C++ grammar.
+fn grammar_language<'a>(rel_path: &Path, language: &'a str, text: &str) -> &'a str {
+    if language != "c"
+        || !rel_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("h"))
+    {
+        return language;
+    }
+    // Prose such as `namespace pollution` in a comment is not C++.
+    let mut code = crate::text::code_line_ranges(text, language);
+    if code.any(|range| is_cpp_header_line(&text[range])) {
+        "cpp"
+    } else if text.lines().map(str::trim).any(|line| {
+        // Doxygen has commands named `@interface`, `@protocol`, and `@class`.
+        line == "@end"
+            || line.starts_with("@end ")
+            || line.starts_with("#import ")
+            || line.starts_with("@class ") && line.ends_with(';')
+    }) {
+        "objc"
+    } else {
+        language
+    }
+}
+
+fn is_cpp_header_line(line: &str) -> bool {
+    let single_name = |rest: &str| {
+        let name = rest.split(['{', '/']).next().unwrap_or_default().trim();
+        !name.is_empty() && !name.contains(char::is_whitespace)
+    };
+    matches!(line, "public:" | "protected:" | "private:")
+        || line.starts_with("template<")
+        || line.starts_with("template <")
+        || line
+            .strip_prefix("namespace ")
+            .is_some_and(|rest| rest.ends_with('{') || single_name(rest))
+        || line.starts_with("enum class ")
+        || line.starts_with("class ") && line.ends_with(['{', ';'])
+        || line.starts_with("struct ") && line.contains(" : public ")
 }
 
 fn parse_source_tree_with_budget(
@@ -1006,6 +1064,14 @@ fn parse_source_tree_with_budget(
     (!parse_cancelled).then_some(tree)
 }
 
+fn query_flow(stop: bool) -> std::ops::ControlFlow<()> {
+    if stop {
+        std::ops::ControlFlow::Break(())
+    } else {
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
 fn try_tree_sitter_chunk_source_with_budget(
     rel_path: &Path,
     text: &str,
@@ -1017,7 +1083,8 @@ fn try_tree_sitter_chunk_source_with_budget(
     use streaming_iterator::StreamingIterator;
     use tree_sitter::QueryCursor;
 
-    let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
+    let syntax = grammar_language(rel_path, language, text);
+    let (grammar, query) = tree_sitter_query(rel_path, syntax, lines.len())?;
     let query = query?;
     let objcxx = language == "objc"
         && rel_path
@@ -1030,8 +1097,20 @@ fn try_tree_sitter_chunk_source_with_budget(
     let mut cursor = QueryCursor::new();
 
     let mut captured = Vec::new();
+    let mut aliases = Vec::new();
     let mut rust_doc_includes = Vec::new();
-    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    let query_budget = ParseBudget::for_query();
+    let mut query_stopped = false;
+    let mut progress = |_: &tree_sitter::QueryCursorState| {
+        query_stopped = query_budget.record_progress();
+        query_flow(query_stopped)
+    };
+    let mut matches = cursor.matches_with_options(
+        query,
+        tree.root_node(),
+        text.as_bytes(),
+        tree_sitter::QueryCursorOptions::new().progress_callback(&mut progress),
+    );
 
     while let Some(m) = matches.next() {
         for capture in m.captures {
@@ -1040,6 +1119,10 @@ fn try_tree_sitter_chunk_source_with_budget(
                 if let Some(include) = rust_doc_include(capture.node, text) {
                     rust_doc_includes.push(include);
                 }
+                continue;
+            }
+            if capture_name == "alias" {
+                aliases.push(capture.node);
                 continue;
             }
             if capture_name.starts_with('_') {
@@ -1101,12 +1184,21 @@ fn try_tree_sitter_chunk_source_with_budget(
             captured.push((capture.node, kind));
         }
     }
+    drop(matches);
+    if query_stopped {
+        return None;
+    }
 
     // These grammars identify the declarations we index. Uncaptured strings,
     // comments, and expressions must not become heuristic symbol definitions.
     let uncaptured_definitions: Option<&[ChunkDefinition]> =
-        matches!(language, "swift" | "objc").then_some(&[]);
-    if captured.is_empty() && rust_doc_includes.is_empty() && uncaptured_definitions.is_none() {
+        matches!(language, "swift" | "objc" | "c" | "cpp" | "python").then_some(&[]);
+    // Python files without definitions keep fixed-size windows.
+    if captured.is_empty()
+        && aliases.is_empty()
+        && rust_doc_includes.is_empty()
+        && (uncaptured_definitions.is_none() || language == "python")
+    {
         return None;
     }
 
@@ -1115,18 +1207,16 @@ fn try_tree_sitter_chunk_source_with_budget(
         // the normal whole-file fallback, never a partial AST result.
         objective_cpp_definition_ranges(rel_path, text, captured, budget, &mut trees.cpp_tree)?
     } else {
-        captured_definition_ranges(captured, language, text.as_bytes())
+        captured_definition_ranges(captured, syntax, text.as_bytes())
     };
 
     // Multiple Tree-sitter captures can describe the exact same malformed
     // source span. Keep overlapping parent/child definitions, but never let
     // duplicate captures become extra lexical documents or embedding vectors.
-    if uncaptured_definitions.is_some() {
+    if matches!(syntax, "swift" | "objc") {
         ranges = coalesce_inline_definition_ranges(ranges);
     } else {
-        let mut unique_ranges = HashSet::with_capacity(ranges.len());
-        ranges
-            .retain(|(start, end, kind, _, _)| unique_ranges.insert((*start, *end, kind.clone())));
+        ranges = merge_duplicate_ranges(ranges, lines);
     }
 
     // Sort by start line; keep overlapping structural chunks (impl+fn).
@@ -1315,6 +1405,14 @@ fn try_tree_sitter_chunk_source_with_budget(
     }
 
     chunks.sort_by_key(|c| c.start_line);
+    let mut names = alias_names(&aliases, text.as_bytes());
+    let code = (matches!(language, "c" | "cpp") && tree.root_node().has_error())
+        .then(|| c_code(text, tree))
+        .flatten();
+    if let Some(code) = &code {
+        names.extend(types_with_body(code));
+    }
+    register_names(&mut chunks, names);
 
     rust_doc_includes.sort_by(|left, right| {
         left.source_line
@@ -1633,9 +1731,24 @@ fn objective_cpp_definition_ranges(
 
     let mut cpp_captured = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
-    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    let query_budget = ParseBudget::for_query();
+    let mut query_stopped = false;
+    let mut progress = |_: &tree_sitter::QueryCursorState| {
+        query_stopped = query_budget.record_progress();
+        query_flow(query_stopped)
+    };
+    let mut matches = cursor.matches_with_options(
+        query,
+        tree.root_node(),
+        text.as_bytes(),
+        tree_sitter::QueryCursorOptions::new().progress_callback(&mut progress),
+    );
     while let Some(matched) = matches.next() {
         for capture in matched.captures {
+            let capture_name = query.capture_names()[capture.index as usize];
+            if capture_name == "alias" {
+                continue;
+            }
             let node = capture.node;
             let start = node.start_byte();
             let prefix_end = text[..start].trim_end().len();
@@ -1649,13 +1762,17 @@ fn objective_cpp_definition_ranges(
             {
                 continue;
             }
-            let kind = if query.capture_names()[capture.index as usize] == "class" {
+            let kind = if capture_name == "class" {
                 ChunkKind::Class
             } else {
                 ChunkKind::Function
             };
             cpp_captured.push((node, kind));
         }
+    }
+    drop(matches);
+    if query_stopped {
+        return None;
     }
 
     // Resolve owners separately: ObjC methods belong to their @implementation,
@@ -1711,6 +1828,205 @@ fn has_function_declarator(node: tree_sitter::Node<'_>) -> bool {
         };
     }
     false
+}
+
+/// Keeps the first range of each line span and kind, with the definitions of the
+/// ranges it replaces. One line over `MAX_STRUCTURAL_CHUNK_BYTES`, such as a
+/// minified bundle, keeps its first definition instead of hundreds of short names.
+fn merge_duplicate_ranges(ranges: Vec<CapturedRange>, lines: &[&str]) -> Vec<CapturedRange> {
+    let mut positions = HashMap::with_capacity(ranges.len());
+    let mut merged = Vec::<CapturedRange>::with_capacity(ranges.len());
+    for range in ranges {
+        let (start, end, kind, definitions, _) = &range;
+        let Some(&position) = positions.get(&(*start, *end, kind.clone())) else {
+            positions.insert((*start, *end, kind.clone()), merged.len());
+            merged.push(range);
+            continue;
+        };
+        let one_long_line = start == end
+            && lines
+                .get(start - 1)
+                .is_some_and(|line| line.len() > MAX_STRUCTURAL_CHUNK_BYTES);
+        if !one_long_line
+            && let Some(existing) = &mut merged[position].3
+            && let Some(definitions) = definitions
+        {
+            for definition in definitions {
+                if !existing.contains(definition) {
+                    existing.push(definition.clone());
+                }
+            }
+        }
+    }
+    merged
+}
+
+/// A name without a chunk of its own: its line, the name, and whether it is an
+/// alias. Aliases in a function are local to it.
+type ExtraName<'a> = (usize, &'a str, bool);
+
+/// Names that C and C++ `typedef` and `using` declare at file or namespace
+/// scope, and names of Python `type` statements.
+fn alias_names<'a>(aliases: &[tree_sitter::Node<'_>], source: &'a [u8]) -> Vec<ExtraName<'a>> {
+    let mut extra = Vec::new();
+    for node in aliases {
+        // The aliased type starts the chunk of `typedef struct { ... } name`.
+        let row = node
+            .child_by_field_name("type")
+            .unwrap_or(*node)
+            .start_position()
+            .row;
+        let mut cursor = node.walk();
+        let names = match node
+            .child_by_field_name("name")
+            .or_else(|| python_alias_name(*node))
+        {
+            Some(name) => vec![name],
+            // `typedef struct node node_t, *node_ptr` declares two names.
+            None => {
+                // The grammar reads enumerators and parameters as declarators
+                // after the brace of `typedef NS_ENUM(int, Style) { A, B }`.
+                let end = node
+                    .children(&mut node.walk())
+                    .find(|child| {
+                        child.is_error()
+                            && child
+                                .utf8_text(source)
+                                .is_ok_and(|text| text.contains(['(', '{']))
+                    })
+                    .map_or(node.end_byte(), |error| error.start_byte());
+                node.children_by_field_name("declarator", &mut cursor)
+                    .filter(|declarator| declarator.start_byte() < end)
+                    .filter_map(c_declared_name)
+                    .collect()
+            }
+        };
+        extra.extend(
+            names
+                .iter()
+                .filter_map(|name| name.utf8_text(source).ok())
+                .filter(|name| is_identifier_token(name))
+                .map(|name| (row + 1, name, true)),
+        );
+    }
+    extra
+}
+
+/// `type Matrix[T] = ...` declares `Matrix`.
+fn python_alias_name(alias: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    let mut name = alias.child_by_field_name("left")?;
+    while name.kind() != "identifier" {
+        name = first_named_child(name, None)?;
+    }
+    Some(name)
+}
+
+/// C and C++ code of the same length as `text`, without comments, literals, and
+/// preprocessor directives. The body of a macro without parameters is code.
+fn c_code(text: &str, tree: &tree_sitter::Tree) -> Option<String> {
+    static OBJECT_MACRO: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s*#\s*define\s+\w+\s").expect("valid macro regex"));
+
+    let mut code = text.as_bytes().to_vec();
+    let mut blank = |range: std::ops::Range<usize>| {
+        for byte in &mut code[range] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+    };
+    cpp_non_code_ranges(tree).into_iter().for_each(&mut blank);
+    let mut offset = 0;
+    let mut directive = false;
+    let mut continued = false;
+    for line in text.split_inclusive('\n') {
+        if !continued {
+            directive = line.trim_start().starts_with('#') && !OBJECT_MACRO.is_match(line);
+        }
+        if directive {
+            blank(offset..offset + line.len());
+        }
+        continued = line.trim_end().ends_with('\\');
+        offset += line.len();
+    }
+    String::from_utf8(code).ok()
+}
+
+/// Names of the types that have a body in C or C++ code. One unknown macro can
+/// hide the types in the rest of a file from the grammar.
+fn types_with_body(code: &str) -> Vec<ExtraName<'_>> {
+    static TYPE_WITH_BODY: LazyLock<Regex> = LazyLock::new(|| {
+        let arguments = r"\((?:[^(){};]|\((?:[^(){};]|\([^(){};]*\))*\))*\)";
+        Regex::new(&format!(
+            r"(?x) \b(?:enum\s+(?:class|struct)|class|struct|union|enum)\b
+            # Attributes and export macros before the name.
+            (?:\s*(?:\[\[[^\[\]{{}};]*\]\] | \b[A-Za-z_]\w*\s*{arguments} | \b[A-Z_][A-Z0-9_]*\b | \b__\w+[\t\ ]))*
+            \s*\b(?:[A-Za-z_]\w*::)*(?P<name>[A-Za-z_]\w*)\s*
+            # Template arguments, attributes after the name, and bases.
+            (?:<[^;{{}}]*>)?
+            (?:\s*(?:\bfinal\b | \b__attribute__\s*{arguments} | \b[A-Z_][A-Z0-9_]+\b))*
+            \s*(?::[^:;{{}}][^;{{}}]*)?\{{"
+        ))
+        .expect("valid type regex")
+    });
+
+    let mut line = 1;
+    let mut counted = 0;
+    TYPE_WITH_BODY
+        .captures_iter(code)
+        .filter_map(|captures| captures.name("name"))
+        .filter_map(|name| {
+            line += code[counted..name.start()].matches('\n').count();
+            counted = name.start();
+            // `class SHA256 final {` has the shape of a macro and a name.
+            let name = if name.as_str() == "final" {
+                code[..name.start()]
+                    .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
+                    .find(|word| !word.is_empty())?
+            } else {
+                name.as_str()
+            };
+            Some((line, name, false))
+        })
+        .collect()
+}
+
+/// Adds each name to the innermost chunk that contains its line, unless a chunk
+/// around that line defines it.
+fn register_names(chunks: &mut [Chunk], mut names: Vec<ExtraName<'_>>) {
+    names.sort_by_key(|(line, _, _)| *line);
+    let mut next = 0;
+    let mut around = Vec::new();
+    for (line, name, alias) in names {
+        while chunks
+            .get(next)
+            .is_some_and(|chunk| chunk.start_line <= line)
+        {
+            around.push(next);
+            next += 1;
+        }
+        around.retain(|index: &usize| chunks[*index].end_line >= line);
+        let defines = |index: &usize| {
+            let definitions = chunks[*index].definitions.iter().flatten();
+            definitions.into_iter().any(|known| known.name == name)
+        };
+        if around.iter().any(defines) {
+            continue;
+        }
+        let innermost = around
+            .iter()
+            .filter(|index| !alias || chunks[**index].kind != ChunkKind::Function)
+            .min_by_key(|index| chunks[**index].end_line - chunks[**index].start_line);
+        if let Some(index) = innermost {
+            chunks[*index]
+                .definitions
+                .get_or_insert_default()
+                .push(ChunkDefinition {
+                    name: name.to_string(),
+                    owner: None,
+                });
+        }
+    }
 }
 
 /// Share one physical chunk for coincident-line declarations when their symbol
@@ -1937,9 +2253,14 @@ fn parsed_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> Pa
     match node.kind() {
         "impl_item" => ParsedName::NotADefinition,
         "function_definition" if matches!(language, "c" | "cpp" | "objc") => {
-            c_function_declarator_name(node)
-                .map(text)
-                .unwrap_or(ParsedName::Unknown)
+            match node
+                .child_by_field_name("declarator")
+                .and_then(c_declared_name)
+            {
+                Some(name) if is_destructor_or_operator(name) => ParsedName::NotADefinition,
+                Some(name) => text(name),
+                None => ParsedName::Unknown,
+            }
         }
         "init_declaration" | "initializer_declaration" => ParsedName::Found("init".to_string()),
         "deinit_declaration" if language == "swift" => ParsedName::Found("deinit".to_string()),
@@ -2063,22 +2384,39 @@ fn first_named_child<'tree>(
 }
 
 /// Walks C/C++ declarators (`static int *run(int)`, `void (*getfn(void))(int)`,
-/// `void Outer::run()`) down to the declared identifier.
-fn c_function_declarator_name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
-    let mut current = node.child_by_field_name("declarator")?;
+/// `void Outer::run()`) down to the declared name.
+fn c_declared_name(mut current: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
     loop {
         match current.kind() {
-            "identifier" | "field_identifier" | "qualified_identifier" | "type_identifier" => {
-                return Some(current);
-            }
-            "destructor_name" | "operator_name" => return None,
-            "parenthesized_declarator" => {
+            "identifier"
+            | "field_identifier"
+            | "qualified_identifier"
+            | "type_identifier"
+            | "destructor_name"
+            | "operator_name"
+            | "operator_cast" => return Some(current),
+            "parenthesized_declarator" | "reference_declarator" => {
                 let mut cursor = current.walk();
                 current = current.named_children(&mut cursor).next()?;
             }
             _ => current = current.child_by_field_name("declarator")?,
         }
     }
+}
+
+/// `Socket::~Socket` and `operator==` are not definitions of `Socket` or
+/// `operator`.
+fn is_destructor_or_operator(mut name: tree_sitter::Node<'_>) -> bool {
+    while name.kind() == "qualified_identifier" {
+        let Some(leaf) = name.child_by_field_name("name") else {
+            return false;
+        };
+        name = leaf;
+    }
+    matches!(
+        name.kind(),
+        "destructor_name" | "operator_name" | "operator_cast"
+    )
 }
 
 /// Splits `ns::Outer::run`, `M.sub`, `M:meth`, or `Foo<T>` into an optional
@@ -2220,6 +2558,30 @@ macro_rules! module_function_binding_query {
     };
 }
 
+/// A C or C++ alias outside functions and classes. Include guards put most
+/// header declarations inside preprocessor nodes.
+macro_rules! file_scope_alias_query {
+    ($alias:literal) => {
+        concat!(
+            "(translation_unit ",
+            $alias,
+            " @alias) (ERROR ",
+            $alias,
+            " @alias) (declaration_list ",
+            $alias,
+            " @alias) (preproc_ifdef ",
+            $alias,
+            " @alias) (preproc_if ",
+            $alias,
+            " @alias) (preproc_elif ",
+            $alias,
+            " @alias) (preproc_else ",
+            $alias,
+            " @alias) ",
+        )
+    };
+}
+
 /// Compiled queries are immutable and grammar-specific, so compile each one
 /// once rather than once per file on large initial indexes. Source inspection
 /// can still use the grammar when a chunk-capture query is unavailable.
@@ -2251,7 +2613,7 @@ fn tree_sitter_query(
         "python" => cached_query!(
             PYTHON_QUERY,
             tree_sitter_python::LANGUAGE,
-            "(function_definition) @fn (class_definition) @class"
+            "(function_definition) @fn (class_definition) @class (module (type_alias_statement) @alias) (module (_ (block (type_alias_statement) @alias)))"
         ),
         "go" => cached_query!(
             GO_QUERY,
@@ -2317,12 +2679,21 @@ fn tree_sitter_query(
         "c" => cached_query!(
             C_QUERY,
             tree_sitter_c::LANGUAGE,
-            "(function_definition) @fn (struct_specifier) @class (enum_specifier) @class (union_specifier) @class"
+            // A specifier without a body refers to a type declared elsewhere.
+            concat!(
+                "(function_definition) @fn (struct_specifier body: (_)) @class (enum_specifier body: (_)) @class (union_specifier body: (_)) @class ",
+                file_scope_alias_query!("(type_definition)"),
+            )
         ),
         "cpp" => cached_query!(
             CPP_QUERY,
             tree_sitter_cpp::LANGUAGE,
-            "(function_definition) @fn (class_specifier) @class (struct_specifier) @class (enum_specifier) @class (namespace_definition) @class"
+            concat!(
+                "(function_definition) @fn (class_specifier body: (_)) @class (struct_specifier body: (_)) @class (enum_specifier body: (_)) @class (union_specifier name: (_) body: (_)) @class (namespace_definition) @class ",
+                file_scope_alias_query!("(type_definition)"),
+                file_scope_alias_query!("(alias_declaration)"),
+                "(template_declaration (alias_declaration) @alias)",
+            )
         ),
         "scala" => cached_query!(
             SCALA_QUERY,
@@ -2369,6 +2740,21 @@ fn tree_sitter_query(
             tree_sitter_dart::LANGUAGE,
             "(class_declaration) @class (function_signature) @fn (method_signature) @fn"
         ),
+        // Headers also declare the C types of an Objective-C API.
+        "objc"
+            if rel_path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("h")) =>
+        {
+            cached_query!(
+                OBJC_HEADER_QUERY,
+                tree_sitter_objc::LANGUAGE,
+                concat!(
+                    "(class_interface) @class (protocol_declaration) @class (method_declaration) @fn (function_definition) @fn (struct_specifier body: (_)) @class (enum_specifier body: (_)) @class (union_specifier body: (_)) @class ",
+                    file_scope_alias_query!("(type_definition)"),
+                )
+            )
+        }
         "objc" => cached_query!(
             OBJC_QUERY,
             tree_sitter_objc::LANGUAGE,
@@ -3120,6 +3506,8 @@ fn make_chunk(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     /// (name, owner) pairs of every parser-resolved definition, in order.
@@ -3179,6 +3567,228 @@ mod tests {
                 "macro_rules! zebra_macro {\n    () => {};\n}\n"
             ),
             pairs(&[("zebra_macro", None)])
+        );
+    }
+
+    #[test]
+    fn c_family_types_after_an_unknown_macro_are_defined() {
+        for (path, source, expected) in [
+            // Nearly the complete file is one error node.
+            (
+                "stream.h",
+                "#ifdef __cplusplus\nextern \"C\" {\n#endif\ntypedef struct stream_s stream_t;\n/* struct prose { is a comment */\n#define LIST(name) \\\n  struct name { int x; }\nstruct handle_s {\n  FIELDS\n};\nstruct stream_s API\n{\n  FIELDS\n  FIELDS\n};\nstruct stream_s *next(struct handle_s *from);\nstruct loop_s {\n  int count;\n  FIELDS\n};\n#define READ_FIELDS \\\n  struct read_s { FIELDS } read_req;\n#ifdef __cplusplus\n}\n#endif\n",
+                &[
+                    ("stream_t", None),
+                    ("handle_s", None),
+                    ("stream_s", None),
+                    ("loop_s", None),
+                    ("read_s", None),
+                ][..],
+            ),
+            (
+                "panel.h",
+                "namespace ui {\nAPI_BEGIN\nenum class policy {\n    block,\n};\ntemplate <typename T>\nclass API Panel final : public Base<T>\n{\npublic:\n  struct Size { int w; };\n};\nenum class LEVEL { LOW };\nclass SHA256 final {\n  int state;\n};\nvoid show(class Panel *panel);\n}\n",
+                &[
+                    ("ui", None),
+                    ("policy", None),
+                    ("Panel", None),
+                    ("Size", Some("ui")),
+                    ("LEVEL", Some("ui")),
+                    ("SHA256", Some("ui")),
+                ],
+            ),
+            (
+                "level.h",
+                "MYLIB_NAMESPACE_BEGIN\nenum class LEVEL {\n  LOW\n};\nclass SHA256 final {\npublic:\n  FIELDS\n};\nMYLIB_NAMESPACE_END\n",
+                &[("LEVEL", None), ("SHA256", None)],
+            ),
+        ] {
+            assert_eq!(parsed_definitions(path, source), pairs(expected), "{path}");
+        }
+    }
+
+    #[test]
+    fn c_family_types_are_defined_where_they_have_a_body_or_an_alias() {
+        for (path, source, expected) in [
+            (
+                "node.c",
+                "struct node { int v; struct node *next; };\nstruct node *make(struct node *p) {\n    struct node local;\n    return p;\n}\n\nstruct other;\nvoid use(enum kind k);\n",
+                &[("node", None), ("make", None)][..],
+            ),
+            (
+                "proto.h",
+                "struct node;\nstruct node *make(struct node *p);\n",
+                &[],
+            ),
+            (
+                "types.h",
+                "#ifndef T\n#define T\ntypedef unsigned int u32t;\ntypedef int (*handler_fn)(int);\n\ntypedef struct {\n    int a;\n} config_t;\n\ntypedef struct named {\n    int z;\n} named_t, *named_ptr;\ntypedef NS_ENUM(int, Style) { StyleA, StyleB };\n#endif\n",
+                &[
+                    ("u32t", None),
+                    ("handler_fn", None),
+                    ("config_t", None),
+                    ("named", None),
+                    ("named_t", None),
+                    ("named_ptr", None),
+                ],
+            ),
+            (
+                "widget.cpp",
+                "class Fwd;\nnamespace ui {\nusing Ptr = Fwd *;\n}\nunion Bits { int a; };\nclass Widget {\n    typedef int member;\n    ~Widget() {}\n    bool operator==(Fwd *o) { return true; }\n    Widget &operator=(Fwd *o) { return *this; }\n    Widget &self() { return *this; }\n    operator bool() { return true; }\n    void draw() {}\n};\nWidget::~Widget() {}\n",
+                &[
+                    ("ui", None),
+                    ("Ptr", None),
+                    ("Bits", None),
+                    ("Widget", None),
+                    ("self", Some("Widget")),
+                    ("draw", Some("Widget")),
+                ],
+            ),
+            (
+                "widget.h",
+                "class Widget {\npublic:\n    int draw() const { return 1; }\n};\n",
+                &[("Widget", None), ("draw", Some("Widget"))],
+            ),
+        ] {
+            assert_eq!(parsed_definitions(path, source), pairs(expected), "{path}");
+        }
+    }
+
+    #[test]
+    fn headers_use_the_grammar_of_their_language() {
+        for (source, expected) in [
+            (
+                "#import <Foundation/Foundation.h>\n\n@interface Greeter : NSObject\n- (void)greetPerson:(NSString *)who;\n@end\n\n@protocol GreeterDelegate <NSObject>\n- (void)didGreet;\n@end\n\nunion Reading { int count; float ratio; };\n",
+                &[
+                    ("Greeter", None),
+                    ("greetPerson", Some("Greeter")),
+                    ("GreeterDelegate", None),
+                    ("didGreet", Some("GreeterDelegate")),
+                    ("Reading", None),
+                ][..],
+            ),
+            (
+                "#pragma once\nnamespace ui\n{\nclass Panel : public Base\n{\n  void openPanel() { open_ = true; }\n};\n}\n",
+                &[
+                    ("ui", None),
+                    ("Panel", Some("ui")),
+                    ("openPanel", Some("Panel")),
+                ],
+            ),
+            (
+                "class Widget;\nenum class Shade { Light, Dark };\ninline int width(const Widget &widget) { return 1; }\n",
+                &[("Shade", None), ("width", None)],
+            ),
+            (
+                "/*\n class that is not for public use;\n namespace pollution\n*/\n@interface Meter : NSObject\n@end\n",
+                &[("Meter", None)],
+            ),
+            // Doxygen commands do not make a header Objective-C or C++.
+            (
+                "/**\n@interface\n@class node of a list\n*/\nstruct node { int class; };\n",
+                &[("node", None)],
+            ),
+        ] {
+            let chunks = chunk_source(Path::new("header.h"), source);
+            assert!(chunks.iter().all(|chunk| chunk.language == "c"));
+            assert_eq!(
+                parsed_definitions("header.h", source),
+                pairs(expected),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_first_line() {
+        for (path, source) in [
+            ("schema.graphql", "type Query {\n  user: User\n}\n"),
+            (
+                "store.ex",
+                "defmodule Inventory.Store do\n  def put(x), do: x\nend\n",
+            ),
+            ("run.rb", "#!/usr/bin/env ruby\nmodule Run\nend\n"),
+        ] {
+            let shape = |source: &str| {
+                chunk_source(Path::new(path), source)
+                    .into_iter()
+                    .map(|chunk| (chunk.start_line, chunk.end_line, chunk.kind, chunk.text))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(shape(&format!("\u{feff}{source}")), shape(source), "{path}");
+        }
+    }
+
+    #[test]
+    fn query_matching_over_unmatched_punctuation_stops() {
+        // One error node with 80,000 unnamed children makes matching quadratic:
+        // about 24 seconds of CPU time in a debug build without a limit.
+        let source = format!("{}\n", "(".repeat(400)).repeat(200);
+        let started = thread_cpu_time();
+        let chunks = chunk_source(Path::new("blob.rs"), &source);
+        if let (Some(started), Some(now)) = (started, thread_cpu_time()) {
+            let used = now.saturating_sub(started);
+            assert!(used < std::time::Duration::from_secs(10), "{used:?}");
+        }
+        assert_eq!(chunks.iter().map(|chunk| chunk.end_line).max(), Some(200));
+    }
+
+    #[test]
+    fn definitions_on_one_line_share_a_chunk() {
+        for (path, source, expected) in [
+            (
+                "Pair.java",
+                "class Pair {\n  int getA() { return 1; } int getB() { return 2; }\n}\n",
+                &["Pair", "getA", "getB"][..],
+            ),
+            (
+                "pair.js",
+                "function aa() {} function bb() {}\n",
+                &["aa", "bb"],
+            ),
+            ("pair.rs", "fn aa() {} fn bb() {}\n", &["aa", "bb"]),
+        ] {
+            let chunks = chunk_source(Path::new(path), source);
+            let spans = chunks
+                .iter()
+                .map(|chunk| (chunk.start_line, chunk.end_line, &chunk.kind))
+                .collect::<HashSet<_>>();
+            assert_eq!(spans.len(), chunks.len(), "{path}");
+            let names = parsed_definitions(path, source)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected, "{path}");
+        }
+        let minified = (0..MAX_STRUCTURAL_CHUNK_BYTES / 16)
+            .map(|index| format!("function f{index}() {{}} "))
+            .collect::<String>();
+        assert_eq!(
+            parsed_definitions("a.js", &minified),
+            pairs(&[("f0", None)])
+        );
+    }
+
+    #[test]
+    fn python_module_text_declares_no_symbols() {
+        let source = "\"\"\"Helpers.\n\nThis module provides retries. The function returns nothing.\n\"\"\"\nfrom enum import Enum\n\n\ndef alpha():\n    return 1\n";
+        let chunks = chunk_source(Path::new("m.py"), source);
+        assert!(
+            chunks.iter().all(|chunk| chunk.definitions.is_some()),
+            "{chunks:?}"
+        );
+        assert_eq!(
+            parsed_definitions("m.py", source),
+            pairs(&[("alpha", None)])
+        );
+        let aliases = "type Vector = list[float]\nif True:\n    type Matrix[T] = list[Vector]\n\n\ndef alpha():\n    type Local = int\n";
+        assert_eq!(
+            parsed_definitions("m.py", aliases),
+            pairs(&[("Vector", None), ("Matrix", None), ("alpha", None)])
+        );
+        assert_eq!(
+            parsed_definitions("m.py", "type Vector = list[float]\n"),
+            pairs(&[("Vector", None)])
         );
     }
 
@@ -3826,17 +4436,16 @@ pub fn calculate_total(amount: f64) -> f64 {
     }
 
     #[test]
-    fn malformed_cpp_prose_does_not_duplicate_identical_class_captures() {
+    fn malformed_cpp_prose_is_one_module_chunk() {
         let source = "#include <memory>\n\nclass WidgetImpl {};\n\nclass Widget {\npublic:\n  Widget();\n\nprivate:\n  WidgetImpl* implementation;\n};\n\nThe class Widget class wrapper prevents creating a new Widget class handle within the WidgetImpl class destructor.\n";
         let chunks = chunk_source(Path::new("src/widget.cpp"), source);
-        let prose_classes = chunks
+        let prose_kinds = chunks
             .iter()
-            .filter(|chunk| {
-                chunk.kind == ChunkKind::Class && chunk.start_line == 13 && chunk.end_line == 13
-            })
-            .count();
+            .filter(|chunk| (chunk.start_line..=chunk.end_line).contains(&13))
+            .map(|chunk| &chunk.kind)
+            .collect::<Vec<_>>();
 
-        assert_eq!(prose_classes, 1);
+        assert_eq!(prose_kinds, [&ChunkKind::Module]);
     }
 
     #[test]

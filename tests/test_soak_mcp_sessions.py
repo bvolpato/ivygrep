@@ -64,11 +64,15 @@ class ProcSamplingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory).resolve()
             env = {**os.environ, "IVYGREP_HOME": str(home)}
-            child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()", "--mcp"],
-                                     env=env, stdin=subprocess.PIPE)
-            other = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()", "--mcp"],
-                                     env={**env, "IVYGREP_HOME": f"{home}-other"}, stdin=subprocess.PIPE)
+            command = [sys.executable, "-c", "import sys; print(flush=True); sys.stdin.read()", "--mcp"]
+            child = subprocess.Popen(command, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            other = subprocess.Popen(command, env={**env, "IVYGREP_HOME": f"{home}-other"},
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
             try:
+                # A framework Python executes itself again when it starts. The kernel does not
+                # report the arguments of a process during that time.
+                for process in (child, other):
+                    self.assertEqual(process.stdout.readline(), b"\n")
                 owned = soak.owned_processes(home)
                 self.assertEqual([process["pid"] for process in owned], [child.pid])
                 self.assertEqual(owned[0]["ppid"], os.getpid())
@@ -78,6 +82,7 @@ class ProcSamplingTest(unittest.TestCase):
             finally:
                 for process in (child, other):
                     process.stdin.close()
+                    process.stdout.close()
             # An exited process that nobody has reaped yet must not count as a live session.
             deadline = soak.time.monotonic() + 10
             while child.poll() is None and soak.time.monotonic() < deadline:
