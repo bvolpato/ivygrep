@@ -276,15 +276,54 @@ fn git_reuse_observes_ancestor_ignore_changes() {
     git(&root, &["commit", "-m", "initial"]);
     let workspace = Workspace::resolve(&root).unwrap();
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-    for control in [".ignore", ".gitignore"] {
+    for (control, applies) in [(".ignore", true), (".gitignore", false)] {
         fs::write(parent.path().join(control), "a.rs\n").unwrap();
         index_workspace_for_watcher(&workspace, &model).unwrap();
-        assert_found(&workspace, "ancestor_rule_marker", false);
+        assert_found(&workspace, "ancestor_rule_marker", !applies);
         fs::remove_file(parent.path().join(control)).unwrap();
         assert_clean(&root);
         index_workspace_for_watcher(&workspace, &model).unwrap();
         assert_found(&workspace, "ancestor_rule_marker", true);
         assert_found(&workspace, "stable_marker", true);
+    }
+}
+
+/// An older run applied the `.gitignore` above a repository.
+#[test]
+#[serial]
+fn an_index_built_with_git_rules_above_the_repository_rebuilds_once() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let parent = tempdir().unwrap();
+    let main = parent.path().join("main");
+    let linked = parent.path().join("linked");
+    fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-b", "main"]);
+    fs::write(main.join("a.rs"), "pub fn hidden_marker() {}\n").unwrap();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-m", "initial"]);
+    git(
+        &main,
+        &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+    );
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let workspaces = [&main, &linked].map(|root| Workspace::resolve(root).unwrap());
+    fs::write(parent.path().join(".ignore"), "*\n").unwrap();
+    for workspace in &workspaces {
+        index_workspace_for_watcher(workspace, &model).unwrap();
+        assert_found(workspace, "hidden_marker", false);
+        fs::write(workspace.index_dir.join(".indexed_skip_gitignore"), "false").unwrap();
+    }
+    fs::rename(
+        parent.path().join(".ignore"),
+        parent.path().join(".gitignore"),
+    )
+    .unwrap();
+    for workspace in &workspaces {
+        assert!(workspace.quick_index_health().needs_rebuild());
+        index_workspace_for_watcher(workspace, &model).unwrap();
+        assert!(workspace.quick_index_health().is_queryable());
+        assert_found(workspace, "hidden_marker", true);
     }
 }
 

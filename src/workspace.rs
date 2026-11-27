@@ -1246,6 +1246,17 @@ impl Workspace {
             issues.push("workspace checkout role changed; rebuild required".to_string());
         }
 
+        // `.gitignore` rules above a repository hid its files from older runs.
+        if !crate::indexer::indexed_with_current_source_rules(self)
+            && is_git_workspace_root(&self.root)
+            && has_git_rules_above(&self.root)
+        {
+            issues.push(
+                "Git ignore rules above the repository no longer apply; rebuild required"
+                    .to_string(),
+            );
+        }
+
         if self.has_unfinished_index_publication() {
             issues.push("index publication is incomplete; rebuild required".to_string());
         }
@@ -1512,34 +1523,30 @@ pub(crate) fn root_is_gone(root: &Path) -> bool {
     }
 }
 
-fn is_git_workspace_root(path: &Path) -> bool {
+pub(crate) fn is_git_workspace_root(path: &Path) -> bool {
     let marker = path.join(".git");
     if marker.is_dir() {
         return is_git_dir(&marker);
     }
-    if !marker.is_file() {
-        return false;
-    }
-
-    let Ok(contents) = fs::read_to_string(marker) else {
-        return false;
-    };
-    let Some(raw_git_dir) = contents.trim().strip_prefix("gitdir:") else {
-        return false;
-    };
-    let raw_git_dir = PathBuf::from(raw_git_dir.trim());
-    let git_dir = if raw_git_dir.is_absolute() {
-        raw_git_dir
-    } else {
-        path.join(raw_git_dir)
-    };
-    is_git_dir(&git_dir)
+    marker.is_file()
+        && git_dir_from_marker(path, &marker).is_some_and(|git_dir| is_git_dir(&git_dir))
 }
 
-fn is_git_dir(path: &Path) -> bool {
+pub(crate) fn is_git_dir(path: &Path) -> bool {
     path.join("HEAD").is_file()
         && (path.join("commondir").is_file()
             || (path.join("objects").is_dir() && path.join("refs").is_dir()))
+}
+
+/// Whether a directory above `root` has Git ignore rules.
+fn has_git_rules_above(root: &Path) -> bool {
+    root.ancestors().skip(1).any(|directory| {
+        [".gitignore", ".git/info/exclude"].iter().any(|name| {
+            !ignore::gitignore::Gitignore::new(directory.join(name))
+                .0
+                .is_empty()
+        })
+    })
 }
 
 /// Checkouts nested inside a Git workspace that are workspaces of their own.
@@ -1650,9 +1657,11 @@ fn comparable_git_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn git_dir_from_marker(dir: &Path, marker: &Path) -> Option<PathBuf> {
-    let contents = fs::read_to_string(marker).ok()?;
-    let raw_git_dir = PathBuf::from(contents.trim().strip_prefix("gitdir:")?.trim());
+pub(crate) fn git_dir_from_marker(dir: &Path, marker: &Path) -> Option<PathBuf> {
+    // The path can have bytes that are not UTF-8.
+    let contents = fs::read(marker).ok()?;
+    let raw_git_dir =
+        path_from_git_output(contents.trim_ascii().strip_prefix(b"gitdir:")?.trim_ascii())?;
     Some(if raw_git_dir.is_absolute() {
         raw_git_dir
     } else {
@@ -1743,6 +1752,16 @@ pub fn git_common_dir(root: &Path) -> Option<PathBuf> {
     resolved.canonicalize().ok().or(Some(resolved))
 }
 
+/// Whether the `.git` file of `root` names the Git directory of a linked
+/// worktree. The `.git` file of a submodule or of a `--separate-git-dir` clone
+/// names a Git directory without a `commondir`.
+fn is_linked_worktree(root: &Path) -> bool {
+    let marker = root.join(".git");
+    marker.is_file()
+        && git_dir_from_marker(root, &marker)
+            .is_some_and(|git_dir| git_dir.join("commondir").is_file())
+}
+
 /// Returns the main checkout root for a checkout or linked worktree.
 fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
     let git_entry = root.join(".git");
@@ -1751,6 +1770,9 @@ fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
     }
     if !git_entry.is_file() {
         return None;
+    }
+    if !is_linked_worktree(root) {
+        return Some(root.to_path_buf());
     }
 
     let output = Command::new("git")
@@ -1776,6 +1798,11 @@ fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
     }
 
     let main_root = path_from_git_output(main_path)?;
+    // Git lists the Git directory itself as the main worktree of a submodule
+    // or of a `--separate-git-dir` clone. It has no sources to share.
+    if !is_git_workspace_root(&main_root) {
+        return None;
+    }
     main_root.canonicalize().ok().or(Some(main_root))
 }
 
@@ -2051,7 +2078,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             .and_then(|record| record.details.get("coalesced_events"))
             .and_then(|value| value.parse::<u64>().ok());
 
-        let ws_is_worktree = metadata.root.join(".git").is_file();
+        let ws_is_worktree = is_linked_worktree(&metadata.root);
         let base_repo_root = if ws_is_worktree {
             git_main_worktree_root(&metadata.root).filter(|main| *main != metadata.root)
         } else {
@@ -3178,6 +3205,7 @@ mod tests {
                 .success()
         );
 
+        assert!(is_git_workspace_root(&worktree));
         let workspace = Workspace::resolve(&worktree).unwrap();
         let canonical_main = main.canonicalize().unwrap();
         assert_eq!(workspace.main_worktree_root(), Some(canonical_main.clone()));
