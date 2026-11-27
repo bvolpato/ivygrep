@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
@@ -10,7 +13,8 @@ use ignore::WalkBuilder;
 /// - Shows hidden files (but skips `.git` repository/worktree metadata)
 /// - Skips linked worktrees and clones nested in a Git workspace; submodules stay
 /// - Respects `.gitignore`, `.git/info/exclude`, global gitignore, and `.ignore` (unless skip_gitignore is true)
-/// - Does not require a git repository
+/// - Does not require a git repository. The root of one bounds `.gitignore` and
+///   `info/exclude` as in Git. `.ignore` files above the root always apply
 /// - Does not follow symlinks
 pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     source_walker_scoped(root, skip_gitignore, None)
@@ -33,14 +37,32 @@ pub(crate) fn source_walker_scoped(
     let mut walker = source_ignore_builder(root, skip_gitignore, exclude.as_deref());
     walker.follow_links(false);
     let nested_checkouts = crate::workspace::NestedCheckouts::new(root);
+    let enclosing_rules = EnclosingGitRules::new(root, skip_gitignore).map(Mutex::new);
+    let needs_enclosing_rules = AtomicBool::new(false);
     walker.filter_entry(move |entry| {
+        let is_dir = entry.depth() > 0 && entry.file_type().is_some_and(|kind| kind.is_dir());
         scope.as_ref().is_none_or(|scope| scope.starts_with(entry.path()) || entry.path().starts_with(scope))
             && entry.file_name() != ".git"
             && !is_owned_storage_path(&workspace_root, entry.path(), owned_root.as_deref())
             // A nested worktree or clone is a workspace of its own.
-            && !(entry.depth() > 0
-                && entry.file_type().is_some_and(|kind| kind.is_dir())
-                && nested_checkouts.is_separate_checkout(&workspace_root, entry.path()))
+            && !(is_dir && nested_checkouts.is_separate_checkout(&workspace_root, entry.path()))
+            && !enclosing_rules.as_ref().is_some_and(|rules| {
+                // The walk calls this for a directory before its entries. Most
+                // workspaces need no lock, because no directory needs the rules.
+                if !needs_enclosing_rules.load(Ordering::Relaxed) {
+                    if is_dir
+                        && (repository_boundary(entry.path()) == Some(false)
+                            || submodule_exclude(entry.path()).is_some())
+                    {
+                        needs_enclosing_rules.store(true, Ordering::Relaxed);
+                    }
+                    return false;
+                }
+                entry.path().strip_prefix(&workspace_root).is_ok_and(|rel| {
+                    let matched = rules.lock().unwrap().matched(rel, is_dir);
+                    matched.is_some_and(|(matched, _)| matched.is_ignore())
+                })
+            })
     });
     walker
 }
@@ -56,7 +78,9 @@ pub(crate) fn source_ignore_builder(
     walker.git_exclude(!skip_gitignore);
     walker.git_global(!skip_gitignore);
     walker.ignore(!skip_gitignore);
-    walker.require_git(false);
+    // The walker stops `.gitignore` rules at a repository root only in this
+    // mode. Without it, a plain directory keeps its own and inherited rules.
+    walker.require_git(crate::workspace::is_git_workspace_root(root));
     if !skip_gitignore
         && let Some(exclude) = exclude
         && exclude != root.join(".git/info/exclude")
@@ -68,11 +92,145 @@ pub(crate) fn source_ignore_builder(
     walker
 }
 
-pub(crate) fn source_ignore_matcher(walker: &WalkBuilder) -> ignore::IncrementalIgnore {
+fn incremental_ignore(walker: &WalkBuilder) -> ignore::IncrementalIgnore {
     walker
         .build_matchers()
         .pop()
         .expect("source walker has exactly one root")
+}
+
+/// Whether `dir` is a repository. `None` if it has no entry that stops Git
+/// rules in the `ignore` crate.
+fn repository_boundary(dir: &Path) -> Option<bool> {
+    [".git", ".jj"]
+        .iter()
+        .any(|name| dir.join(name).exists())
+        .then(|| crate::workspace::is_git_workspace_root(dir))
+}
+
+/// `info/exclude` with rules of a checkout whose Git directory is elsewhere,
+/// such as a submodule. The `ignore` crate does not read it. The template of Git
+/// has only comments.
+fn submodule_exclude(dir: &Path) -> Option<PathBuf> {
+    let marker = dir.join(".git");
+    if !marker.is_file() {
+        return None;
+    }
+    crate::workspace::git_dir_from_marker(dir, &marker)
+        .map(|git_dir| git_dir.join("info/exclude"))
+        .filter(|exclude| {
+            std::fs::read(exclude).is_ok_and(|rules| {
+                rules
+                    .split(|byte| *byte == b'\n')
+                    .any(|rule| !rule.trim_ascii().is_empty() && !rule.starts_with(b"#"))
+            })
+        })
+}
+
+/// Git rules that the `ignore` crate does not apply. It stops Git rules at a
+/// directory with a `.git` or `.jj` entry that is not a repository, such as a
+/// worktree whose repository moved. In Git, the rules of the enclosing
+/// repository apply there. It also does not read `info/exclude` of a submodule.
+///
+/// These rules only hide more: below such a directory, a `!` rule of the
+/// enclosing repository does not override the global ignore file or an
+/// `info/exclude` that `add_ignore` adds.
+struct EnclosingGitRules {
+    root: PathBuf,
+    /// The `repository_boundary` of each directory below `root`.
+    boundaries: HashMap<PathBuf, Option<bool>>,
+    /// The `submodule_exclude` of each repository below `root`.
+    excludes: HashMap<PathBuf, Option<PathBuf>>,
+    /// For each enclosing repository, and whether a directory stops its rules.
+    matchers: HashMap<(PathBuf, bool), ignore::IncrementalIgnore>,
+}
+
+impl EnclosingGitRules {
+    /// `None` if the walker does not stop Git rules below `root`.
+    fn new(root: &Path, skip_gitignore: bool) -> Option<Self> {
+        (!skip_gitignore && crate::workspace::is_git_workspace_root(root)).then(|| Self {
+            root: root.to_path_buf(),
+            boundaries: HashMap::new(),
+            excludes: HashMap::new(),
+            matchers: HashMap::new(),
+        })
+    }
+
+    /// `None` if `rel` is not below such a directory.
+    fn matched(
+        &mut self,
+        rel: &Path,
+        is_dir: bool,
+    ) -> Option<(ignore::IncrementalMatch, Option<ignore::Error>)> {
+        let mut repository = Path::new("");
+        let mut stops_early = false;
+        for dir in rel.ancestors().skip(1).filter(|dir| *dir != Path::new("")) {
+            let boundary = self
+                .boundaries
+                .entry(dir.to_path_buf())
+                .or_insert_with(|| repository_boundary(&self.root.join(dir)));
+            if *boundary == Some(true) {
+                repository = dir;
+                break;
+            }
+            stops_early |= boundary.is_some();
+        }
+        let exclude = if repository == Path::new("") {
+            None
+        } else {
+            self.excludes
+                .entry(repository.to_path_buf())
+                .or_insert_with(|| submodule_exclude(&self.root.join(repository)))
+                .as_deref()
+        };
+        if !stops_early && exclude.is_none() {
+            return None;
+        }
+        let matcher = self
+            .matchers
+            .entry((repository.to_path_buf(), stops_early))
+            .or_insert_with(|| {
+                let mut walker = source_ignore_builder(&self.root.join(repository), false, exclude);
+                if stops_early {
+                    walker.require_git(false).parents(false);
+                }
+                incremental_ignore(&walker)
+            });
+        Some(matcher.matched_with_errors(rel.strip_prefix(repository).ok()?, is_dir))
+    }
+}
+
+/// The ignore rules of the source walker for single paths.
+pub(crate) struct SourceIgnore {
+    rules: ignore::IncrementalIgnore,
+    enclosing_rules: Option<EnclosingGitRules>,
+}
+
+impl SourceIgnore {
+    pub(crate) fn new(walker: &WalkBuilder, skip_gitignore: bool) -> Self {
+        let rules = incremental_ignore(walker);
+        Self {
+            enclosing_rules: EnclosingGitRules::new(rules.root(), skip_gitignore),
+            rules,
+        }
+    }
+
+    /// Whether the walker ignores `rel`. A malformed pattern is not an error.
+    pub(crate) fn ignores(&mut self, rel: &Path, is_dir: bool) -> Result<bool, ignore::Error> {
+        let enclosing = self.enclosing_rules.as_mut();
+        let enclosing = enclosing.and_then(|rules| rules.matched(rel, is_dir));
+        let mut ignored = false;
+        for (matched, error) in [Some(self.rules.matched_with_errors(rel, is_dir)), enclosing]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(error) = error.filter(|error| !is_ignore_pattern_warning(error)) {
+                return Err(error);
+            }
+            ignored |= matched.is_ignore();
+        }
+        Ok(ignored)
+    }
 }
 
 /// Request-local ignore rules for source paths, including deleted Git files.
@@ -80,7 +238,7 @@ pub(crate) struct SourcePathMatcher {
     root: PathBuf,
     owned_root: Option<PathBuf>,
     nested_checkouts: crate::workspace::NestedCheckouts,
-    ignore: ignore::IncrementalIgnore,
+    ignore: SourceIgnore,
     error: Option<ignore::Error>,
 }
 
@@ -90,7 +248,7 @@ impl SourcePathMatcher {
             root: root.to_path_buf(),
             owned_root: owned_storage_root(root),
             nested_checkouts: crate::workspace::NestedCheckouts::new(root),
-            ignore: source_ignore_matcher(&source_walker(root, skip_gitignore)),
+            ignore: SourceIgnore::new(&source_walker(root, skip_gitignore), skip_gitignore),
             error: None,
         }
     }
@@ -116,14 +274,16 @@ impl SourcePathMatcher {
         if let Some(error) = &self.error {
             return Err(error.clone().into());
         }
-        let (matched, error) = self.ignore.matched_with_errors(path, false);
-        if let Some(error) = error.filter(|error| !is_ignore_pattern_warning(error)) {
-            // Directory rules are cached, including failed reads. Keep failures
-            // sticky so a later path cannot use a partially loaded policy.
-            self.error = Some(error.clone());
-            return Err(error.into());
+        match self.ignore.ignores(path, false) {
+            Ok(ignored) => Ok(!ignored),
+            Err(error) => {
+                // Directory rules are cached, including failed reads. Keep
+                // failures sticky so a later path cannot use a partially
+                // loaded policy.
+                self.error = Some(error.clone());
+                Err(error.into())
+            }
         }
-        Ok(!matched.is_ignore())
     }
 }
 
@@ -437,6 +597,121 @@ mod tests {
         assert!(files.contains("clone/lib.rs"));
         assert!(files.contains("detached/lib.rs"));
         assert!(files.contains(".claude/worktrees/agent/main.rs"));
+    }
+
+    #[test]
+    fn git_rules_stop_at_the_repository_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "*\n").unwrap();
+        std::fs::write(tmp.path().join(".ignore"), "hidden.rs\n").unwrap();
+        let repo = tmp.path().join("repo");
+        write_git_dir(&repo.join(".git"), false);
+        std::fs::write(repo.join(".gitignore"), ".worktrees/**\n").unwrap();
+        let worktree = repo.join(".worktrees/agent");
+        let worktree_git_dir = repo.join(".git/worktrees/agent");
+        write_git_dir(&worktree_git_dir, true);
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )
+        .unwrap();
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+
+        for (root, applies_outer_git_rules) in [(&repo, false), (&worktree, false), (&plain, true)]
+        {
+            std::fs::write(root.join("visible.rs"), "fn visible() {}\n").unwrap();
+            std::fs::write(root.join("hidden.rs"), "fn hidden() {}\n").unwrap();
+            let files = collect_files(root, false);
+            let mut matcher = SourcePathMatcher::new(root, false);
+            for (path, allowed) in [
+                ("visible.rs", !applies_outer_git_rules),
+                ("hidden.rs", false),
+            ] {
+                assert_eq!(files.contains(path), allowed, "{root:?} {path}");
+                assert_eq!(
+                    matcher.allows(Path::new(path)).unwrap(),
+                    allowed,
+                    "{root:?} {path}"
+                );
+            }
+        }
+    }
+
+    /// Git does not accept these entries as repositories.
+    #[test]
+    fn git_rules_continue_below_an_entry_that_is_not_a_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let file = |path: String, contents: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        write_git_dir(&root.join(".git"), false);
+        file(".git/info/exclude".into(), "excluded.rs\n");
+        file(".git/modules/sub/info/exclude".into(), "local-secret.rs\n");
+        file(".gitignore".into(), "*.env\n");
+        file(".ignore".into(), "!kept.log\n");
+        // A submodule has rules of its own.
+        let submodule = |path: &str| {
+            let git_dir = root.join(".git/modules").join(path);
+            write_git_dir(&git_dir, false);
+            file(
+                format!("{path}/.git"),
+                &format!("gitdir: {}\n", git_dir.display()),
+            );
+            file(format!("{path}/.gitignore"), "*.log\n");
+        };
+        submodule("sub");
+        submodule("jj/sub");
+
+        let mut paths = Vec::new();
+        for parent in ["", "sub/", "jj/"] {
+            for (entry, contents) in [
+                ("empty-directory/.git/info", None),
+                ("broken-file/.git", Some("gitdir: ../missing\n")),
+                ("empty-file/.git", Some("")),
+                ("jj/.jj", None),
+            ] {
+                let entry = format!("{parent}{entry}");
+                match contents {
+                    Some(contents) => file(entry.clone(), contents),
+                    None => std::fs::create_dir_all(root.join(&entry)).unwrap(),
+                }
+                let dir = entry.split("/.").next().unwrap();
+                file(format!("{dir}/own/.gitignore"), "!own.env\n");
+                let in_submodule = parent == "sub/";
+                for (name, allowed) in [
+                    ("lib.rs", true),
+                    ("secret.env", in_submodule),
+                    ("deep/secret.env", in_submodule),
+                    ("own/own.env", true),
+                    ("excluded.rs", in_submodule),
+                    ("debug.log", !in_submodule),
+                ] {
+                    paths.push((format!("{dir}/{name}"), allowed));
+                }
+            }
+        }
+        paths.push(("local-secret.rs".into(), true));
+        paths.push(("sub/local-secret.rs".into(), false));
+        paths.push(("sub/deep/local-secret.rs".into(), false));
+        paths.push(("sub/kept.log".into(), true));
+        paths.push(("sub/dropped.log".into(), false));
+        paths.push(("jj/sub/secret.env".into(), true));
+        paths.push(("jj/sub/debug.log".into(), false));
+        for (path, _) in &paths {
+            file(path.clone(), "marker\n");
+        }
+
+        let files = collect_files(&root, false);
+        let mut matcher = SourcePathMatcher::new(&root, false);
+        for (path, allowed) in &paths {
+            assert_eq!(files.contains(path), *allowed, "{path}");
+            assert_eq!(matcher.allows(Path::new(path)).unwrap(), *allowed, "{path}");
+        }
     }
 
     #[test]
