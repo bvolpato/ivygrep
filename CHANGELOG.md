@@ -45,6 +45,13 @@ All notable changes to ivygrep are documented in this file.
 - A query warns when the path of the daemon socket is too long for a Unix socket. Only `daemon.log` named the reason why no daemon and no watcher ran.
 - Search works inside a Git submodule. A submodule, a clone made with `git clone --separate-git-dir`, and a linked worktree of either are standalone workspaces. ivygrep took their Git directory for the main checkout: every search in a submodule failed with `base index format incompatible`, and a separate Git directory was indexed as a workspace. When ivygrep rebuilds the checkout, it removes that index. An index of a submodule no longer prevents an index of its parent repository.
 - `.gitignore` and `info/exclude` rules above a Git repository no longer apply to its files, as in Git. A rule such as `*` or `.worktrees/**` in a directory above a repository or a linked worktree left its index empty. A submodule inside a workspace also stops the rules of its parent repository, except the `info/exclude` rules of a workspace whose root has a `.git` file. Its own `info/exclude` rules apply. `.ignore` files above a repository and all rules above a plain directory still apply. An index with such rules above its repository rebuilds on first use. The next `ig --add` adds the submodule files that rules of the parent hid.
+- C and C++ symbol lookups return definitions only. A mention such as `struct node *next` no longer counts as a definition of `node`, so a common type no longer hides its own definition. `typedef` and `using` names and C++ unions are found.
+- C++ classes and methods in `.h` files are found. A C++ destructor or operator no longer counts as a definition of its class or of `operator`.
+- Several definitions on one line, such as `int getA() { ... } int getB() { ... }`, are all found.
+- In C and C++ code that the grammar cannot parse because of a macro, types with a body are found. A `typedef` in such code can be missing.
+- Python module docstrings and imports no longer register words such as `provides` or `import` as symbols.
+- Previews of exact symbol hits show the definition line when a multi-line decorator or annotation precedes it.
+- Index format v31 rebuilds existing indexes once to pick up the symbol and chunking changes above.
 
 ### Security
 
