@@ -4,6 +4,22 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-27
+
+### Upgrade notes
+
+- The index format is v31. ivygrep rebuilds each existing index once, with the usual indexing and vector enhancement costs.
+- `ig --rm PATH` exits 1 when `PATH` has no saved index. It exited 0 before.
+- An unknown `--type`, or MCP `type`, is an error. It returned no results before.
+- `ig --interactive` rejects search flags that it ignored before, such as `--literal` and `--json`.
+- MCP `ig_search` returns an error instead of building or expanding an index of the home directory, a directory that contains it, or the filesystem root. Build such an index with `ig --add`.
+- `-n` limits result files in CLI regex, reference, and caller searches. The same command can print more lines than before.
+- A search below an indexed plain directory uses the index of that directory. The Fixed section lists the exceptions.
+
+### Changed
+
+- Refresh Rust and frontend dependencies.
+
 ### Fixed
 
 - `./test.sh --stress` applies `--filter`, `--nocapture`, and `--test-threads`.
