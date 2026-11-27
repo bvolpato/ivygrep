@@ -65,18 +65,19 @@ impl DoctorReport {
             }
         }
         if findings.is_empty() {
-            findings = default_findings(&health);
+            findings = default_findings(workspace, &health);
         }
 
+        let unrepaired = neural_metadata_invalid || indexing_was_interrupted(workspace);
         let reranker = crate::reranker::runtime_status();
         Self {
             workspace_root: workspace.root.clone(),
-            state: if neural_metadata_invalid && health.is_queryable() {
+            state: if unrepaired && health.is_queryable() {
                 WorkspaceIndexState::Unhealthy
             } else {
                 health.state
             },
-            healthy: health.is_queryable() && !neural_metadata_invalid,
+            healthy: health.is_queryable() && !unrepaired,
             chunk_count: health.chunk_count,
             file_count: health.file_count,
             vector_key_count: workspace.vector_key_count(),
@@ -117,6 +118,17 @@ pub fn inspect_workspace_quick(workspace: &Workspace) -> DoctorReport {
 }
 
 pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Result<DoctorReport> {
+    inspect_and_fix_if_confirmed(workspace, fix, deep, &mut |_| Ok(()))
+}
+
+/// [`inspect_and_maybe_fix`] with a check that runs before `--fix` builds an
+/// index. An error from it leaves the index as it is.
+pub(crate) fn inspect_and_fix_if_confirmed(
+    workspace: &Workspace,
+    fix: bool,
+    deep: bool,
+    confirm_rebuild: &mut dyn FnMut(WorkspaceIndexState) -> Result<()>,
+) -> Result<DoctorReport> {
     let mut cleanup_actions = if fix {
         workspace.cleanup_stale_legacy_runtime_files()
     } else {
@@ -131,18 +143,19 @@ pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Re
         workspace.quick_index_health()
     };
     if !fix {
+        let mut findings = runtime_findings(workspace);
+        findings.extend(daemon_finding());
         return Ok(DoctorReport::from_health(
-            workspace,
-            initial,
-            false,
-            runtime_findings(workspace),
+            workspace, initial, false, findings,
         ));
     }
 
     let should_rebuild = match initial.state {
         WorkspaceIndexState::Unhealthy => true,
         WorkspaceIndexState::NotIndexed => initial.has_indexable_files,
-        WorkspaceIndexState::Healthy | WorkspaceIndexState::HealthyEmpty => false,
+        WorkspaceIndexState::Healthy | WorkspaceIndexState::HealthyEmpty => {
+            indexing_was_interrupted(workspace)
+        }
     };
 
     if !should_rebuild {
@@ -153,7 +166,8 @@ pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Re
             findings.push("SQLite index compacted successfully".to_string());
         }
         findings.extend(runtime_findings(workspace));
-        findings.extend(default_findings(&initial));
+        findings.extend(daemon_finding());
+        findings.extend(default_findings(workspace, &initial));
         if findings.is_empty() {
             findings.push("no repair needed".to_string());
         }
@@ -165,12 +179,14 @@ pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Re
         ));
     }
 
+    confirm_rebuild(initial.state)?;
     rebuild_workspace_index(workspace)?;
 
     let repaired = workspace.index_health();
     let mut findings = cleanup_actions;
     findings.extend(runtime_findings(workspace));
-    findings.extend(default_findings(&repaired));
+    findings.extend(daemon_finding());
+    findings.extend(default_findings(workspace, &repaired));
     if repaired.is_queryable() {
         findings.insert(0, "index rebuilt successfully".to_string());
     } else {
@@ -185,12 +201,43 @@ pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Re
     ))
 }
 
+/// Whether an indexing process ended before its run did. The job record keeps
+/// this until the next run, unlike the PID file, which a health check removes.
+fn indexing_was_interrupted(workspace: &Workspace) -> bool {
+    let status = jobs::job_status(workspace, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS);
+    status.stalled && !status.process_alive
+}
+
+/// A daemon endpoint that no daemon answers. Without an endpoint there is no
+/// daemon, which is not a fault: the next search can start one.
+fn daemon_finding() -> Option<String> {
+    if !crate::ipc::socket_exists() {
+        return None;
+    }
+    let answered = crate::daemon::request_blocking(&crate::protocol::DaemonRequest::Version, false)
+        .is_ok_and(|response| response.is_some());
+    if answered {
+        None
+    } else if crate::ipc::socket_exists() {
+        Some("the daemon endpoint exists, but no daemon answers".to_string())
+    } else {
+        Some("removed the endpoint of a daemon that no longer runs".to_string())
+    }
+}
+
 fn runtime_findings(workspace: &Workspace) -> Vec<String> {
     let mut findings = Vec::new();
 
     let watcher_status = jobs::job_status(workspace, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS);
     if watcher_status.stalled {
         findings.push("watcher job heartbeat is stale".to_string());
+    } else if !watcher_status.active()
+        && !workspace.is_watcher_alive()
+        && workspace
+            .read_metadata()
+            .is_ok_and(|metadata| metadata.is_some_and(|metadata| metadata.watch_enabled))
+    {
+        findings.push("the watcher is configured, but it does not run".to_string());
     }
     findings.extend(workspace.stale_legacy_runtime_findings());
     if let Some(record) = watcher_status.record.as_ref()
@@ -205,7 +252,11 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
 
     let indexing_status =
         jobs::job_status(workspace, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS);
-    if indexing_status.stalled {
+    if indexing_was_interrupted(workspace) {
+        findings.push(
+            "the last indexing run did not finish; run `ig --doctor --fix` to rebuild".to_string(),
+        );
+    } else if indexing_status.stalled {
         findings.push("indexing job heartbeat is stale".to_string());
     }
 
@@ -216,6 +267,14 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
     );
     if enhancement_status.stalled {
         findings.push("background enhancement heartbeat is stale".to_string());
+    }
+    if let Some(error) = workspace.enhancement_error()
+        && !error.contains("neural feature not compiled")
+    {
+        findings.push(format!(
+            "background enhancement failed: {}",
+            error.lines().next().unwrap_or_default()
+        ));
     }
     if let Ok(meta) = std::fs::metadata(workspace.enhancing_paused_path())
         && let Ok(modified) = meta.modified()
@@ -343,7 +402,7 @@ fn repair_invalid_neural_metadata(workspace: &Workspace) -> Result<Vec<String>> 
     Ok(actions)
 }
 
-fn default_findings(health: &WorkspaceIndexHealth) -> Vec<String> {
+fn default_findings(workspace: &Workspace, health: &WorkspaceIndexHealth) -> Vec<String> {
     if !health.issues.is_empty() {
         return health.issues.clone();
     }
@@ -351,6 +410,9 @@ fn default_findings(health: &WorkspaceIndexHealth) -> Vec<String> {
     match health.state {
         WorkspaceIndexState::Healthy => {
             vec!["index is healthy".to_string()]
+        }
+        WorkspaceIndexState::HealthyEmpty if workspace.is_worktree() => {
+            vec!["worktree has no indexed changes; its files come from the base index".to_string()]
         }
         WorkspaceIndexState::HealthyEmpty => {
             vec!["workspace has no indexable files, so an empty index is valid".to_string()]
@@ -369,6 +431,77 @@ mod tests {
     use super::*;
     use crate::workspace::WorkspaceMetadata;
     use serial_test::serial;
+
+    fn indexed_workspace(root: &std::path::Path, home: &std::path::Path) -> Workspace {
+        unsafe { std::env::set_var("IVYGREP_HOME", home) };
+        std::fs::write(root.join("lib.rs"), "pub fn answer() -> usize { 42 }\n").unwrap();
+        let workspace = Workspace::resolve(root).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        workspace
+    }
+
+    // The liveness check of a recorded process is always positive on Windows.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn doctor_fix_rebuilds_after_an_interrupted_indexing_run() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let workspace = indexed_workspace(root.path(), home.path());
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        jobs::start_job(&workspace, JobKind::Indexing, "scanning", 1).unwrap();
+        let mut ledger = jobs::read_job_ledger(&workspace);
+        for job in &mut ledger.jobs {
+            job.pid = Some(child.id());
+        }
+        std::fs::write(
+            workspace.job_ledger_path(),
+            serde_json::to_vec(&ledger).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(workspace.indexing_pid_path(), child.id().to_string()).unwrap();
+
+        for _ in 0..2 {
+            let report = inspect_and_maybe_fix(&workspace, false, false).unwrap();
+            assert_eq!(report.state, WorkspaceIndexState::Unhealthy);
+            assert!(!report.healthy);
+        }
+        let report = inspect_and_maybe_fix(&workspace, true, false).unwrap();
+        assert!(report.repaired && report.healthy, "{:?}", report.findings);
+        assert!(!indexing_was_interrupted(&workspace));
+    }
+
+    #[test]
+    #[serial]
+    fn doctor_reports_an_offline_watcher_and_a_failed_enhancement() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let workspace = indexed_workspace(root.path(), home.path());
+        let report = inspect_and_maybe_fix(&workspace, false, false).unwrap();
+        assert_eq!(report.findings, ["index is healthy"]);
+
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.watch_enabled = true;
+        workspace.write_metadata(&metadata).unwrap();
+        std::fs::write(
+            workspace.index_dir.join(".enhancing.error"),
+            "Enhancement error: no model\n\nCaused by:\n    offline\n",
+        )
+        .unwrap();
+        let report = inspect_and_maybe_fix(&workspace, false, false).unwrap();
+        assert_eq!(
+            report.findings,
+            [
+                "the watcher is configured, but it does not run",
+                "background enhancement failed: Enhancement error: no model",
+            ]
+        );
+    }
 
     #[test]
     #[serial]

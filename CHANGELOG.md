@@ -70,6 +70,17 @@ All notable changes to ivygrep are documented in this file.
 - MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
 - The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
 - MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
+- `--wait-for-enhancement` reports a failed neural worker and exits. Without a model, for example offline, it started a new worker without end and never returned.
+- `ig --rm PATH` removes the index of a directory that no longer exists, that a newer Git root contains, or that was renamed. It fails when PATH has no saved index. The index of a deleted directory, such as a removed Git worktree, no longer blocks an index of the directory above it.
+- A search, context, or MCP request for a path below an indexed plain directory uses that index with a path scope. It built a second index, and `ig --add` of the directory then failed. A second index is still built for an ignored directory, for a directory that the outer index does not have yet, while the outer index needs a rebuild, and below an index of the home directory or the filesystem root.
+- `ig --doctor --fix` rebuilds an index after an interrupted indexing run, also when `ig --doctor` ran first. It asks before it indexes a home directory or the filesystem root, and it applies the sub-workspace check to a first index.
+- `ig --doctor` reports an offline watcher, a failed background enhancement, and a daemon endpoint that no daemon answers.
+- `ig --add --json` and `ig --rm --json` print the same fields with and without a daemon. `--first-line-only` applies to `--json` output.
+- `--literal`, `--symbol`, `--refs`, `--callers`, and `--regex` search for the words `context`, `agent`, `hardware`, and `help`. Other searches for them need `--`, as in `ig -- context`.
+- `--since` accepts every valid branch name, such as `fix/issue#12`.
+- An unknown `--type`, or MCP `type`, is an error. It returned no results.
+- An argument that is not valid UTF-8 no longer causes a panic. Errors for an unusable data directory and for `ig --web` without a daemon name the cause. `ig --status` reports workspaces whose metadata it cannot read.
+- Text previews keep the indentation of their first line. A first index without a daemon prints its notice once.
 
 ### Security
 
