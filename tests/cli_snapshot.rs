@@ -404,6 +404,26 @@ fn cli_interactive_long_flags_are_accepted() {
 
 #[test]
 #[serial]
+fn cli_interactive_without_a_terminal_writes_nothing_and_does_not_index() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    cmd.current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--interactive", "--no-watch", "tax"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicates::str::contains("--interactive needs a terminal"));
+
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&target_root).unwrap();
+    assert!(!workspace.metadata_path().exists());
+}
+
+#[test]
+#[serial]
 fn cli_short_i_is_not_interactive_alias() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     cmd.arg("-i").arg("--version").assert().failure();
