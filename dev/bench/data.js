@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795784396292,
+  "lastUpdate": 1795786486016,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -84014,6 +84014,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2741.61,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "24447edc3426fd9a03dbbdd15c7eb7a7e2f74d2a",
+          "message": "[docs] Rewrite the README and add a user guide (#488)\n\nThe README now leads with the purpose, install commands, a one-minute start, and a search table. docs/guide.md keeps the rules for indexing, search, context packs, the Web UI, data, and troubleshooting.\n\nReplace the illustrative hero with recorded ig output. Allow details and summary in the Markdown lint configuration.\n\nShow a real context pack item, link the data behind the million-chunk number, and correct the chunking statement.",
+          "timestamp": "2026-11-27T07:55:08-05:00",
+          "tree_id": "06f8884b6a6f4b882e65ba21c92d9db0c6a17993",
+          "url": "https://github.com/bvolpato/ivygrep/commit/24447edc3426fd9a03dbbdd15c7eb7a7e2f74d2a"
+        },
+        "date": 1795786485390,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 41467.67,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 4297.29,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 59211.73,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 201483.92,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 12.79,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 2105.88,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1740.96,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 1662.72,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 1404.33,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.34,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 102.03,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4996.56,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1421.7,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1705.29,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3329.23,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3656.82,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 4349.78,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 538.47,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 3576.39,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 217158.1,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 101.62,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 284088.97,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 26643.23,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 104223.04,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 165.01,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2134.02,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/hash_vector_search_in_50k_distinct_hot",
+            "value": 216.18,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_distinct_hot",
+            "value": 438.84,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_distinct_hot",
+            "value": 4697.7,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 76.57,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 543.03,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2424.39,
             "unit": "µs"
           }
         ]
