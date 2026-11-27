@@ -64,9 +64,13 @@ export TMPDIR
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/ivygrep-web-e2e.XXXXXX")
 tmp_root=$(CDPATH='' cd "$tmp_root" && pwd -P) || fail "could not resolve temp root"
 project="$tmp_root/project"
+other="$tmp_root/other"
 out_dir="$tmp_root/out"
-mkdir -p "$project/src" "$out_dir"
+mkdir -p "$project/src" "$project/docs" "$other/src" "$out_dir"
 git -C "$project" init -q
+git -C "$other" init -q
+printf '# Guide\n\nguide link marker: [source](../src/web.ts)\n' > "$project/docs/guide.md"
+printf 'export const otherProject = 1;\n' > "$other/src/web.ts"
 cat > "$project/src/web.ts" <<'EOF'
 export function semanticBrowserResult(): string {
   return "semantic browser marker";
@@ -95,6 +99,7 @@ export IVYGREP_ENHANCE_MAX_LOAD_RATIO=0
 export CARGO_TERM_COLOR=never
 
 "$ig_bin" --add "$project" --force --no-watch --hash --json >"$out_dir/add.json"
+"$ig_bin" --add "$other" --force --no-watch --hash --json >"$out_dir/add-other.json"
 
 "$ig_bin" --daemon >"$out_dir/daemon.log" 2>&1 &
 daemon_pid=$!

@@ -69,7 +69,7 @@ fn assert_transient_source_does_not_poison_clean_checkout_reuse(tracked: bool) {
     let mutation = git_state::test_support::transient_source(
         &workspace.root,
         &workspace.root.join("transient.rs"),
-        b"pub fn transient_indexed_but_not_current_marker() {}\n",
+        Some(b"pub fn transient_indexed_but_not_current_marker() {}\n"),
     );
 
     // Both Git checks see the same clean checkout, but indexing reads a
@@ -123,6 +123,221 @@ fn deleted_transient_source_does_not_poison_clean_checkout_reuse() {
 #[serial]
 fn restored_transient_source_does_not_poison_clean_checkout_reuse() {
     assert_transient_source_does_not_poison_clean_checkout_reuse(true);
+}
+
+#[test]
+#[serial]
+fn tracked_source_missing_during_the_walk_does_not_poison_clean_checkout_reuse() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(root.path().join(".gitignore"), "ignored.rs\n").unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept() {}\n").unwrap();
+    fs::write(root.path().join("ignored.rs"), "pub fn ignored() {}\n").unwrap();
+    fs::write(root.path().join("back.rs"), "pub fn back() {}\n").unwrap();
+    git(root.path(), &["init", "-q"]);
+    git(root.path(), &["add", "-f", "ignored.rs"]);
+    commit_fixture(root.path());
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    let removal = git_state::test_support::transient_source(
+        &workspace.root,
+        &workspace.root.join("back.rs"),
+        None,
+    );
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    drop(removal);
+    assert_eq!(chunk_count(&workspace, "back.rs"), 0);
+    assert!(CleanGitCheckout::capture(&workspace.root).is_some());
+
+    let repaired = index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert_eq!((repaired.indexed_files, repaired.deleted_files), (1, 0));
+    assert_eq!(chunk_count(&workspace, "back.rs"), 1);
+    // A tracked file that the walker ignores does not prevent reuse.
+    assert_eq!(chunk_count(&workspace, "ignored.rs"), 0);
+    assert!(indexed_git_state_path(&workspace).exists());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn unreadable_file_keeps_its_chunks_until_it_is_readable_again() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, SystemTime};
+
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let locked = root.path().join("locked.rs");
+    fs::write(root.path().join("kept.rs"), "pub fn kept_before() {}\n").unwrap();
+    fs::write(&locked, "pub fn locked_before() {}\n").unwrap();
+    // With an old modification time and without the change time, Git reports a
+    // clean checkout after a permission change. It does not read the file.
+    fs::File::open(&locked)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+    commit_fixture(root.path());
+    git(root.path(), &["config", "core.trustctime", "false"]);
+    let allow = |mode| fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+    allow(0o000);
+    if fs::read(&locked).is_ok() {
+        return; // Privileged users can bypass Unix permission bits.
+    }
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    let update = || {
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert!(workspace.quick_index_health().is_queryable());
+        (summary.indexed_files, summary.warning)
+    };
+    // Literal search cannot verify a line of an unreadable file.
+    let found = |name| {
+        crate::symbols::search_symbols(
+            &workspace,
+            name,
+            crate::symbols::SymbolSearchMode::Definitions,
+            None,
+            None,
+        )
+        .unwrap()
+        .len()
+    };
+
+    // A first index holds every other file and does not certify the checkout.
+    let (_, warning) = update();
+    assert!(warning.unwrap().contains("locked.rs"));
+    assert_eq!((found("kept_before"), found("locked_before")), (1, 0));
+    assert!(CleanGitCheckout::capture(&workspace.root).is_some());
+    assert!(!indexed_git_state_path(&workspace).exists());
+    allow(0o644);
+    assert_eq!(update(), (1, None));
+    assert_eq!(found("locked_before"), 1);
+    assert!(indexed_git_state_path(&workspace).exists());
+
+    // An update keeps the old chunks and applies the other changes.
+    fs::write(root.path().join("kept.rs"), "pub fn kept_after() {}\n").unwrap();
+    fs::write(&locked, "pub fn locked_after() {}\n").unwrap();
+    allow(0o000);
+    let (_, warning) = update();
+    assert!(warning.unwrap().contains("locked.rs"));
+    assert_eq!((found("kept_after"), found("locked_before")), (1, 1));
+
+    // It is not an update of every later run.
+    let generation = || workspace.read_metadata().unwrap().unwrap().index_generation;
+    let before = generation();
+    let (_, warning) = update();
+    assert!(warning.unwrap().contains("locked.rs"));
+    assert_eq!(generation(), before);
+
+    allow(0o644);
+    assert_eq!(update(), (1, None));
+    assert_eq!((found("locked_after"), found("locked_before")), (1, 0));
+}
+
+/// A walk without the rules of an ignore file lists the files that they hide.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn unreadable_ignore_file_fails_the_run_and_keeps_the_index() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    let rules = root.path().join(".gitignore");
+    fs::write(&rules, "hidden.rs\n").unwrap();
+    fs::write(root.path().join("hidden.rs"), "pub fn hidden() {}\n").unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept() {}\n").unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+    let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+
+    fs::set_permissions(&rules, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&rules).is_ok() {
+        return; // Privileged users can bypass Unix permission bits.
+    }
+    for path in [None, Some(".gitignore"), Some("hidden.rs")] {
+        let result = match path {
+            None => index_workspace(&workspace, &model),
+            Some(path) => {
+                index_workspace_paths_for_watcher(&workspace, &model, &[PathBuf::from(path)])
+            }
+        };
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains(".gitignore"), "{error}");
+        assert!(workspace.quick_index_health().is_queryable());
+        assert_eq!(chunk_count(&workspace, "hidden.rs"), 0);
+        assert_eq!(
+            fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+    }
+
+    fs::set_permissions(&rules, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(root.path().join("kept.rs"), "pub fn kept_after() {}\n").unwrap();
+    index_workspace(&workspace, &model).unwrap();
+    assert_eq!(chunk_count(&workspace, "hidden.rs"), 0);
+    assert_eq!(chunk_count(&workspace, "kept.rs"), 1);
+}
+
+#[test]
+#[serial]
+fn failed_read_leaves_the_index_queryable() {
+    use crate::merkle::test_support::{Stage, fail};
+
+    // A large update commits before it reads its last files.
+    for large in [false, true] {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("a.rs"), "pub fn kept_before() {}\n").unwrap();
+        fs::write(root.path().join("z.rs"), "pub fn broken_before() {}\n").unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        fs::write(root.path().join("a.rs"), "pub fn kept_after() {}\n").unwrap();
+        fs::write(root.path().join("z.rs"), "pub fn broken_after() {}\n").unwrap();
+        if large {
+            for file in 0..14 {
+                let source = (0..2_000)
+                    .map(|line| format!("pub fn large_{file}_{line}() {{}}\n"))
+                    .collect::<String>();
+                fs::write(root.path().join(format!("large_{file}.rs")), source).unwrap();
+            }
+        }
+        let failure = fail(
+            Stage::Index,
+            &workspace.root.join("z.rs"),
+            std::io::ErrorKind::InvalidData,
+        );
+        let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+        assert!(index_workspace(&workspace, &model).is_err());
+        assert!(
+            workspace.quick_index_health().is_queryable(),
+            "large={large}"
+        );
+        assert_eq!(chunk_count(&workspace, "a.rs"), 1);
+        assert_eq!(chunk_count(&workspace, "large_0.rs"), 0);
+        assert_eq!(
+            fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+        drop(failure);
+
+        index_workspace(&workspace, &model).unwrap();
+        for (query, expected) in [
+            ("kept_before", 0),
+            ("broken_before", 0),
+            ("kept_after", 1),
+            ("broken_after", 1),
+        ] {
+            let hits = literal_search(&workspace, query, &SearchOptions::default()).unwrap();
+            assert_eq!(hits.len(), expected, "large={large} {query}");
+        }
+    }
 }
 
 #[test]
