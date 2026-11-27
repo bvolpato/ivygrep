@@ -45,11 +45,8 @@ mod presentation;
 #[path = "search_semantic_visibility.rs"]
 mod semantic_visibility;
 
-pub(crate) use boolean::BOOLEAN_NOT_APPLIED_WARNING;
-use boolean::{
-    BooleanSearch, boolean_candidates, has_explicit_boolean_operators, lexical_query_parser,
-    parse_lexical_query,
-};
+pub(crate) use boolean::{BOOLEAN_NOT_APPLIED_WARNING, has_explicit_boolean_operators};
+use boolean::{BooleanSearch, boolean_candidates, lexical_query_parser, parse_lexical_query};
 use eligibility::CandidateEligibility;
 use file_cache::{CachedFileContent, FileContentCache};
 use semantic_visibility::{refill_semantic_matches, score_constrained_semantic_keys};
@@ -189,8 +186,8 @@ impl SearchOptions {
     /// Return the language filter in the canonical form stored by the index.
     ///
     /// Search options can come from raw Web/MCP requests, which accept file
-    /// extensions and aliases (for example, `rs`). Unknown filters stay
-    /// unchanged so they retain their existing no-match behavior.
+    /// extensions and aliases (for example, `rs`). Unknown filters, which the
+    /// Web API accepts, stay unchanged and match nothing.
     pub(crate) fn canonical_type_filter(&self) -> Option<String> {
         self.type_filter.as_deref().map(|filter| {
             crate::chunking::resolve_type_alias(filter)
@@ -1002,7 +999,7 @@ pub(crate) fn literal_file_search_with_context(
             _,
         ) => literal::FileSearchMode::FilesWithPreviews {
             file_limit: file_limit.min(MAX_SEARCH_RESULT_LIMIT),
-            hits_per_file: hits_per_file.clamp(1, crate::protocol::MAX_HITS_PER_FILE),
+            hits_per_file: hits_per_file.clamp(1, MAX_SEARCH_RESULT_LIMIT),
         },
         _ => literal::FileSearchMode::Files,
     };
@@ -1729,6 +1726,10 @@ fn literal_queries_allow_incremental_verification(queries: &[String]) -> bool {
     })
 }
 
+/// Longest literal that gets one relaxed variant per term. Their size grows with
+/// the square of the term count, and a pasted prompt has hundreds of terms.
+const MAX_RELAXED_LITERAL_TERMS: usize = 24;
+
 fn literal_candidate_query(
     fields: &TantivyFields,
     query: &str,
@@ -1754,6 +1755,13 @@ fn literal_candidate_query(
         if terms.len() == 2 {
             variants.push(vec![0]);
             variants.push(vec![1]);
+        } else if terms.len() > MAX_RELAXED_LITERAL_TERMS {
+            // Only the first and the last term of an exact substring can be
+            // part of a longer indexed term.
+            let last = terms.len() - 1;
+            variants.push((1..=last).collect());
+            variants.push((0..last).collect());
+            variants.push((1..last).collect());
         } else if terms.len() > 2 {
             for skipped in 0..terms.len() {
                 variants.push(
@@ -3054,9 +3062,17 @@ fn should_use_conjunctive_numeric_query(query_text: &str) -> bool {
             == 1
 }
 
+/// Longest query variant matched as an exact substring. The matcher compiles
+/// every variant into one regex, whose size limit a pasted file would exceed.
+const MAX_LITERAL_QUERY_BYTES: usize = 16 * 1024;
+
 fn build_literal_queries(query_text: &str, lexical_queries: &[String]) -> Vec<String> {
     if should_run_literal_pass(query_text) {
-        return lexical_queries.to_vec();
+        return lexical_queries
+            .iter()
+            .filter(|query| query.len() <= MAX_LITERAL_QUERY_BYTES)
+            .cloned()
+            .collect();
     }
 
     let primary = tokenize_query(query_text);
@@ -4872,6 +4888,8 @@ fn source_mask(sources: &[String]) -> SourceMask {
 }
 
 const MIN_FILTERED_RESULTS: usize = 10;
+/// Most files below the authority floor that an exact lookup adds to its results.
+const MAX_LOW_AUTHORITY_MATCHES: usize = 3;
 const REPRESENTATIVE_SPAN_MIN_COVERAGE: f32 = 0.75;
 const FILE_COHERENCE_WEIGHT: f32 = 0.22;
 const FILE_COHERENCE_CANDIDATES: usize = 50;
@@ -5157,11 +5175,6 @@ fn filter_meaningful_scores_with_query(
 ) -> Vec<RankedCandidate> {
     let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
     let query_tokens = query.tokens.as_slice();
-    let secondary_intent = query.secondary_intent;
-    let implementation_intent = query_targets_implementation(query_tokens);
-    let raw_terms = raw_query_terms(query.text);
-    let short_literal_lookup =
-        !raw_terms.is_empty() && raw_terms.len() <= 2 && !query.location_intent;
     if ranked.is_empty() {
         return vec![];
     }
@@ -5171,29 +5184,20 @@ fn filter_meaningful_scores_with_query(
     if !has_direct_candidate {
         return filter_semantic_only_scores(ranked, query, precise_query);
     }
-    let floor_ceiling = direct_candidate_authority_ceiling(&ranked, query_tokens, secondary_intent);
+    let gate = AuthorityGate::new(&ranked, query);
+    let only_exact_matches = gate.only_exact_matches(&ranked, query);
 
     if ranked.len() == 1 {
-        let item = &ranked[0];
-        if direct_candidate_has_enough_authority(
-            &item.chunk,
-            item.sources,
-            query_tokens,
-            precise_query,
-            secondary_intent,
-            implementation_intent,
-            short_literal_lookup,
-            floor_ceiling,
-        ) {
+        if gate.admits(&ranked[0]) {
             return ranked;
         }
-        return vec![];
+        return only_exact_matches;
     }
 
     // Adaptive threshold: start from score distribution, then clamp against
-    // the best result. Low-authority files are suppressed unless the query is
-    // an exact identifier/path-style lookup with a verified literal hit; this
-    // avoids fixture/data/vendor junk leaking into high-confidence advice.
+    // the best result. Low-authority files are suppressed unless nothing better
+    // matched (see `AuthorityGate`); this avoids fixture/data/vendor junk leaking
+    // into high-confidence advice.
     let mean = ranked.iter().map(|item| item.score).sum::<f32>() / ranked.len() as f32;
     let variance = ranked
         .iter()
@@ -5203,28 +5207,11 @@ fn filter_meaningful_scores_with_query(
     let stddev = variance.sqrt();
     let adaptive_threshold = (mean - stddev).max(best_score * 0.35).max(0.010);
 
-    let candidate_authority = |chunk: &IndexedChunk, sources: SourceMask| -> (f32, f32) {
-        let path_lower = lower_index_path(&chunk.file_path);
-        let authority =
-            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
-        let mut authority_floor = recommendation_authority_floor(
-            sources,
-            precise_query,
-            secondary_intent,
-            implementation_intent,
-            short_literal_lookup,
-        );
-        if candidate_may_relax_authority_floor(path_lower.as_ref()) {
-            authority_floor = authority_floor.min(floor_ceiling);
-        }
-        (authority, authority_floor)
-    };
     let mut fallback = None;
     let mut filtered = Vec::new();
     let mut backfill = Vec::new();
     for (index, item) in ranked.into_iter().enumerate() {
-        let (authority, authority_floor) = candidate_authority(&item.chunk, item.sources);
-        let enough_authority = authority >= authority_floor;
+        let enough_authority = gate.admits(&item);
         let strong_path_match = has_path_source(item.sources)
             && file_stem_boost(query_tokens, &ChunkBoostContext::new(&item.chunk)) >= 0.5;
         let meaningful = if strong_path_match {
@@ -5268,6 +5255,15 @@ fn filter_meaningful_scores_with_query(
                 }
             }
         }
+    }
+    // One chunk for each file, scored below every result: these files never move
+    // or replace a file above the floor.
+    let mut next_score = filtered.last().map_or(f32::MAX, |item| item.score * 0.99);
+    for mut item in only_exact_matches {
+        item.score = item.score.min(next_score);
+        next_score = item.score * 0.99;
+        item.sources |= SOURCE_BACKFILL;
+        filtered.push(item);
     }
 
     filtered
@@ -5351,13 +5347,7 @@ fn dense_promotion_test<'a>(
     ranked: &[RankedCandidate],
     query: &'a FusionQuery<'_>,
 ) -> impl Fn(&RankedCandidate) -> bool + 'a {
-    let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
-    let implementation_intent = query_targets_implementation(&query.tokens);
-    let raw_terms = raw_query_terms(query.text);
-    let short_literal_lookup =
-        !raw_terms.is_empty() && raw_terms.len() <= 2 && !query.location_intent;
-    let floor_ceiling =
-        direct_candidate_authority_ceiling(ranked, &query.tokens, query.secondary_intent);
+    let gate = AuthorityGate::new(ranked, query);
     let role_authority = |item: &RankedCandidate| {
         file_authority_score_for_path(lower_index_path(&item.chunk.file_path).as_ref())
     };
@@ -5366,19 +5356,7 @@ fn dense_promotion_test<'a>(
         .filter(|item| has_direct_source(item.sources))
         .map(role_authority)
         .fold(0.0f32, f32::max);
-    move |item| {
-        role_authority(item) >= best_role_authority
-            && direct_candidate_has_enough_authority(
-                &item.chunk,
-                item.sources,
-                &query.tokens,
-                precise_query,
-                query.secondary_intent,
-                implementation_intent,
-                short_literal_lookup,
-                floor_ceiling,
-            )
-    }
+    move |item| role_authority(item) >= best_role_authority && gate.admits(item)
 }
 
 fn has_direct_source(sources: SourceMask) -> bool {
@@ -5395,36 +5373,108 @@ fn has_path_source(sources: SourceMask) -> bool {
     sources & SOURCE_PATH != 0
 }
 
-#[allow(clippy::too_many_arguments)]
-fn direct_candidate_has_enough_authority(
-    chunk: &IndexedChunk,
-    sources: SourceMask,
-    query_tokens: &[String],
+/// Decides which candidates of one result list have enough authority to return.
+struct AuthorityGate<'a> {
+    query_tokens: &'a [String],
     precise_query: bool,
     secondary_intent: bool,
     implementation_intent: bool,
     short_literal_lookup: bool,
-    floor_ceiling: f32,
-) -> bool {
-    let path_lower = lower_index_path(&chunk.file_path);
-    let authority =
-        effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
-    let mut floor = recommendation_authority_floor(
-        sources,
-        precise_query,
-        secondary_intent,
-        implementation_intent,
-        short_literal_lookup,
-    );
-    if candidate_may_relax_authority_floor(path_lower.as_ref()) {
-        floor = floor.min(floor_ceiling);
+    ceiling: AuthorityCeiling,
+}
+
+impl<'a> AuthorityGate<'a> {
+    fn new(ranked: &[RankedCandidate], query: &'a FusionQuery<'_>) -> Self {
+        let query_tokens = query.tokens.as_slice();
+        let raw_terms = raw_query_terms(query.text);
+        Self {
+            query_tokens,
+            precise_query: is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens),
+            secondary_intent: query.secondary_intent,
+            implementation_intent: query_targets_implementation(query_tokens),
+            short_literal_lookup: !raw_terms.is_empty()
+                && raw_terms.len() <= 2
+                && !query.location_intent,
+            ceiling: direct_candidate_authority_ceiling(
+                ranked,
+                query_tokens,
+                query.secondary_intent,
+            ),
+        }
     }
-    authority >= floor
+
+    fn admits(&self, item: &RankedCandidate) -> bool {
+        let path_lower = lower_index_path(&item.chunk.file_path);
+        let authority = effective_authority_score_for_path(
+            self.query_tokens,
+            path_lower.as_ref(),
+            self.secondary_intent,
+        );
+        let mut floor = recommendation_authority_floor(
+            item.sources,
+            self.precise_query,
+            self.secondary_intent,
+            self.implementation_intent,
+            self.short_literal_lookup,
+        );
+        if file_authority_score_for_path(path_lower.as_ref()) >= self.ceiling.min_role {
+            floor = floor.min(self.ceiling.authority);
+        }
+        authority >= floor
+    }
+
+    /// Files below the floor with the strongest evidence for a one-term lookup: the
+    /// file it names, else the definition of the identifier, else the files that
+    /// contain it. Copies stay hidden beside a named file or a definition above the
+    /// floor.
+    fn only_exact_matches(
+        &self,
+        ranked: &[RankedCandidate],
+        query: &FusionQuery<'_>,
+    ) -> Vec<RankedCandidate> {
+        if query.text.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let is_named = |item: &RankedCandidate| {
+            lower_index_path(&item.chunk.file_path)
+                .strip_suffix(query.lower.as_str())
+                .is_some_and(|parent| parent.is_empty() || parent.ends_with('/'))
+        };
+        let has = |item: &RankedCandidate, source| self.precise_query && item.sources & source != 0;
+        let is_definition = |item: &RankedCandidate| has(item, SOURCE_EXACT_SYMBOL);
+        let has_text = |item: &RankedCandidate| has(item, SOURCE_LITERAL);
+        let kinds: [&dyn Fn(&RankedCandidate) -> bool; 3] = [&is_named, &is_definition, &has_text];
+        let Some(kind) = kinds.into_iter().find(|matches| ranked.iter().any(matches)) else {
+            return Vec::new();
+        };
+        if ranked
+            .iter()
+            .filter(|item| kind(item) || is_definition(item))
+            .any(|item| self.admits(item))
+        {
+            return Vec::new();
+        }
+        let mut files = HashSet::new();
+        ranked
+            .iter()
+            .filter(|item| kind(item) && files.insert(path_key(&item.chunk.file_path)))
+            .take(MAX_LOW_AUTHORITY_MATCHES)
+            .cloned()
+            .collect()
+    }
+}
+
+/// Upper bound of the authority floor for candidates whose base authority is at
+/// least `min_role`.
+#[derive(Clone, Copy)]
+struct AuthorityCeiling {
+    authority: f32,
+    min_role: f32,
 }
 
 /// Lowest base authority a candidate may have for the corpus-relative floor
 /// to adapt to it. Generated, data, and vendored paths stay below this bound
-/// and are still suppressed when nothing better matched.
+/// and are suppressed while a candidate above it matched.
 const RELAXABLE_AUTHORITY_ROLE_SCORE: f32 = 0.45;
 
 /// Upper bound for the recommendation authority floor given what actually
@@ -5434,53 +5484,72 @@ const RELAXABLE_AUTHORITY_ROLE_SCORE: f32 = 0.45;
 /// every direct hit is `Documentation` (0.5) and a fixed floor returns nothing.
 /// The floor therefore never exceeds the best authority among direct
 /// candidates whose path role is at least documentation-grade, and when
-/// documentation dominates the direct hits, documentation passes. Repositories
-/// with primary-source hits keep the static floors unchanged.
+/// documentation dominates the direct hits, documentation passes. A repository of
+/// configuration files, or a scope inside a vendored tree, has no such candidate
+/// either: the best role that matched passes. Repositories with primary-source
+/// hits keep the static floors unchanged.
 fn direct_candidate_authority_ceiling(
     ranked: &[RankedCandidate],
     query_tokens: &[String],
     secondary_intent: bool,
-) -> f32 {
+) -> AuthorityCeiling {
+    let static_floors = AuthorityCeiling {
+        authority: f32::MAX,
+        min_role: RELAXABLE_AUTHORITY_ROLE_SCORE,
+    };
     let mut best_relaxable_authority = 0.0f32;
     let mut lowest_documentation_authority = f32::MAX;
+    let mut best_low_role = 0.0f32;
+    let mut lowest_low_authority = f32::MAX;
     let mut direct = 0usize;
     let mut documentation = 0usize;
     for item in ranked.iter().filter(|item| has_direct_source(item.sources)) {
         direct += 1;
         let path_lower = lower_index_path(&item.chunk.file_path);
+        let role_authority = file_authority_score_for_path(path_lower.as_ref());
+        let authority =
+            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
+        if role_authority < RELAXABLE_AUTHORITY_ROLE_SCORE {
+            if role_authority > best_low_role {
+                best_low_role = role_authority;
+                lowest_low_authority = authority;
+            } else if role_authority == best_low_role {
+                lowest_low_authority = lowest_low_authority.min(authority);
+            }
+            continue;
+        }
         let role = path_role(path_lower.as_ref());
         if role == PathRole::PrimarySource {
             // Implementation code matched: the static floors apply unchanged.
-            return f32::MAX;
+            return static_floors;
         }
-        if !candidate_may_relax_authority_floor(path_lower.as_ref()) {
-            continue;
-        }
-        let authority =
-            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
         best_relaxable_authority = best_relaxable_authority.max(authority);
         if role == PathRole::Documentation {
             documentation += 1;
             lowest_documentation_authority = lowest_documentation_authority.min(authority);
         }
     }
-    if direct == 0 || best_relaxable_authority <= 0.0 {
-        return f32::MAX;
+    if best_relaxable_authority <= 0.0 {
+        return if best_low_role > 0.0 {
+            AuthorityCeiling {
+                authority: lowest_low_authority,
+                min_role: best_low_role,
+            }
+        } else {
+            static_floors
+        };
     }
-    if documentation * 2 > direct {
-        // Notes and docs are the corpus here; keep all of them eligible.
-        return lowest_documentation_authority.min(best_relaxable_authority);
+    // Generated, data, and vendored candidates keep the static floor even when a
+    // deeply nested documentation candidate pulls the ceiling under their score.
+    AuthorityCeiling {
+        authority: if documentation * 2 > direct {
+            // Notes and docs are the corpus here; keep all of them eligible.
+            lowest_documentation_authority.min(best_relaxable_authority)
+        } else {
+            best_relaxable_authority
+        },
+        ..static_floors
     }
-    best_relaxable_authority
-}
-
-/// Whether a candidate's path role is documentation-grade or better, i.e.
-/// eligible for the corpus-relative floor. Generated, data, and vendored paths
-/// never are: they keep the static floor even when the ceiling drops below
-/// their base score (a deeply nested documentation candidate can pull the
-/// ceiling under 0.45).
-fn candidate_may_relax_authority_floor(path_lower: &str) -> bool {
-    file_authority_score_for_path(path_lower) >= RELAXABLE_AUTHORITY_ROLE_SCORE
 }
 
 fn recommendation_authority_floor(
@@ -5991,14 +6060,17 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
 
 fn file_authority_score_for_path(path: &str) -> f32 {
     // Prefer project code over vendored and generated trees.
-    if path.contains("vendor/")
-        || path.contains("node_modules/")
-        || path.contains("__pycache__/")
-        || path.contains(".git/")
-        || path.contains("target/")
-        || path.contains("dist/")
-        || path.contains("build/")
-    {
+    let directories = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    if directories.split('/').any(|directory| {
+        // `_vendor`, `_build`, and `.build` are names of the same trees, as are
+        // `cmake-build` and the `cmake-build-debug` of CLion.
+        matches!(directory, "__pycache__" | ".git")
+            || directory.starts_with("cmake-build")
+            || matches!(
+                directory.trim_start_matches(['_', '.']),
+                "vendor" | "node_modules" | "target" | "dist" | "build"
+            )
+    }) {
         return 0.2;
     }
 
@@ -8884,6 +8956,107 @@ mod tests {
 
     #[test]
     #[serial]
+    fn hybrid_search_without_ascii_terms_ranks_files_and_limits_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("a.md"), "認証\n".repeat(60)).unwrap();
+        std::fs::write(tmp.path().join("b.md"), "認証\n".repeat(150)).unwrap();
+        std::fs::write(tmp.path().join("c.py"), "def 認証(user):\n    pass\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let ranked = |limit: Option<usize>| {
+            let options = SearchOptions {
+                limit,
+                ..SearchOptions::default()
+            };
+            let hits = hybrid_search(&workspace, "認証", Some(&model), &options).unwrap();
+            if let Some(limit) = limit {
+                assert!(hits.len() <= limit, "{limit}: {hits:?}");
+            }
+            let files = crate::protocol::group_hits_by_file(&hits, None)
+                .into_iter()
+                .map(|file| file.file_path)
+                .collect::<Vec<_>>();
+            (files, hits.len())
+        };
+        let expected = ["b.md", "a.md", "c.py"].map(PathBuf::from);
+        assert_eq!(ranked(Some(2)).0, expected[..2]);
+        // A full limit marks counts as lower bounds. Below it, no match is missing.
+        assert_eq!(ranked(None), (expected.to_vec(), DEFAULT_SEARCH_LIMIT));
+        assert_eq!(ranked(Some(1_000)), (expected.to_vec(), 211));
+        assert_eq!(ranked(Some(usize::MAX)), (expected.to_vec(), 211));
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_returns_a_line_range_once_for_overlapping_chunks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("blueprint.py"),
+            "class Blueprint:\n    def register(self):\n        return url_for(self)\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let options = SearchOptions {
+            context: 0,
+            ..SearchOptions::default()
+        };
+        let hits = hybrid_search(&workspace, "url_for", None, &options).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.start_line, hit.end_line))
+                .collect::<Vec<_>>(),
+            [(3, 3)],
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn literal_pass_stays_bounded_for_long_prompts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let words = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    let letter = |value: usize| char::from(b'a' + (value % 26) as u8);
+                    format!("word{}{}", letter(index / 26), letter(index))
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // `traceback` routes to the literal pass, and the file continues the
+        // first and the last word of the pasted text.
+        let text = format!("{} traceback {}", words(40), words(60));
+        std::fs::write(tmp.path().join("prose.txt"), format!("x{text}x\n")).unwrap();
+        std::fs::write(tmp.path().join("other.txt"), "wordaa wordab\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let ctx = SearchContext::load(&workspace, None, false).unwrap();
+
+        let query = literal_candidate_query(&ctx.fields, &words(300), true).unwrap();
+        let variants = query.downcast_ref::<BooleanQuery>().unwrap().clauses();
+        assert!(variants.len() <= 4, "{} variants", variants.len());
+
+        let hits = hybrid_search(&workspace, &text, None, &SearchOptions::default()).unwrap();
+        assert_eq!(hits[0].file_path, PathBuf::from("prose.txt"));
+        assert!(hits[0].sources.contains(&"literal".to_string()), "{hits:?}");
+
+        let log = "wordaa wordab\n".repeat(20_000);
+        hybrid_search(&workspace, &log, None, &SearchOptions::default()).unwrap();
+    }
+
+    #[test]
+    #[serial]
     fn hybrid_search_handles_blank_query_gracefully() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -11751,6 +11924,116 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
+    fn low_authority_files_answer_when_nothing_better_matched() {
+        // Data files are below every static floor. They must not be filtered to
+        // an empty result, however deep they are, while a generated or vendored
+        // file that matched beside them stays out.
+        let limits = make_chunk_with_path("limits", "infra/limits.json", "memory limit");
+        let chart = make_chunk_with_path("chart", "a/b/c/d/e/f/values.yaml", "memory limit");
+        let vendored = make_chunk_with_path("vendored", "vendor/limits.rs", "memory limit");
+        let ranked = make_ranked_with_chunks(&[
+            (vendored.clone(), 0.9, &["lexical"]),
+            (chart, 0.8, &["lexical"]),
+            (limits, 0.8, &["lexical"]),
+        ]);
+        let ids = |ranked, query| {
+            filter_meaningful_scores(ranked, query)
+                .into_iter()
+                .map(|(chunk, _, _)| chunk.chunk_id)
+                .collect::<Vec<_>>()
+        };
+        let query = "memory limit per namespace";
+        assert_eq!(ids(ranked, query), ["chart", "limits"]);
+        let ranked = make_ranked_with_chunks(&[(vendored, 0.9, &["lexical"])]);
+        assert_eq!(ids(ranked, query), ["vendored"]);
+    }
+
+    #[test]
+    fn identifier_lookup_reaches_the_only_definition_in_a_low_authority_tree() {
+        let definition = make_chunk_with_path(
+            "definition",
+            "src/build/planner.rs",
+            "struct CrimsonPlanner;",
+        );
+        let usage = make_chunk_with_path("usage", "src/main.rs", "CrimsonPlanner::new()");
+        let copy = make_chunk_with_path("copy", "_vendor/planner.rs", "struct CrimsonPlanner;");
+        let source = make_chunk_with_path("source", "src/planner.rs", "struct CrimsonPlanner;");
+        let script = make_chunk_with_path("script", "vendor/bin/crimsonplanner", "run");
+        let exact: &[&str] = &["exact-symbol", "literal", "lexical"];
+        let ids = |ranked: &[(IndexedChunk, f32, &[&str])], query| {
+            let filtered = filter_meaningful_scores(make_ranked_with_chunks(ranked), query);
+            assert!(
+                filtered.is_sorted_by(|left, right| left.1 > right.1),
+                "{query}: {filtered:?}"
+            );
+            filtered
+                .into_iter()
+                .map(|(chunk, _, _)| chunk.chunk_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(
+                &[
+                    (definition.clone(), 0.9, exact),
+                    (usage.clone(), 0.5, &["literal", "lexical"]),
+                ],
+                "CrimsonPlanner"
+            ),
+            ["usage", "definition"],
+            "a vendored definition must follow the files that use it"
+        );
+        assert_eq!(
+            ids(
+                &[
+                    (source.clone(), 0.9, exact),
+                    (usage.clone(), 0.8, &["literal"]),
+                    (script, 0.6, &["path"]),
+                    (copy.clone(), 0.5, exact)
+                ],
+                "CrimsonPlanner"
+            ),
+            ["source", "usage"],
+            "vendored files must stay hidden beside the source"
+        );
+        let vendored = (0..6)
+            .map(|index| {
+                let path = format!("vendor/pkg{index}/planner.rs");
+                make_chunk_with_path(&path, &path, "struct CrimsonPlanner;")
+            })
+            .collect::<Vec<_>>();
+        let mut ranked = vec![(usage, 0.9, ["literal"].as_slice())];
+        ranked.extend(vendored.into_iter().map(|chunk| (chunk, 0.8, exact)));
+        assert_eq!(
+            ids(&ranked, "CrimsonPlanner").len(),
+            1 + MAX_LOW_AUTHORITY_MATCHES
+        );
+
+        let mention = make_chunk_with_path("mention", "src/plan.rs", "src build planner rs");
+        assert_eq!(
+            ids(
+                &[
+                    (definition.clone(), 0.9, &["path", "lexical"]),
+                    (mention, 0.8, &["literal", "lexical"]),
+                ],
+                "src/build/planner.rs"
+            ),
+            ["mention", "definition"]
+        );
+        assert_eq!(
+            ids(
+                &[
+                    (copy, 0.9, exact),
+                    (definition, 0.8, &["path", "lexical"]),
+                    (source, 0.7, &["path", "lexical"]),
+                ],
+                "planner.rs"
+            ),
+            ["source"],
+            "a file above the floor with the same name hides the others"
+        );
+    }
+
+    #[test]
     fn filter_keeps_doc_literal_when_nothing_more_authoritative_matched() {
         // A corpus of notes, or a question only notes answer, has no
         // implementation files to prefer. Returning nothing hides a real
@@ -12375,6 +12658,34 @@ export function registerCommands(p: Plugin) {
             file_authority_score(&src_bctx) > file_authority_score(&vendor_bctx),
             "src should rank above vendor"
         );
+    }
+
+    #[test]
+    fn vendored_and_build_trees_are_whole_directory_names() {
+        for path in [
+            "vendor/dep/lib.rs",
+            "src/pip/_vendor/requests/api.py",
+            "web/node_modules/pkg/index.js",
+            "target/debug/out.rs",
+            "pkg/dist/bundle.js",
+            "build/out.js",
+            "docs/_build/conf.py",
+            ".build/checkouts/nio/channel.swift",
+            "cmake-build/probe.c",
+            "cmake-build-debug/probe.c",
+        ] {
+            assert_eq!(file_authority_score_for_path(path), 0.2, "{path}");
+        }
+        for path in [
+            "internal/js/esbuild/batch.go",
+            "src/rebuild/mod.rs",
+            "src/retarget/mod.rs",
+            "src/image-build/mod.rs",
+            "src/git/mod.rs",
+            "src/build",
+        ] {
+            assert_eq!(file_authority_score_for_path(path), 1.0, "{path}");
+        }
     }
 
     #[test]

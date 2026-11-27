@@ -132,7 +132,14 @@ the parent, which tracks them and has always indexed their sources: a path
 listed in the root `.gitmodules`, or a `.git` file pointing into the `modules`
 directory of the workspace's own Git directory, where Git keeps absorbed
 submodules. A workspace root that is not a Git checkout keeps everything below
-it, so a plain directory of clones still indexes as one workspace. The
+it, so a plain directory of clones still indexes as one workspace. A search or
+context request for a path below an indexed plain directory uses that index with
+a path scope. The path keeps a workspace of its own when it is in a Git checkout,
+has its own index, or is excluded by ignore rules. It also keeps one while the
+outer index needs a rebuild, so that a search of the path does not start that
+rebuild. The same applies when the path has indexable files and the outer index
+has no file below it yet. An index of the home directory, a directory above it, or
+the filesystem root is never used for a path below it. The
 recursive watch still covers nested checkouts; their events are dropped by the
 filter, except for the `.git` entry itself. When a directory whose files are in
 the index gets a `.git` entry (`git init`, or a clone into it), the watcher
@@ -385,7 +392,9 @@ availability.
 A hybrid query whose letters and digits are all non-ASCII, such as CJK or
 Cyrillic text, has none of the ASCII code tokens that lexical, path, and hash
 signals use. Unless neural retrieval is forced, it runs exact substring
-matching, the only pass that can find it.
+matching, the only pass that can find it. Files rank by matching lines. Each
+file within the limit gets one hit, and the rest of the limit goes to further
+hits of the first files.
 
 `src/search_execution.rs` coordinates applicable retrieval passes:
 
@@ -394,7 +403,8 @@ matching, the only pass that can find it.
 - exact and inferred symbol candidates
 - lightweight hash-vector ANN
 - neural ANN when routing requests it and compatible vectors exist
-- bounded memory probes for qualifying note-heavy implicit questions
+- bounded memory probes for qualifying note-heavy implicit questions, except
+  Boolean requests
 
 Neural retrieval is conditional, and lexical results remain available while
 neural vectors are incomplete. Identifier, path, and short literal routes skip
@@ -437,8 +447,13 @@ Explicit Boolean requests are parsed before expansion. All retrieval signals
 are restricted to a request-local pool of raw-query matches bounded by the
 normal lexical candidate budget. Semantic scoring ranks only keys in that pool;
 it cannot introduce an otherwise similar document that violates the constraint.
-Unsupported structured queries, including phrases requiring unindexed positions,
-fail explicitly when the request is a one-line lookup. Quoted or escaped operator
+Unsupported structured queries, including phrases requiring unindexed positions
+and groups or `NOT` nested more than six levels, fail explicitly when the request
+is a one-line lookup. Every level adds recursion, and nested conjunctions double
+the search work with every level. An unquoted operand that
+the code tokenizer splits, such as `url_for`, is not a phrase: the index query
+asks for its tokens, and the chunk text or path must contain them next to each
+other. Rejected chunks do not use up the pool. Quoted or escaped operator
 words and ordinary natural-language input keep their existing expansion behavior.
 A context task is prose: when its search fails, the pack searches again with
 lowercase operator words.
@@ -1178,6 +1193,8 @@ older protocol (for example a development build with the same build version)
 gets a structured version error from the `Version` probe and restarts it.
 
 Version 10 added file-oriented literal results. Version 11 adds the `hash_only` search option. An older client that omits it keeps automatic model selection. A hash-only request uses hash vectors even if the daemon has a neural model loaded, and it can request only hash vectors from the background queue.
+
+The acknowledgement of an `Index` request can carry the indexing summary in an optional `summary` field. Older clients ignore it, so it did not change the version.
 
 Version 12 adds `file_name_only` to regex search. The daemon counts matching lines per file and returns ranked files without previews. Older clients omit this field and receive line hits. MCP literal searches request `files_with_previews` to rank files by all matching lines and bound the previews returned for each selected file. Web literal searches do the same. Earlier literal output modes retain their behavior.
 
