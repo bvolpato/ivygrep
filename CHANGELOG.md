@@ -66,6 +66,10 @@ All notable changes to ivygrep are documented in this file.
 - R, PowerShell, and Clojure functions are found by name. The index recorded `function` for an R function and `Get` for `Get-Stock`.
 - A byte-order mark at the start of a file no longer hides the definition on the first line in languages without a grammar, and in Elixir.
 - A source file of unmatched punctuation no longer takes minutes to index.
+- MCP `ig_search` no longer builds an index of the home directory, a directory that contains it, or the filesystem root. It also does not add ignored files to such an index. It returns an error that asks for a project path and names the `ig --add` command that builds the index on purpose. A healthy index of such a directory is searched as before.
+- MCP regex search with `file_name_only` counts matching lines per file. One file with many matches no longer hides the other files.
+- The text of an MCP search result names the searched scope. A search of one folder no longer reads as if the whole workspace had no match.
+- MCP accepts integer arguments with a zero fraction, such as `8000.0`, as the tool schema does.
 - `--wait-for-enhancement` reports a failed neural worker and exits. Without a model, for example offline, it started a new worker without end and never returned.
 - `ig --rm PATH` removes the index of a directory that no longer exists, that a newer Git root contains, or that was renamed. It fails when PATH has no saved index. The index of a deleted directory, such as a removed Git worktree, no longer blocks an index of the directory above it.
 - A search, context, or MCP request for a path below an indexed plain directory uses that index with a path scope. It built a second index, and `ig --add` of the directory then failed. A second index is still built for an ignored directory, for a directory that the outer index does not have yet, while the outer index needs a rebuild, and below an index of the home directory or the filesystem root.

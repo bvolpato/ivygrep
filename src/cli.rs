@@ -3142,15 +3142,43 @@ fn adds_ignored_files(workspace: &Workspace, skip_gitignore: bool) -> bool {
     skip_gitignore && !workspace_index_matches_skip_gitignore(workspace, true)
 }
 
+/// The kind of broad directory `root` is, if this request builds its index or
+/// adds ignored files to it.
+fn pending_broad_build(
+    root: &Path,
+    force: bool,
+    skip_gitignore: bool,
+) -> Result<Option<BroadRoot>> {
+    let Some(broad) = current_broad_root(root) else {
+        return Ok(None);
+    };
+    let workspace = Workspace::resolve_registered(root)?;
+    let builds = force
+        || adds_ignored_files(&workspace, skip_gitignore)
+        || !workspace_is_indexed(&workspace);
+    Ok(builds.then_some(broad))
+}
+
 fn confirm_broad_build(root: &Path, force: bool, skip_gitignore: bool) -> Result<()> {
-    if current_broad_root(root).is_some() {
-        let workspace = Workspace::resolve_registered(root)?;
-        if force
-            || adds_ignored_files(&workspace, skip_gitignore)
-            || !workspace_is_indexed(&workspace)
-        {
-            confirm_broad_index(root, false)?;
-        }
+    if pending_broad_build(root, force, skip_gitignore)?.is_some() {
+        confirm_broad_index(root, false)?;
+    }
+    Ok(())
+}
+
+/// [`confirm_broad_build`] for an MCP request, which cannot ask the user.
+pub(crate) fn refuse_broad_build(root: &Path, skip_gitignore: bool) -> Result<()> {
+    if let Some(broad) = pending_broad_build(root, false, skip_gitignore)? {
+        let flag = if skip_gitignore {
+            " --skip-gitignore"
+        } else {
+            ""
+        };
+        bail!(
+            "did not index {root}: it is {}. Pass the absolute path of a project as `path`. To index this directory on purpose, the user can run `ig --add {root}{flag} --yes`.",
+            broad.describe(),
+            root = root.display(),
+        );
     }
     Ok(())
 }
